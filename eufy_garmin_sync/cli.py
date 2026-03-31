@@ -322,6 +322,8 @@ def main() -> None:
         level=getattr(logging, config.log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Suppress noisy HTTP request logs from httpx
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     logger = logging.getLogger("eufy_garmin_sync")
 
     _check_for_updates()
