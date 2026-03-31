@@ -7,7 +7,7 @@ name = "eufy-garmin-sync"
 version = "1.0.0"
 description = "Sync Eufy smart scale body composition data to Garmin Connect"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.9"
 keywords = [
     "garmin",
