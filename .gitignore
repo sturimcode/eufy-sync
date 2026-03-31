@@ -1,0 +1,10 @@
+config.yaml
+.env
+state.db
+__pycache__/
+*.pyc
+.garminconnect/
+garmin_tokens/
+.garmin_tokens/
+.venv/
+venv/
