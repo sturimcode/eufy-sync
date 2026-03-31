@@ -6,5 +6,7 @@ __pycache__/
 .garminconnect/
 garmin_tokens/
 .garmin_tokens/
+.garmin-sync/
 .venv/
 venv/
+*.egg-info/
