@@ -129,7 +129,13 @@ class EufyClient:
         )
 
         # If token was rejected, clear cache and re-login
-        if resp.status_code in (401, 403) or (resp.json().get("res_code") not in (1, None)):
+        needs_reauth = resp.status_code in (401, 403)
+        if not needs_reauth and resp.status_code == 200:
+            try:
+                needs_reauth = resp.json().get("res_code") not in (1, None)
+            except Exception:
+                pass
+        if needs_reauth:
             logger.warning("Eufy token rejected, re-authenticating...")
             self._clear_cached_token()
             self._fresh_login()
