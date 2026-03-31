@@ -7,20 +7,16 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>-c</string>
-        <string>~/eufy-garmin-sync/eufy-sync --headless</string>
+        <string>/Users/elias.sturim/.local/bin/eufy-sync</string>
+        <string>--headless</string>
     </array>
 
-    <!-- Run every 4 hours -->
     <key>StartInterval</key>
     <integer>14400</integer>
 
-    <!-- Also run at login / load -->
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- Log output for debugging -->
     <key>StandardOutPath</key>
     <string>/tmp/eufy-garmin-sync.log</string>
     <key>StandardErrorPath</key>

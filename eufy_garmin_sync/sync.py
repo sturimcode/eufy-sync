@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 import subprocess
 import sys
 import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,51 +24,49 @@ UPDATE_CHECK_INTERVAL = 604800  # check once per week
 
 
 def _check_for_updates() -> None:
-    """Print a message if a newer version is available on GitHub."""
+    """Check PyPI for a newer version and notify the user."""
     try:
         cache_file = Path.home() / ".garmin-sync" / "update_check"
         now = time.time()
 
-        # Only check once per day
         if cache_file.exists():
             last_check = float(cache_file.read_text().strip())
             if now - last_check < UPDATE_CHECK_INTERVAL:
                 return
 
-        # Fetch latest remote commit
-        project_dir = Path(__file__).parent.parent
-        result = subprocess.run(
-            ["git", "-C", str(project_dir), "fetch", "origin", "main", "--quiet"],
-            capture_output=True, timeout=10,
+        req = urllib.request.Request(
+            "https://pypi.org/pypi/eufy-garmin-sync/json",
+            headers={"Accept": "application/json"},
         )
-        if result.returncode != 0:
-            return
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read(1_000_000))
 
-        local = subprocess.run(
-            ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.strip()
+        latest = data["info"]["version"]
 
-        remote = subprocess.run(
-            ["git", "-C", str(project_dir), "rev-parse", "origin/main"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.strip()
+        from eufy_garmin_sync import __version__
 
-        # Save check timestamp
+        # Save check timestamp only after a successful version read
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         cache_file.write_text(str(now))
 
-        if local != remote:
-            if sys.stdin.isatty():
-                answer = input("Update available. Install now? [y/N] ").strip()
-                if answer.lower() == "y":
-                    project_dir = Path(__file__).parent.parent
-                    subprocess.run(
-                        [str(project_dir / "setup.sh"), "--update"],
-                        cwd=str(project_dir),
-                    )
-            else:
-                _notify("eufy-garmin-sync", "Update available. Run: ./setup.sh --update")
+        # Compare as tuples to handle multi-digit segments (1.10.0 > 1.9.0)
+        def _parse(v: str) -> tuple:
+            if not v or len(v) > 64:
+                raise ValueError(f"Implausible version string: {v!r}")
+            return tuple(int(x) for x in v.split("."))
+
+        if _parse(latest) <= _parse(__version__):
+            return
+
+        # Suggest pipx if available, otherwise pip
+        upgrade_cmd = ("pipx upgrade eufy-garmin-sync"
+                       if shutil.which("pipx")
+                       else "pip install --upgrade eufy-garmin-sync")
+
+        if sys.stdin.isatty():
+            print(f"Update available: v{latest} (you have v{__version__}). Run: {upgrade_cmd}")
+        else:
+            _notify("eufy-sync", f"Update available: v{latest}. Run: {upgrade_cmd}")
 
     except Exception:
         pass  # never let update check break a sync
