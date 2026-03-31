@@ -2,18 +2,10 @@ sync_interval_minutes: 15
 log_level: INFO
 
 users:
-  - name: "elias"
+  - name: "user1"
     eufy:
-      email: "elias@example.com"
-      password: "${EUFY_PASSWORD_ELIAS}"
+      email: "you@example.com"
+      password: "${EUFY_PASSWORD}"
     garmin:
-      email: "elias@example.com"
-      password: "${GARMIN_PASSWORD_ELIAS}"
-
-  # - name: "roommate"
-  #   eufy:
-  #     email: "roommate@example.com"
-  #     password: "${EUFY_PASSWORD_ROOMMATE}"
-  #   garmin:
-  #     email: "roommate@example.com"
-  #     password: "${GARMIN_PASSWORD_ROOMMATE}"
+      email: "you@example.com"
+      password: "${GARMIN_PASSWORD}"
