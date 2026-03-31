@@ -23,9 +23,10 @@ This project gets around it with Playwright. On first run, a real Chromium windo
 
 You need Python 3.9+, a Eufy scale with cloud sync, and a Garmin Connect account.
 
-**Option A - pip (recommended):**
+**Option A - pipx (recommended):**
 ```bash
-pip3 install eufy-garmin-sync
+brew install pipx       # or: pip3 install pipx
+pipx install eufy-garmin-sync
 eufy-sync
 ```
 
