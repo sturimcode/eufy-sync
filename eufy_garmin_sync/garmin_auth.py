@@ -213,7 +213,7 @@ def browser_login(email: str, password: str) -> str:
             "Garmin login failed - no service ticket captured. "
             "This usually means the login didn't complete in the browser window. "
             "Check your Garmin email/password, and watch for CAPTCHA or MFA prompts. "
-            "Run again with: python -m src.sync --reauth"
+            "Run again with: eufy-sync --reauth"
         )
 
     return captured_ticket[0]
@@ -291,7 +291,7 @@ def _refresh_di_token(token: TokenPair) -> TokenPair:
 
     raise RuntimeError(
         "Failed to refresh Garmin token. "
-        "Re-login with: python -m src.sync --reauth"
+        "Re-login with: eufy-sync --reauth"
     )
 
 
