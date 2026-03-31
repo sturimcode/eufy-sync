@@ -1,255 +1,116 @@
-# CLAUDE.md — eufy-garmin-sync
+# CLAUDE.md - eufy-garmin-sync
 
 ## What this project does
 
-A Python service that automatically syncs body composition data from a Eufy smart scale (via the EufyLife cloud API) to Garmin Connect. Runs as a scheduled job — no manual intervention after setup.
-
-## Problem
-
-Eufy smart scales sync to Apple Health, Fitbit, and Google Fit — but NOT to Garmin Connect. Users who track fitness on Garmin (cycling, running, etc.) have no way to see their body composition data alongside their activity data without manual entry. This project bridges that gap.
+A Python CLI tool (`eufy-sync`) that syncs body composition data from a Eufy smart scale to Garmin Connect. Published on PyPI as `eufy-garmin-sync`.
 
 ## Architecture
 
 ```
-Eufy Cloud API ──► eufy_client.py ──► transform.py ──► garmin_client.py ──► Garmin Connect
-(fetch history)     (auth + pull)     (filter, dedup)   (FIT file + upload)
-                                           │
-                                       state.db
-                                    (sync watermark)
+Eufy Cloud API --> eufy_client.py --> transform.py --> garmin_client.py --> Garmin Connect
+(fetch history)    (auth + pull)     (filter, dedup)   (FIT file + upload)
+                                          |
+                                   ~/.garmin-sync/
+                                   (config, tokens, state.db)
 ```
 
 ### Data flow
 
-1. Authenticate to Eufy cloud API (`home-api.eufylife.com/v1/`)
-2. Fetch body composition measurement history for the authenticated user
-3. Compare against local state DB to find new (unsynced) measurements
-4. For each new measurement: generate a Garmin-compatible FIT file with body composition data
-5. Upload FIT file to Garmin Connect via the unofficial API
-6. Record successful sync in state DB
+1. Authenticate to Eufy cloud API (`api.eufylife.com/v1/`)
+2. Fetch body composition measurements (weight as float hectograms, divide by 10 for kg)
+3. Compare against SQLite state DB to find new measurements
+4. Check Garmin for existing entries on same date (multi-machine dedup)
+5. Generate FIT binary file with body composition data
+6. Upload FIT file to Garmin Connect via `POST /upload-service/upload`
+7. Record sync in state DB
 
-### Multi-user support
+### Garmin auth (post-March 2026)
 
-Each user is a separate config entry with their own Eufy credentials + Garmin credentials. The service iterates through all configured users on each sync cycle. Eufy API returns data scoped to the authenticated account, so there's no cross-contamination.
+garth and python-garminconnect are deprecated - Garmin added Cloudflare blocking to all programmatic SSO. We use:
 
-## Key dependencies
+1. **First run**: Playwright opens real Chromium, user logs in, we intercept `serviceTicketId` from XHR
+2. **Exchange**: ticket -> DI OAuth2 tokens via `diauth.garmin.com`
+3. **Subsequent runs**: tokens auto-refresh (~1 year lifespan)
+4. **Upload**: Bearer token auth against `connectapi.garmin.com` with Android-mimicking headers
 
-### Eufy side — reverse-engineered cloud API
-
-**Auth endpoint:**
-```
-POST https://home-api.eufylife.com/v1/user/v2/email/login
-Headers: { "category": "Health", "Content-Type": "application/json" }
-Body: {
-  "client_id": "eufy-app",
-  "client_secret": "<see eufy_client.py>",
-  "email": "<email>",
-  "password": "<password>"
-}
-```
-Returns `access_token` and `refresh_token`. Token expires ~30 days — must implement refresh logic.
-
-**Device list:** `GET https://home-api.eufylife.com/v1/device/` with `token: <access_token>` header.
-
-**Measurement history:** Endpoint TBD — needs exploration. Reference repos:
-- `robbalmbra/eufy-api` (GitHub) — extracted API endpoints from APK, has Python example class
-- `m4ary/eufylife-api-hacs` — Home Assistant custom integration that successfully pulls weight, body fat %, muscle mass, BMI for multiple users via cloud API
-
-**Important:** This is an unofficial API. It could break at any time. Build defensively — log raw responses, handle auth failures gracefully, alert on repeated failures.
-
-### Garmin side — python-garminconnect
-
-**Library:** `pip install garminconnect` (v0.2.40+, actively maintained)
-
-**Key methods:**
-- `add_body_composition(timestamp, weight, percent_fat, percent_hydration, visceral_fat_mass, bone_mass, muscle_mass, basal_met, ...)` — creates a FIT file internally and uploads it. This is the preferred method.
-- `add_weigh_in(weight, unitKey, timestamp)` — simpler, weight-only alternative.
-- Auth uses `garth` library under the hood. Tokens stored in `~/.garminconnect` or configurable path. Supports email/password login with token persistence.
-
-**Important:** Also unofficial. Garmin occasionally changes their auth flow. The library handles most of this but monitor for breakage.
-
-### Metrics that map between systems
-
-| Eufy metric | Garmin FIT field | Notes |
-|---|---|---|
-| Weight (kg/lbs) | weight | Core metric |
-| Body fat % | percent_fat | |
-| Water % | percent_hydration | |
-| Muscle mass (kg) | muscle_mass | May need unit conversion |
-| Bone mass (kg) | bone_mass | |
-| Visceral fat | visceral_fat_mass | Check if index vs mass |
-| BMR (kcal) | basal_met | |
-| BMI | — | Skip — Garmin calculates from weight + height |
+Key files: `garmin_auth.py` (OAuth flow), `fit.py` (FIT binary encoder), `garmin_client.py` (upload)
 
 ## Project structure
 
 ```
 eufy-garmin-sync/
-├── src/
-│   ├── __init__.py
-│   ├── eufy_client.py       # Eufy cloud API auth + data fetching
-│   ├── garmin_client.py      # Garmin Connect auth + FIT upload
-│   ├── transform.py          # Eufy → Garmin field mapping, unit conversion, dedup
-│   ├── sync.py               # Main orchestration: fetch → transform → upload
-│   ├── state.py              # SQLite state management (sync watermarks)
-│   └── config.py             # Config loading + validation
+├── eufy_garmin_sync/
+│   ├── __init__.py          # Public API + version
+│   ├── cli.py               # CLI entry point (eufy-sync command)
+│   ├── config.py             # Config loading
+│   ├── eufy_client.py        # Eufy cloud API auth + data fetching
+│   ├── garmin_auth.py         # Playwright OAuth2 + token refresh
+│   ├── garmin_client.py       # Garmin Connect FIT upload
+│   ├── fit.py                 # FIT binary file encoder
+│   ├── state.py               # SQLite sync state
+│   ├── sync.py                # Orchestration, retry, notifications
+│   └── transform.py           # Eufy -> Garmin field mapping + validation
 ├── tests/
-│   ├── test_transform.py     # Unit tests for field mapping + dedup
-│   ├── test_eufy_client.py   # Mock API response tests
-│   └── test_sync.py          # Integration test with mocked APIs
-├── config.yaml               # User credential pairs (gitignored)
-├── config.example.yaml       # Template with placeholder values
-├── state.db                  # SQLite sync state (gitignored)
-├── requirements.txt
-├── Dockerfile
+│   ├── test_cli.py            # Config writing + permissions
+│   ├── test_eufy_client.py    # Record parsing
+│   ├── test_fit.py            # FIT encoder (magic bytes, CRC, fields)
+│   ├── test_retry.py          # Retry with backoff
+│   ├── test_sync.py           # State DB operations
+│   └── test_transform.py      # Field mapping + weight bounds
+├── .github/workflows/
+│   └── publish.yml            # PyPI publish on GitHub release
+├── pyproject.toml             # Package config + entry point
+├── eufy-sync                  # Bash wrapper for clone installs
+├── setup.sh                   # Clone-based setup/update/uninstall
+├── com.sturimcode.eufy-garmin-sync.plist  # macOS Launch Agent
+├── config.example.yaml
 ├── .env.example
-├── .gitignore
-├── CLAUDE.md                 # This file
-└── README.md
+├── README.md
+└── CLAUDE.md
 ```
 
-## Config format
+## Config
 
-```yaml
-# config.yaml
-sync_interval_minutes: 15
-log_level: INFO
+Config lives at `~/.garmin-sync/config.yaml` (created by first-run wizard). Passwords stored directly in the file (chmod 600). No env var interpolation needed for the CLI path.
 
-users:
-  - name: "elias"
-    eufy:
-      email: "elias@example.com"
-      password: "${EUFY_PASSWORD_ELIAS}"  # Env var interpolation
-    garmin:
-      email: "elias@example.com"
-      password: "${GARMIN_PASSWORD_ELIAS}"
+The `setup.sh` path still uses `.env` for backward compatibility.
 
-  - name: "roommate"
-    eufy:
-      email: "roommate@example.com"
-      password: "${EUFY_PASSWORD_ROOMMATE}"
-    garmin:
-      email: "roommate@example.com"
-      password: "${GARMIN_PASSWORD_ROOMMATE}"
+## Key technical details
+
+- **Eufy weight format**: float hectograms (e.g., `886.5` = 88.65 kg). Precision ~0.05 kg.
+- **Eufy API base**: `api.eufylife.com` (not `home-api.eufylife.com`)
+- **Eufy client_secret**: `8FHf22gaTKu7MZXqz5zytw` - public app identifier from APK, not a per-user secret
+- **Garmin DI client IDs**: public mobile app identifiers, tried in order (2025Q2, 2024Q4, base)
+- **FIT encoder**: custom implementation in `fit.py`, stdlib only (struct, io, time)
+- **Visceral fat**: maps to `visceral_fat_rating` (level), not `visceral_fat_mass` (kg)
+- **BMI**: skipped - Garmin calculates from weight + height
+- **Weight precision**: cloud API can differ from Eufy app by up to ~0.5 lbs (app may use Bluetooth/local data)
+- **Token files**: written atomically with `os.open(..., 0o600)` to prevent TOCTOU
+
+## CLI commands
+
+```
+eufy-sync                      # sync new measurements
+eufy-sync --status             # last sync time + token health
+eufy-sync --dry-run            # preview without uploading
+eufy-sync --reauth             # force Garmin browser re-login
+eufy-sync --update-password    # change stored passwords
+eufy-sync --backfill-days 30   # sync last N days
+eufy-sync --headless           # no browser popups (Launch Agent uses this)
 ```
 
-## State DB schema
+## Publishing
 
-```sql
-CREATE TABLE sync_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_name TEXT NOT NULL,
-    eufy_measurement_id TEXT NOT NULL,  -- Unique ID from Eufy API
-    measurement_timestamp TEXT NOT NULL, -- ISO 8601
-    weight_kg REAL,
-    synced_to_garmin_at TEXT NOT NULL,   -- ISO 8601
-    garmin_response TEXT,                -- Raw response for debugging
-    UNIQUE(user_name, eufy_measurement_id)
-);
+- PyPI: `eufy-garmin-sync` v1.0.2
+- Publish via GitHub Actions trusted publishing (create a release -> auto-publishes)
+- Bump version in both `pyproject.toml` and `eufy_garmin_sync/__init__.py`
 
-CREATE TABLE auth_tokens (
-    user_name TEXT PRIMARY KEY,
-    eufy_access_token TEXT,
-    eufy_refresh_token TEXT,
-    eufy_token_expires_at TEXT,
-    garmin_token_path TEXT  -- Path to garth token directory
-);
+## Running tests
+
 ```
-
-## Phased build plan
-
-### Phase 1 — Local CLI (MVP)
-- [x] Eufy client: auth + fetch measurement history
-- [x] Transform layer: map Eufy fields → Garmin fields, handle unit conversions
-- [x] Garmin client: authenticate + upload body composition via `add_body_composition()`
-- [x] State DB: track synced measurements, prevent duplicates
-- [x] CLI entry point: `python -m src.sync --config config.yaml`
-- [x] Backfill mode: `--backfill-days 30` to sync historical data on first run
-- [x] Basic logging to stdout
-- [x] **Verify end-to-end:** run sync, confirm data appears in Garmin Connect
-- **Milestone:** Run manually, see weight appear in Garmin Connect — **DONE (2026-03-31)**
-
-#### Current status (2026-03-31)
-- **Phase 1 complete.** 8 measurements synced successfully to Garmin Connect.
-- garth/python-garminconnect were deprecated March 2026 (Garmin added Cloudflare blocking to SSO). Replaced with custom Playwright-based OAuth2 flow + FIT file encoder.
-- Auth flow: Playwright browser login (one-time) -> capture serviceTicketId -> exchange for DI OAuth2 tokens -> auto-refresh (~1 year lifespan). Tokens saved to `~/.garmin-sync/session.json`.
-- FIT file upload via `POST /upload-service/upload` with custom `src/fit.py` encoder. Supports all body comp fields.
-- Eufy API base URL: `api.eufylife.com` (not `home-api.eufylife.com`). Weight in decigrams (divide by 10 for kg). Visceral fat maps to `visceral_fat_rating`, not mass.
-- System Python is 3.9.6 on work laptop - using `from __future__ import annotations`. Not an issue on 3.10+.
-- Minor display rounding in Garmin (up to 0.2 lbs) due to kg-to-lbs conversion at display time. Raw data is accurate.
-
-### Phase 2 — Cloud deployment
-- [ ] Dockerfile with slim Python image
-- [ ] Deploy to Railway or Fly.io
-- [ ] Cron-style scheduling (every 15 min)
-- [ ] Persistent volume for state.db
-- [ ] Environment variable config for credentials
-- [ ] Health check endpoint (optional — simple HTTP 200)
-- [ ] Error alerting: log failures, optionally notify via email/webhook on repeated failures
-- [ ] Multi-user: roommate's credentials added
-- **Milestone:** Fully automated, zero-touch sync for 2 users
-
-### Phase 3 — Hardening (optional)
-- [ ] Token refresh handling for Eufy (30-day expiry)
-- [ ] Retry logic with exponential backoff
-- [ ] Rate limiting awareness (Garmin is sensitive to rapid requests)
-- [ ] Metric validation (reject obviously wrong readings — e.g., weight < 50 lbs or > 400 lbs)
-- [ ] Simple web dashboard showing sync status per user
-- [ ] Prometheus-style metrics endpoint
-
-### Phase 4 — iOS app (future, separate project)
-- Would use Apple HealthKit as data source instead of Eufy cloud API
-- Cleaner distribution model — users don't share credentials
-- Different tech stack entirely (Swift/SwiftUI)
-
-## Coding conventions
-
-- **Python 3.11+** — use modern syntax (match/case, type hints, `|` union types)
-- **Type hints everywhere** — all function signatures fully typed
-- **dataclasses or pydantic** for data models (EufyMeasurement, GarminBodyComposition, SyncResult)
-- **httpx** over requests (async-ready, better timeout handling)
-- **Structured logging** with `structlog` or standard `logging` with JSON formatter
-- **No secrets in code** — all credentials via env vars or config file (gitignored)
-- **Tests with pytest** — mock external APIs, test transform logic thoroughly
-- **.env + .gitignore from day one** — never commit credentials
-
-## Security foundations
-
-- `.env` and `config.yaml` in `.gitignore` from first commit
-- No API keys or passwords in source code
-- Token storage files (garth tokens, state.db) gitignored
-- Rate limiting awareness — don't hammer either API
-- Input validation on all API responses before processing
-
-## Known risks and mitigations
-
-| Risk | Impact | Mitigation |
-|---|---|---|
-| Eufy API changes/breaks | Sync stops | Log raw responses, alert on failures, pin to known working endpoints |
-| Eufy token expires (30 days) | Auth fails | Implement refresh token flow, alert on auth failures |
-| Garmin auth flow changes | Upload fails | python-garminconnect is actively maintained, pin version, monitor releases |
-| Garmin rate limiting | Uploads rejected | Add delays between uploads, batch conservatively, exponential backoff |
-| Duplicate measurements | Double entries in Garmin | Dedup in state DB using eufy_measurement_id + timestamp |
-| Scale attributes wrong user | Wrong data synced | Eufy API scopes to authenticated user's account — each user has own credentials |
-
-## Reference repos
-
-- **Eufy API:** https://github.com/robbalmbra/eufy-api
-- **Eufy HA integration:** https://github.com/m4ary/eufylife-api-hacs
-- **Garmin Connect Python:** https://github.com/cyberjunky/python-garminconnect
-- **FIT file body comp example:** https://gist.github.com/janikvonrotz/c6faa987efef97535ed627130fdccaeb
-- **Renpho → Garmin (similar project, CSV-based):** https://github.com/eclat-shubh/Garmin-Body-Comp-Upload
-
-## Quick start for Claude Code
-
-When starting a session:
-
-1. Read this file first
-2. Check if `config.yaml` exists — if not, copy from `config.example.yaml`
-3. Check current phase progress against the build plan above
-4. When writing new code, follow the project structure and coding conventions
-5. Always run tests after making changes: `pytest tests/ -v`
-6. When exploring the Eufy API, log full responses to understand the data shape before writing parsing logic
+pytest tests/ -v
+```
 
 ## Development philosophy
 
-Clean architecture but don't over-engineer — this is a personal tool that might grow. Optimize for "works reliably" over "perfect abstractions."
+Clean architecture but don't over-engineer. Optimize for "works reliably" over "perfect abstractions."
