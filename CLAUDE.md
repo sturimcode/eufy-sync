@@ -63,20 +63,14 @@ eufy-garmin-sync/
 ├── .github/workflows/
 │   └── publish.yml            # PyPI publish on GitHub release
 ├── pyproject.toml             # Package config + entry point
-├── eufy-sync                  # Bash wrapper for clone installs
-├── setup.sh                   # Clone-based setup/update/uninstall
 ├── com.sturimcode.eufy-garmin-sync.plist  # macOS Launch Agent
-├── config.example.yaml
-├── .env.example
 ├── README.md
 └── CLAUDE.md
 ```
 
 ## Config
 
-Config lives at `~/.garmin-sync/config.yaml` (created by first-run wizard). Passwords stored directly in the file (chmod 600). No env var interpolation needed for the CLI path.
-
-The `setup.sh` path still uses `.env` for backward compatibility.
+Config lives at `~/.garmin-sync/config.yaml` (created by first-run wizard). Passwords stored directly in the file (chmod 600).
 
 ## Key technical details
 
