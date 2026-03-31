@@ -1,8 +1,9 @@
 # eufy-garmin-sync
 
-![Python](https://img.shields.io/badge/python-3.9+-blue)
+[![PyPI](https://img.shields.io/pypi/v/eufy-garmin-sync)](https://pypi.org/project/eufy-garmin-sync/)
+[![Downloads](https://img.shields.io/pypi/dm/eufy-garmin-sync)](https://pypi.org/project/eufy-garmin-sync/)
+![Python](https://img.shields.io/pypi/pyversions/eufy-garmin-sync)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Status](https://img.shields.io/badge/status-Phase%201%20Complete-brightgreen)
 
 Syncs body composition data from a Eufy smart scale to Garmin Connect. Weight, body fat %, muscle mass, bone mass, hydration, BMR, visceral fat, and metabolic age all come through.
 
