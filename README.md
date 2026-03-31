@@ -55,6 +55,7 @@ eufy-sync --dry-run          # preview without uploading
 eufy-sync --reauth           # re-login to Garmin if tokens expire
 eufy-sync --update-password  # change stored passwords
 eufy-sync --backfill-days 30 # sync last 30 days
+eufy-sync --install-agent   # set up automatic sync
 eufy-sync --uninstall-agent # remove automatic sync
 ```
 

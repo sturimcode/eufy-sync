@@ -181,16 +181,10 @@ def _generate_plist(binary_path: str) -> str:
 """
 
 
-def _offer_launch_agent() -> None:
-    """Offer to install a macOS Launch Agent after first-run setup."""
+def _install_launch_agent() -> None:
+    """Install the macOS Launch Agent for automatic sync."""
     if platform.system() != "Darwin":
-        return
-    if not sys.stdin.isatty():
-        return
-
-    print("")
-    answer = input("Set up automatic sync every 4 hours? [y/N] ").strip()
-    if not answer.lower().startswith("y"):
+        print("Auto-sync is only supported on macOS.")
         return
 
     binary = shutil.which("eufy-sync")
@@ -212,6 +206,21 @@ def _offer_launch_agent() -> None:
     )
 
     print(f"Automatic sync installed. Logs: /tmp/eufy-garmin-sync.log")
+
+
+def _offer_launch_agent() -> None:
+    """Offer to install a macOS Launch Agent after first-run setup."""
+    if platform.system() != "Darwin":
+        return
+    if not sys.stdin.isatty():
+        return
+
+    print("")
+    answer = input("Set up automatic sync every 4 hours? [y/N] ").strip()
+    if not answer.lower().startswith("y"):
+        return
+
+    _install_launch_agent()
 
 
 def _uninstall_launch_agent() -> None:
@@ -241,6 +250,7 @@ def main() -> None:
     parser.add_argument("--backfill-days", type=int, default=None, help="Sync last N days")
     parser.add_argument("--dry-run", action="store_true", help="Preview without uploading")
     parser.add_argument("--headless", action="store_true", help="No browser popups (for Launch Agent)")
+    parser.add_argument("--install-agent", action="store_true", help="Set up automatic sync (macOS Launch Agent)")
     parser.add_argument("--uninstall-agent", action="store_true", help="Remove the automatic sync Launch Agent")
     parser.add_argument("--config", type=Path, default=None, help="Config path (default: ~/.garmin-sync/config.yaml)")
     parser.add_argument("--db", type=Path, default=None, help="Database path (default: ~/.garmin-sync/state.db)")
@@ -249,7 +259,11 @@ def main() -> None:
     config_path = args.config or DEFAULT_CONFIG
     db_path = args.db or DEFAULT_DB
 
-    # Handle Launch Agent uninstall
+    # Handle Launch Agent install/uninstall
+    if args.install_agent:
+        _install_launch_agent()
+        return
+
     if args.uninstall_agent:
         _uninstall_launch_agent()
         return
