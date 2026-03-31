@@ -24,8 +24,15 @@ This project gets around it with Playwright. On first run, a real Chromium windo
 You need Python 3.9+, a Eufy scale with cloud sync, and a Garmin Connect account.
 
 **Option A - pipx (recommended):**
+
+First, install pipx if you don't have it:
 ```bash
-brew install pipx       # or: pip3 install pipx
+brew install pipx
+```
+Or if you don't use Homebrew: `pip3 install pipx`
+
+Then install and run:
+```bash
 pipx install eufy-garmin-sync
 eufy-sync
 ```
@@ -48,20 +55,16 @@ eufy-sync --dry-run          # preview without uploading
 eufy-sync --reauth           # re-login to Garmin if tokens expire
 eufy-sync --update-password  # change stored passwords
 eufy-sync --backfill-days 30 # sync last 30 days
+eufy-sync --uninstall-agent # remove automatic sync
 ```
 
 ## Automatic sync (macOS)
 
-Includes a Launch Agent that syncs every 4 hours and on login. Weigh yourself, open your laptop later, and it will automatically sync.
-
-```bash
-ln -s ~/eufy-garmin-sync/com.sturimcode.eufy-garmin-sync.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.sturimcode.eufy-garmin-sync.plist
-```
+On first run, you'll be asked if you want to sync automatically every 4 hours. If you say yes, a macOS Launch Agent is installed that runs in the background - weigh yourself, open your laptop later, and it syncs on its own.
 
 Logs go to `/tmp/eufy-garmin-sync.log`. You get a macOS notification if something fails.
 
-To stop: `launchctl unload ~/Library/LaunchAgents/com.sturimcode.eufy-garmin-sync.plist`
+To disable: `eufy-sync --uninstall-agent`
 
 ## How it works
 

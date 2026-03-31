@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import getpass
 import os
+import platform
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -15,6 +18,8 @@ import yaml
 DATA_DIR = Path.home() / ".garmin-sync"
 DEFAULT_CONFIG = DATA_DIR / "config.yaml"
 DEFAULT_DB = DATA_DIR / "state.db"
+LAUNCH_AGENT_LABEL = "com.sturimcode.eufy-garmin-sync"
+LAUNCH_AGENT_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
 
 
 def _write_config(path: Path, config: dict) -> None:
@@ -146,6 +151,83 @@ def _reauth(config_path: Path, config: dict | None = None) -> None:
     print("Done - Garmin tokens saved.")
 
 
+def _generate_plist(binary_path: str) -> str:
+    """Generate a Launch Agent plist that runs eufy-sync every 4 hours."""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{LAUNCH_AGENT_LABEL}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{binary_path}</string>
+        <string>--headless</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>14400</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/eufy-garmin-sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/eufy-garmin-sync.log</string>
+</dict>
+</plist>
+"""
+
+
+def _offer_launch_agent() -> None:
+    """Offer to install a macOS Launch Agent after first-run setup."""
+    if platform.system() != "Darwin":
+        return
+    if not sys.stdin.isatty():
+        return
+
+    print("")
+    answer = input("Set up automatic sync every 4 hours? [y/N] ").strip()
+    if not answer.lower().startswith("y"):
+        return
+
+    binary = shutil.which("eufy-sync")
+    if not binary:
+        print("Warning: could not find eufy-sync on PATH. Skipping auto-sync setup.")
+        return
+
+    LAUNCH_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LAUNCH_AGENT_PATH.write_text(_generate_plist(binary))
+
+    # Unload first in case an old version is loaded
+    subprocess.run(
+        ["launchctl", "unload", str(LAUNCH_AGENT_PATH)],
+        capture_output=True,
+    )
+    subprocess.run(
+        ["launchctl", "load", str(LAUNCH_AGENT_PATH)],
+        capture_output=True,
+    )
+
+    print(f"Automatic sync installed. Logs: /tmp/eufy-garmin-sync.log")
+
+
+def _uninstall_launch_agent() -> None:
+    """Remove the macOS Launch Agent."""
+    if not LAUNCH_AGENT_PATH.exists():
+        print("No Launch Agent installed.")
+        return
+
+    subprocess.run(
+        ["launchctl", "unload", str(LAUNCH_AGENT_PATH)],
+        capture_output=True,
+    )
+    LAUNCH_AGENT_PATH.unlink()
+    print("Launch Agent removed. Auto-sync disabled.")
+
+
 def main() -> None:
     import argparse
 
@@ -159,12 +241,18 @@ def main() -> None:
     parser.add_argument("--backfill-days", type=int, default=None, help="Sync last N days")
     parser.add_argument("--dry-run", action="store_true", help="Preview without uploading")
     parser.add_argument("--headless", action="store_true", help="No browser popups (for Launch Agent)")
+    parser.add_argument("--uninstall-agent", action="store_true", help="Remove the automatic sync Launch Agent")
     parser.add_argument("--config", type=Path, default=None, help="Config path (default: ~/.garmin-sync/config.yaml)")
     parser.add_argument("--db", type=Path, default=None, help="Database path (default: ~/.garmin-sync/state.db)")
     args = parser.parse_args()
 
     config_path = args.config or DEFAULT_CONFIG
     db_path = args.db or DEFAULT_DB
+
+    # Handle Launch Agent uninstall
+    if args.uninstall_agent:
+        _uninstall_launch_agent()
+        return
 
     # Handle password update
     if args.update_password:
@@ -259,10 +347,12 @@ def main() -> None:
 
         logger.info("Sync complete. Total measurements synced: %d", total)
 
-        if first_run and total > 0:
-            print("")
-            print(f"Synced {total} measurements to Garmin Connect.")
-            print("Check the Garmin Connect app to verify your data.")
+        if first_run:
+            if total > 0:
+                print("")
+                print(f"Synced {total} measurements to Garmin Connect.")
+                print("Check the Garmin Connect app to verify your data.")
+            _offer_launch_agent()
 
         sys.exit(1 if failures else 0)
 
