@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eufy-garmin-sync"
-version = "1.0.1"
+version = "1.0.2"
 description = "Sync Eufy smart scale body composition data to Garmin Connect"
 readme = "README.md"
 license = "MIT"
@@ -30,7 +30,6 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Topic :: Health",
 ]
 dependencies = [
     "httpx>=0.27.0",
