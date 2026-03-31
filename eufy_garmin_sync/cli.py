@@ -367,8 +367,9 @@ def main() -> None:
             if total > 0:
                 print("")
                 print(f"Synced {total} measurements to Garmin Connect.")
-                print("Check the Garmin Connect app to verify your data.")
             _offer_launch_agent()
+            print("")
+            print("You're all set! Check the Garmin Connect app to see your data.")
 
         sys.exit(1 if failures else 0)
 
