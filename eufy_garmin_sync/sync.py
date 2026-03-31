@@ -151,7 +151,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
 
             # Check Garmin for existing entry on this date (prevents duplicates across machines)
             if garmin.has_weight_on_date(m.timestamp):
-                logger.info("Garmin already has data for %s, skipping", m.timestamp.date())
+                logger.debug("Garmin already has data for %s, skipping", m.timestamp.date())
                 state.record_sync(
                     user_name=user.name,
                     measurement_id=m.measurement_id,
