@@ -25,7 +25,7 @@ You need Python 3.9+, a Eufy scale with cloud sync, and a Garmin Connect account
 
 **Option A - pip (recommended):**
 ```bash
-pip install git+https://github.com/sturimcode/eufy-garmin-sync.git
+pip3 install eufy-garmin-sync
 eufy-sync
 ```
 
