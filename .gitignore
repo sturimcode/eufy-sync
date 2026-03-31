@@ -9,3 +9,4 @@ garmin_tokens/
 .garmin-sync/
 .venv/
 venv/
+*.egg-info/
