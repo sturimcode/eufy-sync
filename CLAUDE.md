@@ -41,22 +41,25 @@ Key files: `garmin_auth.py` (OAuth flow), `fit.py` (FIT binary encoder), `garmin
 eufy-garmin-sync/
 ├── eufy_garmin_sync/
 │   ├── __init__.py          # Public API + version
-│   ├── cli.py               # CLI entry point (eufy-sync command)
+│   ├── cli.py               # CLI entry point, update checker, notifications, status display
 │   ├── config.py             # Config loading
 │   ├── eufy_client.py        # Eufy cloud API auth + data fetching
-│   ├── garmin_auth.py         # Playwright OAuth2 + token refresh
+│   ├── garmin_auth.py         # Playwright OAuth2 + token refresh + token_status()
 │   ├── garmin_client.py       # Garmin Connect FIT upload
 │   ├── fit.py                 # FIT binary file encoder
 │   ├── state.py               # SQLite sync state
-│   ├── sync.py                # Orchestration, retry, notifications
+│   ├── sync.py                # Core sync logic (sync_user, retry)
 │   └── transform.py           # Eufy -> Garmin field mapping + validation
 ├── tests/
-│   ├── test_cli.py            # Config writing + permissions
+│   ├── test_cli.py            # Config writing + permissions + Launch Agent
 │   ├── test_eufy_client.py    # Record parsing
 │   ├── test_fit.py            # FIT encoder (magic bytes, CRC, fields)
+│   ├── test_garmin_auth.py    # token_status() states
 │   ├── test_retry.py          # Retry with backoff
+│   ├── test_summary.py        # One-line sync summary formatting
 │   ├── test_sync.py           # State DB operations
-│   └── test_transform.py      # Field mapping + weight bounds
+│   ├── test_transform.py      # Field mapping + weight bounds
+│   └── test_update_check.py   # PyPI version check + cache behavior
 ├── .github/workflows/
 │   └── publish.yml            # PyPI publish on GitHub release
 ├── pyproject.toml             # Package config + entry point
@@ -102,7 +105,7 @@ eufy-sync --headless           # no browser popups (Launch Agent uses this)
 
 ## Publishing
 
-- PyPI: `eufy-garmin-sync` v1.1.2
+- PyPI: `eufy-garmin-sync` v1.2.0
 - Publish via GitHub Actions trusted publishing (create a release -> auto-publishes)
 - Bump version in both `pyproject.toml` and `eufy_garmin_sync/__init__.py`
 
