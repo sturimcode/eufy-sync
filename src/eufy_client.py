@@ -101,12 +101,13 @@ class EufyClient:
 
     def _save_token(self, expires_in: int) -> None:
         self.token_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.token_path.write_text(json.dumps({
-            "access_token": self.access_token,
-            "user_id": self.user_id,
-            "expires_at": time.time() + expires_in,
-        }))
-        os.chmod(self.token_path, 0o600)
+        fd = os.open(str(self.token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({
+                "access_token": self.access_token,
+                "user_id": self.user_id,
+                "expires_at": time.time() + expires_in,
+            }, f)
 
     def _clear_cached_token(self) -> None:
         if self.token_path.exists():

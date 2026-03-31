@@ -36,17 +36,15 @@ The setup script walks you through everything:
 
 After install, your data should show up in Garmin Connect within a minute.
 
-## Manual usage
-
-If you need to run a sync manually or check on things:
+## Usage
 
 ```bash
-cd ~/eufy-garmin-sync && source .venv/bin/activate && set -a && source .env && set +a
-
-python -m src.sync --config config.yaml              # sync new measurements
-python -m src.sync --config config.yaml --status      # check last sync + token health
-python -m src.sync --config config.yaml --dry-run     # preview without uploading
-python -m src.sync --config config.yaml --reauth      # re-login to Garmin if tokens expire
+./eufy-sync                    # sync new measurements
+./eufy-sync --status           # check last sync + token health
+./eufy-sync --dry-run          # preview without uploading
+./eufy-sync --reauth           # re-login to Garmin if tokens expire
+./eufy-sync --update-password  # change stored passwords
+./eufy-sync --backfill-days 30 # sync last 30 days
 ```
 
 ## Automatic sync (macOS)
@@ -78,22 +76,9 @@ Eufy Cloud API --> eufy_client.py --> transform.py --> garmin_client.py --> Garm
 4. Generate a FIT binary file for each new measurement
 5. Upload to Garmin Connect, record in DB
 
-## CLI options
-
-| Flag | Description |
-|---|---|
-| `--config` | Path to config file (default: `config.yaml`) |
-| `--backfill-days N` | Sync measurements from the last N days |
-| `--db` | Path to state database (default: `state.db`) |
-| `--status` | Show last sync time and Garmin token health |
-| `--dry-run` | Preview what would sync without uploading |
-| `--reauth` | Force Garmin browser re-login (if tokens expire) |
-
 ## Security
 
-Your Eufy and Garmin passwords are stored locally in `.env` (file permissions `600` - only your user can read it). They are only sent to Eufy and Garmin's own servers over HTTPS. They are never logged, uploaded, or transmitted anywhere else. You can verify this yourself - the codebase is small and the only outbound calls are in `eufy_client.py` and `garmin_auth.py`.
-
-Garmin OAuth tokens are saved to `~/.garmin-sync/session.json` (also `600` permissions). 
+Your credentials and tokens are stored in `~/.garmin-sync/` with `600` permissions (only your user can read). They are only sent to Eufy and Garmin's own servers over HTTPS. They are never logged, uploaded, or transmitted anywhere else. You can verify this yourself - the codebase is small and the only outbound calls are in `eufy_client.py` and `garmin_auth.py`.
 
 If your machine is compromised, these tokens could be used to access your Garmin account - but that's true of any saved login.
 

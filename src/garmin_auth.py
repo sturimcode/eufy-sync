@@ -375,6 +375,7 @@ class GarminAuth:
 
     def _save_session(self) -> None:
         self.session_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.session_path.write_text(json.dumps(self.session.to_dict(), indent=2))
-        os.chmod(self.session_path, 0o600)
+        fd = os.open(str(self.session_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(self.session.to_dict(), indent=2))
         logger.info("Saved Garmin session to %s", self.session_path)
