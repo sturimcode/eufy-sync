@@ -23,8 +23,6 @@ This project gets around it with Playwright. On first run, a real Chromium windo
 
 You need Python 3.9+, a Eufy scale with cloud sync, and a Garmin Connect account.
 
-**Option A - pipx (recommended):**
-
 First, install pipx if you don't have it:
 ```bash
 brew install pipx
@@ -37,14 +35,9 @@ pipx install eufy-garmin-sync
 eufy-sync
 ```
 
-**Option B - clone and run:**
-```bash
-git clone https://github.com/sturimcode/eufy-garmin-sync.git
-cd eufy-garmin-sync
-./setup.sh
-```
+Setup is guided on first run - enter your credentials, log into Garmin in the browser that opens, and your data syncs automatically.
 
-Both options walk you through setup on first run - enter your credentials, log into Garmin in the browser that opens, and your data syncs automatically.
+> **Note:** If you've cloned this repo, run pipx commands from outside the repo directory to avoid path conflicts (e.g., `cd /tmp && pipx install eufy-garmin-sync`).
 
 ## Usage
 
