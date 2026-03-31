@@ -8,12 +8,6 @@ A Python service that automatically syncs body composition data from a Eufy smar
 
 Eufy smart scales sync to Apple Health, Fitbit, and Google Fit — but NOT to Garmin Connect. Users who track fitness on Garmin (cycling, running, etc.) have no way to see their body composition data alongside their activity data without manual entry. This project bridges that gap.
 
-## Users
-
-- **Primary:** Me (Elias). I weigh ~190 lbs, track cycling/lifting in Garmin, and want weight + body composition to flow automatically into Garmin Connect so it reflects in training metrics (power-to-weight, VO2max estimates, etc.).
-- **Secondary:** My roommate, who also uses the same Eufy scale with their own Eufy account. The scale auto-identifies users.
-- **Future:** Potentially other people if this evolves into a shared tool or iOS app.
-
 ## Architecture
 
 ```
@@ -47,7 +41,7 @@ POST https://home-api.eufylife.com/v1/user/v2/email/login
 Headers: { "category": "Health", "Content-Type": "application/json" }
 Body: {
   "client_id": "eufy-app",
-  "client_secret": "8FHf22gaTKu7MZXqz5zytw",
+  "client_secret": "<see eufy_client.py>",
   "email": "<email>",
   "password": "<password>"
 }
@@ -164,14 +158,24 @@ CREATE TABLE auth_tokens (
 ## Phased build plan
 
 ### Phase 1 — Local CLI (MVP)
-- [ ] Eufy client: auth + fetch measurement history
-- [ ] Transform layer: map Eufy fields → Garmin fields, handle unit conversions
-- [ ] Garmin client: authenticate + upload body composition via `add_body_composition()`
-- [ ] State DB: track synced measurements, prevent duplicates
-- [ ] CLI entry point: `python -m src.sync --config config.yaml`
-- [ ] Backfill mode: `--backfill-days 30` to sync historical data on first run
-- [ ] Basic logging to stdout
-- **Milestone:** Run manually, see weight appear in Garmin Connect
+- [x] Eufy client: auth + fetch measurement history
+- [x] Transform layer: map Eufy fields → Garmin fields, handle unit conversions
+- [x] Garmin client: authenticate + upload body composition via `add_body_composition()`
+- [x] State DB: track synced measurements, prevent duplicates
+- [x] CLI entry point: `python -m src.sync --config config.yaml`
+- [x] Backfill mode: `--backfill-days 30` to sync historical data on first run
+- [x] Basic logging to stdout
+- [x] **Verify end-to-end:** run sync, confirm data appears in Garmin Connect
+- **Milestone:** Run manually, see weight appear in Garmin Connect — **DONE (2026-03-31)**
+
+#### Current status (2026-03-31)
+- **Phase 1 complete.** 8 measurements synced successfully to Garmin Connect.
+- garth/python-garminconnect were deprecated March 2026 (Garmin added Cloudflare blocking to SSO). Replaced with custom Playwright-based OAuth2 flow + FIT file encoder.
+- Auth flow: Playwright browser login (one-time) -> capture serviceTicketId -> exchange for DI OAuth2 tokens -> auto-refresh (~1 year lifespan). Tokens saved to `~/.garmin-sync/session.json`.
+- FIT file upload via `POST /upload-service/upload` with custom `src/fit.py` encoder. Supports all body comp fields.
+- Eufy API base URL: `api.eufylife.com` (not `home-api.eufylife.com`). Weight in decigrams (divide by 10 for kg). Visceral fat maps to `visceral_fat_rating`, not mass.
+- System Python is 3.9.6 on work laptop - using `from __future__ import annotations`. Not an issue on 3.10+.
+- Minor display rounding in Garmin (up to 0.2 lbs) due to kg-to-lbs conversion at display time. Raw data is accurate.
 
 ### Phase 2 — Cloud deployment
 - [ ] Dockerfile with slim Python image
@@ -246,6 +250,6 @@ When starting a session:
 5. Always run tests after making changes: `pytest tests/ -v`
 6. When exploring the Eufy API, log full responses to understand the data shape before writing parsing logic
 
-## Context about the developer
+## Development philosophy
 
-I'm a PM who codes. I'm comfortable with Python, SQL, and CLI tools. I use Claude Code as my primary development environment. I care about clean architecture but don't over-engineer — this is a personal tool that might grow. Optimize for "works reliably" over "perfect abstractions." Ship phase 1 fast, harden later.
+Clean architecture but don't over-engineer — this is a personal tool that might grow. Optimize for "works reliably" over "perfect abstractions."

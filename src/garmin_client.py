@@ -1,42 +1,64 @@
+"""Garmin Connect client for uploading body composition data.
+
+Uses FIT file upload with OAuth2 bearer tokens from garmin_auth,
+bypassing the deprecated garth/python-garminconnect libraries.
+"""
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from datetime import datetime, timedelta
 
-from garminconnect import Garmin
+import httpx
 
 from src.config import GarminConfig
+from src.fit import FitEncoder
+from src.garmin_auth import API_HEADERS, GarminAuth
 from src.transform import GarminBodyComposition
 
 logger = logging.getLogger(__name__)
 
+CONNECT_API = "https://connectapi.garmin.com"
+UPLOAD_URL = f"{CONNECT_API}/upload-service/upload"
+WEIGHT_URL = f"{CONNECT_API}/weight-service/weight/range"
+
 
 class GarminClient:
-    def __init__(self, config: GarminConfig, token_dir: Path | None = None):
+    def __init__(self, config: GarminConfig):
         self.config = config
-        self.token_dir = token_dir or Path.home() / ".garminconnect"
-        self._client: Garmin | None = None
+        self._auth = GarminAuth(config.email, config.password)
+        self._client = httpx.Client(timeout=30.0)
 
-    def authenticate(self) -> None:
-        self.token_dir.mkdir(parents=True, exist_ok=True)
-        self._client = Garmin(self.config.email, self.config.password)
+    def authenticate(self, allow_browser: bool = True) -> None:
+        token = self._auth.ensure_authenticated(allow_browser=allow_browser)
+        self._client.headers.update({
+            **API_HEADERS,
+            "authorization": f"Bearer {token}",
+        })
+        logger.info("Authenticated to Garmin Connect as %s", self.config.email)
 
-        # Try to resume from saved tokens first (avoids SSO rate limits)
-        try:
-            self._client.login(str(self.token_dir))
-            logger.info("Resumed Garmin session from saved tokens")
-        except Exception:
-            logger.info("No saved tokens or expired, doing fresh login")
-            self._client.login()
-            self._client.garth.dump(str(self.token_dir))
-            logger.info("Authenticated to Garmin Connect and saved tokens")
+    def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Make an authenticated request, refreshing token on 401."""
+        resp = self._client.request(method, url, **kwargs)
+        if resp.status_code == 401:
+            logger.info("Got 401, refreshing token")
+            token = self._auth.ensure_authenticated()
+            self._client.headers["authorization"] = f"Bearer {token}"
+            resp = self._client.request(method, url, **kwargs)
+        if resp.status_code >= 400:
+            logger.error("API error %d: %s", resp.status_code, resp.text)
+        resp.raise_for_status()
+        return resp
 
-    def upload_body_composition(self, body_comp: GarminBodyComposition) -> dict:
-        if self._client is None:
-            raise RuntimeError("Must authenticate before uploading")
+    def _build_fit_file(self, body_comp: GarminBodyComposition) -> bytes:
+        """Build a FIT binary file with body composition data."""
+        dt = datetime.fromisoformat(body_comp.timestamp)
 
-        result = self._client.add_body_composition(
-            timestamp=body_comp.timestamp,
+        encoder = FitEncoder()
+        encoder.write_file_info()
+        encoder.write_file_creator()
+        encoder.write_device_info(dt)
+        encoder.write_weight_scale(
+            dt,
             weight=body_comp.weight,
             percent_fat=body_comp.percent_fat,
             percent_hydration=body_comp.percent_hydration,
@@ -46,8 +68,35 @@ class GarminClient:
             basal_met=body_comp.basal_met,
             metabolic_age=body_comp.metabolic_age,
         )
+        encoder.finish()
+        return encoder.getvalue()
+
+    def has_weight_on_date(self, dt: datetime) -> bool:
+        """Check if Garmin already has a weight entry for a given date."""
+        date_str = dt.strftime("%Y-%m-%d")
+        try:
+            resp = self._request("GET", f"{WEIGHT_URL}/{date_str}/{date_str}")
+            data = resp.json()
+            entries = data.get("dailyWeightSummaries", data.get("dateWeightList", []))
+            return len(entries) > 0
+        except Exception:
+            # If we can't check, assume no duplicate and let the upload proceed
+            return False
+
+    def upload_body_composition(self, body_comp: GarminBodyComposition) -> dict:
+        """Upload body composition data to Garmin Connect via FIT file."""
+        fit_data = self._build_fit_file(body_comp)
+
+        resp = self._request(
+            "POST",
+            UPLOAD_URL,
+            files={"file": ("body_composition.fit", fit_data)},
+        )
         logger.info(
             "Uploaded body comp to Garmin: %.1f kg at %s",
             body_comp.weight, body_comp.timestamp,
         )
-        return result
+        return resp.json() if resp.text else {"status": resp.status_code}
+
+    def close(self) -> None:
+        self._client.close()

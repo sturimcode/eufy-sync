@@ -11,7 +11,7 @@ def test_parse_record_basic():
         "update_time": 1711900000,
         "create_time": 1711900000,
         "scale_data": {
-            "weight": 8620,  # decigrams -> 86.2 kg
+            "weight": 862,  # decigrams -> 86.2 kg
             "body_fat": 18.5,
             "muscle_mass": 45.2,
             "water": 55.3,
@@ -24,7 +24,7 @@ def test_parse_record_basic():
     }
     m = client._parse_record(record)
     assert m is not None
-    assert m.weight_kg == 862.0  # 8620 / 10
+    assert m.weight_kg == 86.2  # 862 / 10
     assert m.measurement_id == "abc123_1711900000"
     assert m.customer_id == "abc123"
     assert m.body_fat_pct == 18.5

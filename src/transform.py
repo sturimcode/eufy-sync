@@ -24,10 +24,18 @@ MIN_WEIGHT_KG = 22.7  # ~50 lbs
 MAX_WEIGHT_KG = 181.4  # ~400 lbs
 
 
+def _clamp_or_none(val: float | None, lo: float, hi: float) -> float | None:
+    """Return val if within bounds, None otherwise (bad reading)."""
+    if val is None:
+        return None
+    return val if lo <= val <= hi else None
+
+
 def transform(measurement: EufyMeasurement) -> GarminBodyComposition | None:
     """Map a Eufy measurement to Garmin body composition fields.
 
-    Returns None if the measurement fails validation.
+    Returns None if the measurement fails weight validation.
+    Other metrics are silently dropped if out of range.
     """
     if not MIN_WEIGHT_KG <= measurement.weight_kg <= MAX_WEIGHT_KG:
         return None
@@ -35,12 +43,12 @@ def transform(measurement: EufyMeasurement) -> GarminBodyComposition | None:
     return GarminBodyComposition(
         timestamp=measurement.timestamp.isoformat(),
         weight=measurement.weight_kg,
-        percent_fat=measurement.body_fat_pct,
-        percent_hydration=measurement.water_pct,
-        visceral_fat_rating=measurement.visceral_fat_level,
-        bone_mass=measurement.bone_mass_kg,
-        muscle_mass=measurement.muscle_mass_kg,
+        percent_fat=_clamp_or_none(measurement.body_fat_pct, 3.0, 60.0),
+        percent_hydration=_clamp_or_none(measurement.water_pct, 20.0, 80.0),
+        visceral_fat_rating=_clamp_or_none(measurement.visceral_fat_level, 1.0, 59.0),
+        bone_mass=_clamp_or_none(measurement.bone_mass_kg, 0.5, 10.0),
+        muscle_mass=_clamp_or_none(measurement.muscle_mass_kg, 10.0, 120.0),
         basal_met=measurement.bmr_kcal,
-        metabolic_age=measurement.metabolic_age,
+        metabolic_age=_clamp_or_none(measurement.metabolic_age, 10, 120),
         bmi=None,  # Let Garmin calculate from weight + height
     )

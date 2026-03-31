@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 
@@ -43,16 +47,24 @@ class EufyMeasurement:
 
 
 class EufyClient:
-    def __init__(self, config: EufyConfig):
+    def __init__(self, config: EufyConfig, token_path: Path | None = None):
         self.config = config
         self.access_token: str | None = None
         self.user_id: str | None = None
+        self.token_path = token_path or Path.home() / ".garmin-sync" / "eufy_token.json"
         self._client = httpx.Client(headers=COMMON_HEADERS, timeout=30.0)
 
     def authenticate(self) -> None:
+        # Try cached token first
+        if self._load_cached_token():
+            return
+
+        self._fresh_login()
+
+    def _fresh_login(self) -> None:
         resp = self._client.post(f"{BASE_URL}/user/v2/email/login", json={
             "client_id": "eufy-app",
-            "client_secret": "8FHf22gaTKu7MZXqz5zytw",
+            "client_secret": "8FHf22gaTKu7MZXqz5zytw",  # Public app identifier from EufyLife APK, not a per-user secret
             "email": self.config.email,
             "password": self.config.password,
         })
@@ -60,11 +72,46 @@ class EufyClient:
         data = resp.json()
 
         if data.get("res_code") != 1:
-            raise RuntimeError(f"Eufy auth failed: {data.get('message', 'unknown error')}")
+            msg = data.get("message", "unknown error")
+            raise RuntimeError(
+                f"Eufy login failed: {msg}. "
+                "If you changed your Eufy password, update it in .env and restart the sync."
+            )
 
         self.access_token = data["access_token"]
         self.user_id = data["user_id"]
+        expires_in = data.get("expires_in", 2592000)  # default 30 days
+        self._save_token(expires_in)
         logger.info("Authenticated to Eufy as user %s", self.user_id)
+
+    def _load_cached_token(self) -> bool:
+        if not self.token_path.exists():
+            return False
+        try:
+            data = json.loads(self.token_path.read_text())
+            if time.time() < data["expires_at"] - 3600:  # 1 hour safety margin
+                self.access_token = data["access_token"]
+                self.user_id = data["user_id"]
+                logger.info("Using cached Eufy token (expires in %d days)",
+                            int((data["expires_at"] - time.time()) / 86400))
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _save_token(self, expires_in: int) -> None:
+        self.token_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.token_path.write_text(json.dumps({
+            "access_token": self.access_token,
+            "user_id": self.user_id,
+            "expires_at": time.time() + expires_in,
+        }))
+        os.chmod(self.token_path, 0o600)
+
+    def _clear_cached_token(self) -> None:
+        if self.token_path.exists():
+            self.token_path.unlink()
+            logger.info("Cleared cached Eufy token")
 
     def fetch_measurements(self, after_timestamp: int | None = None) -> list[EufyMeasurement]:
         if not self.access_token or not self.user_id:
@@ -79,6 +126,18 @@ class EufyClient:
             params=params,
             headers={"Token": self.access_token, "Uid": self.user_id},
         )
+
+        # If token was rejected, clear cache and re-login
+        if resp.status_code in (401, 403) or (resp.json().get("res_code") not in (1, None)):
+            logger.warning("Eufy token rejected, re-authenticating...")
+            self._clear_cached_token()
+            self._fresh_login()
+            resp = self._client.get(
+                f"{BASE_URL}/device/data",
+                params=params,
+                headers={"Token": self.access_token, "Uid": self.user_id},
+            )
+
         resp.raise_for_status()
         body = resp.json()
 
