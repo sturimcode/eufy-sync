@@ -6,11 +6,15 @@ syncing, status checks, and re-authentication.
 from __future__ import annotations
 
 import getpass
+import json
 import os
 import platform
 import shutil
 import subprocess
 import sys
+import time
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -20,6 +24,72 @@ DEFAULT_CONFIG = DATA_DIR / "config.yaml"
 DEFAULT_DB = DATA_DIR / "state.db"
 LAUNCH_AGENT_LABEL = "com.sturimcode.eufy-garmin-sync"
 LAUNCH_AGENT_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
+
+UPDATE_CHECK_INTERVAL = 604800  # check once per week
+
+
+def _notify(title: str, message: str) -> None:
+    """Send a macOS notification. Fails silently on other platforms."""
+    try:
+        safe_title = json.dumps(title)
+        safe_msg = json.dumps(message)
+        subprocess.run(
+            ["osascript", "-e", f'display notification {safe_msg} with title {safe_title}'],
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
+def _check_for_updates() -> None:
+    """Check PyPI for a newer version and notify the user."""
+    try:
+        cache_file = DATA_DIR / "update_check"
+        now = time.time()
+
+        if cache_file.exists():
+            last_check = float(cache_file.read_text().strip())
+            if now - last_check < UPDATE_CHECK_INTERVAL:
+                return
+
+        req = urllib.request.Request(
+            "https://pypi.org/pypi/eufy-garmin-sync/json",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read(1_000_000))
+
+        latest = data["info"]["version"]
+
+        from eufy_garmin_sync import __version__
+
+        def _parse(v: str) -> tuple:
+            if not v or len(v) > 64:
+                raise ValueError(f"Implausible version string: {v!r}")
+            return tuple(int(x) for x in v.split("."))
+
+        latest_parsed = _parse(latest)
+        current_parsed = _parse(__version__)
+
+        # Save cache only after both version strings parse successfully
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(str(now))
+
+        if latest_parsed <= current_parsed:
+            return
+
+        upgrade_cmd = ("pipx upgrade eufy-garmin-sync"
+                       if shutil.which("pipx")
+                       else "pip install --upgrade eufy-garmin-sync")
+
+        if sys.stdin.isatty():
+            print(f"Update available: v{latest} (you have v{__version__}). Run: {upgrade_cmd}")
+        else:
+            _notify("eufy-sync", f"Update available: v{latest}. Run: {upgrade_cmd}")
+
+    except Exception:
+        pass  # never let update check break a sync
 
 
 def _write_config(path: Path, config: dict) -> None:
@@ -38,7 +108,6 @@ def _ensure_chromium() -> None:
             p.chromium.executable_path
     except Exception:
         print("Installing Chromium for Garmin login (one-time)...")
-        import subprocess
         subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
             capture_output=True,
@@ -72,7 +141,6 @@ def _first_run_setup(config_path: Path) -> None:
         sys.exit(1)
 
     config = {
-        "log_level": "INFO",
         "users": [{
             "name": "default",
             "eufy": {"email": eufy_email, "password": eufy_password},
@@ -239,8 +307,6 @@ def _uninstall_launch_agent() -> None:
 
 def _print_summary(total: int, failures: list, state, users: list) -> None:
     """Print a single-line sync summary."""
-    import time as _time
-    from datetime import datetime, timezone
     from eufy_garmin_sync.garmin_auth import GarminAuth
 
     if failures:
@@ -267,17 +333,46 @@ def _print_summary(total: int, failures: list, state, users: list) -> None:
         else:
             parts.append(f"last sync: {hours}h ago")
 
-    auth = GarminAuth(user.garmin.email, user.garmin.password)
-    session = auth._load_session()
-    if session:
-        di = session.di_token
-        if di.refresh_is_expired:
-            parts.append("Garmin token EXPIRED")
-        elif not di.is_expired:
-            days_left = int((di.refresh_expires_at - _time.time()) / 86400)
-            parts.append(f"token valid {days_left}d")
+    status = GarminAuth(user.garmin.email, user.garmin.password).token_status()
+    if status["state"] == "expired":
+        parts.append("Garmin token EXPIRED")
+    elif status["state"] == "refresh_needed":
+        parts.append(f"token refresh pending ({status['days_remaining']}d until re-login)")
+    elif status["days_remaining"] is not None:
+        parts.append(f"token valid {status['days_remaining']}d")
 
     print(" | ".join(parts))
+
+
+def _show_status(state, users: list) -> None:
+    """Print detailed sync status for all users."""
+    from eufy_garmin_sync.garmin_auth import GarminAuth
+
+    for user in users:
+        print(f"\n{'=' * 40}")
+        print(f"User: {user.name}")
+        print(f"{'=' * 40}")
+
+        # Last sync info
+        ts = state.get_latest_sync_timestamp(user.name)
+        if ts:
+            last_sync = datetime.fromtimestamp(ts, tz=timezone.utc)
+            ago = datetime.now(timezone.utc) - last_sync
+            hours = int(ago.total_seconds() / 3600)
+            print(f"Last synced measurement: {last_sync.strftime('%Y-%m-%d %H:%M UTC')} ({hours}h ago)")
+        else:
+            print("Last synced measurement: never")
+
+        # Garmin token health
+        status = GarminAuth(user.garmin.email, user.garmin.password).token_status()
+        if status["state"] == "expired":
+            print("Garmin auth: EXPIRED - browser re-login needed")
+        elif status["state"] == "refresh_needed":
+            print(f"Garmin auth: access token expired, will refresh on next sync ({status['days_remaining']}d until re-login)")
+        elif status["state"] == "valid":
+            print(f"Garmin auth: valid ({status['days_remaining']} days until re-login needed)")
+        else:
+            print("Garmin auth: no saved session - first run will open browser")
 
 
 def main() -> None:
@@ -344,33 +439,27 @@ def main() -> None:
 
     config = AppConfig(
         sync_interval_minutes=raw.get("sync_interval_minutes", 15),
-        log_level=raw.get("log_level", "INFO"),
         users=users,
     )
 
     # Handle status
     if args.status:
         from eufy_garmin_sync.state import SyncState
-        from eufy_garmin_sync.sync import show_status
         state = SyncState(db_path)
-        show_status(state, config.users)
+        _show_status(state, config.users)
         state.close()
         return
 
     # Run sync
     import logging
-    import time as _time
-    from eufy_garmin_sync.sync import _check_for_updates, _notify, sync_user
-    from eufy_garmin_sync.garmin_auth import GarminAuth
+    from eufy_garmin_sync.sync import sync_user
     from eufy_garmin_sync.state import SyncState
-    from datetime import datetime, timezone
 
     log_level = "DEBUG" if args.verbose else "WARNING"
     logging.basicConfig(
         level=getattr(logging, log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    # Suppress noisy HTTP request logs unless verbose
     if not args.verbose:
         logging.getLogger("httpx").setLevel(logging.WARNING)
     logger = logging.getLogger("eufy_garmin_sync")
@@ -418,7 +507,6 @@ def main() -> None:
             print("")
             print("You're all set! Check the Garmin Connect app to see your data.")
         elif not args.verbose:
-            # Print a clean one-line summary
             _print_summary(total, failures, state, config.users)
 
         sys.exit(1 if failures else 0)

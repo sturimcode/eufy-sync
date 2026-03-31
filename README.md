@@ -55,6 +55,7 @@ eufy-sync --dry-run          # preview without uploading
 eufy-sync --reauth           # re-login to Garmin if tokens expire
 eufy-sync --update-password  # change stored passwords
 eufy-sync --backfill-days 30 # sync last 30 days
+eufy-sync --verbose          # show detailed sync logs
 eufy-sync --install-agent   # set up automatic sync
 eufy-sync --uninstall-agent # remove automatic sync
 ```
@@ -85,7 +86,7 @@ Eufy Cloud API --> eufy_client.py --> transform.py --> garmin_client.py --> Garm
 
 ## Security
 
-Your credentials and tokens are stored in `~/.garmin-sync/` with `600` permissions (only your user can read). They are only sent to Eufy and Garmin's own servers over HTTPS. They are never logged, uploaded, or transmitted anywhere else. You can verify this yourself - the codebase is small and the only outbound calls are in `eufy_client.py` and `garmin_auth.py`.
+Your credentials and tokens are stored in `~/.garmin-sync/` with `600` permissions (only your user can read). They are only sent to Eufy and Garmin's own servers over HTTPS. They are never logged, uploaded, or transmitted anywhere else. The only other outbound call is a weekly version check to `pypi.org` (no credentials sent). You can verify this yourself - the codebase is small and the outbound calls are in `eufy_client.py`, `garmin_auth.py`, and the update checker in `cli.py`.
 
 If your machine is compromised, these tokens could be used to access your Garmin account - but that's true of any saved login.
 

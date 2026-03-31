@@ -30,7 +30,6 @@ class UserConfig:
 @dataclass
 class AppConfig:
     sync_interval_minutes: int
-    log_level: str
     users: list[UserConfig]
 
 
@@ -77,6 +76,5 @@ def load_config(path: Path) -> AppConfig:
 
     return AppConfig(
         sync_interval_minutes=raw.get("sync_interval_minutes", 15),
-        log_level=raw.get("log_level", "INFO"),
         users=users,
     )
