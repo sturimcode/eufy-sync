@@ -361,6 +361,23 @@ class GarminAuth:
         self._save_session()
         return self.session.di_token.access_token
 
+    def token_status(self) -> dict:
+        """Return token health without exposing session internals.
+
+        Returns {"state": "valid"|"refresh_needed"|"expired"|"no_session",
+                 "days_remaining": int|None}
+        """
+        session = self._load_session()
+        if session is None:
+            return {"state": "no_session", "days_remaining": None}
+        di = session.di_token
+        if di.refresh_is_expired:
+            return {"state": "expired", "days_remaining": 0}
+        days = int((di.refresh_expires_at - time.time()) / 86400)
+        if di.is_expired:
+            return {"state": "refresh_needed", "days_remaining": days}
+        return {"state": "valid", "days_remaining": days}
+
     def _load_session(self) -> GarminSession | None:
         if not self.session_path.exists():
             return None
