@@ -7,7 +7,7 @@
 
 Syncs body composition data from a Eufy smart scale to Garmin Connect. Weight, body fat %, muscle mass, bone mass, hydration, BMR, visceral fat, and metabolic age all come through.
 
-> Requires Python 3.9+ and a terminal. Setup is guided - you just answer a few prompts.
+> macOS only. Requires Python 3.9+ and a terminal. Setup is guided - you just answer a few prompts.
 
 ## The problem
 
