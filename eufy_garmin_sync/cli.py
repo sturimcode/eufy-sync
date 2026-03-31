@@ -237,6 +237,49 @@ def _uninstall_launch_agent() -> None:
     print("Launch Agent removed. Auto-sync disabled.")
 
 
+def _print_summary(total: int, failures: list, state, users: list) -> None:
+    """Print a single-line sync summary."""
+    import time as _time
+    from datetime import datetime, timezone
+    from eufy_garmin_sync.garmin_auth import GarminAuth
+
+    if failures:
+        fail_names = ", ".join(name for name, _ in failures)
+        print(f"Sync failed for: {fail_names}. Run with --verbose for details.")
+        return
+
+    if total > 0:
+        print(f"Synced {total} measurement{'s' if total != 1 else ''} to Garmin Connect.")
+        return
+
+    # No-op sync - build an informative one-liner
+    parts = ["No new measurements"]
+
+    user = users[0]
+    ts = state.get_latest_sync_timestamp(user.name)
+    if ts:
+        last_sync = datetime.fromtimestamp(ts, tz=timezone.utc)
+        ago = datetime.now(timezone.utc) - last_sync
+        days = ago.days
+        hours = int(ago.total_seconds() / 3600) % 24
+        if days > 0:
+            parts.append(f"last sync: {days}d ago")
+        else:
+            parts.append(f"last sync: {hours}h ago")
+
+    auth = GarminAuth(user.garmin.email, user.garmin.password)
+    session = auth._load_session()
+    if session:
+        di = session.di_token
+        if di.refresh_is_expired:
+            parts.append("Garmin token EXPIRED")
+        elif not di.is_expired:
+            days_left = int((di.refresh_expires_at - _time.time()) / 86400)
+            parts.append(f"token valid {days_left}d")
+
+    print(" | ".join(parts))
+
+
 def main() -> None:
     import argparse
 
@@ -250,6 +293,7 @@ def main() -> None:
     parser.add_argument("--backfill-days", type=int, default=None, help="Sync last N days")
     parser.add_argument("--dry-run", action="store_true", help="Preview without uploading")
     parser.add_argument("--headless", action="store_true", help="No browser popups (for Launch Agent)")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed sync logs")
     parser.add_argument("--install-agent", action="store_true", help="Set up automatic sync (macOS Launch Agent)")
     parser.add_argument("--uninstall-agent", action="store_true", help="Remove the automatic sync Launch Agent")
     parser.add_argument("--config", type=Path, default=None, help="Config path (default: ~/.garmin-sync/config.yaml)")
@@ -315,15 +359,20 @@ def main() -> None:
 
     # Run sync
     import logging
+    import time as _time
     from eufy_garmin_sync.sync import _check_for_updates, _notify, sync_user
+    from eufy_garmin_sync.garmin_auth import GarminAuth
     from eufy_garmin_sync.state import SyncState
+    from datetime import datetime, timezone
 
+    log_level = "DEBUG" if args.verbose else "WARNING"
     logging.basicConfig(
-        level=getattr(logging, config.log_level),
+        level=getattr(logging, log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    # Suppress noisy HTTP request logs from httpx
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # Suppress noisy HTTP request logs unless verbose
+    if not args.verbose:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
     logger = logging.getLogger("eufy_garmin_sync")
 
     _check_for_updates()
@@ -361,8 +410,6 @@ def main() -> None:
         if total > 0:
             _notify("eufy-sync", f"Synced {total} measurement{'s' if total != 1 else ''} to Garmin")
 
-        logger.info("Sync complete. Total measurements synced: %d", total)
-
         if first_run:
             if total > 0:
                 print("")
@@ -370,6 +417,9 @@ def main() -> None:
             _offer_launch_agent()
             print("")
             print("You're all set! Check the Garmin Connect app to see your data.")
+        elif not args.verbose:
+            # Print a clean one-line summary
+            _print_summary(total, failures, state, config.users)
 
         sys.exit(1 if failures else 0)
 
