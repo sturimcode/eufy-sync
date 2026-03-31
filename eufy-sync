@@ -3,4 +3,4 @@
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 source .venv/bin/activate 2>/dev/null || { echo "Run ./setup.sh first"; exit 1; }
-python -m src.cli "$@"
+python -m eufy_garmin_sync.cli "$@"

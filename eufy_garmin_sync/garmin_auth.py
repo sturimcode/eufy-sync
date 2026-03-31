@@ -341,7 +341,7 @@ class GarminAuth:
         if not allow_browser:
             raise RuntimeError(
                 "Garmin session expired (password change or token expired). "
-                "Run manually to re-authenticate: ./setup.sh --reauth"
+                "Run manually to re-authenticate: eufy-sync --reauth"
             )
 
         # Fresh browser login

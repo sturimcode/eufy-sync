@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 
-from src.state import SyncState
+from eufy_garmin_sync.state import SyncState
 
 
 def test_state_init_and_roundtrip(tmp_path: Path):

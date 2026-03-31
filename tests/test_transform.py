@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
-from src.eufy_client import EufyMeasurement
-from src.transform import MAX_WEIGHT_KG, MIN_WEIGHT_KG, transform
+from eufy_garmin_sync.eufy_client import EufyMeasurement
+from eufy_garmin_sync.transform import MAX_WEIGHT_KG, MIN_WEIGHT_KG, transform
 
 
 def _make_measurement(**overrides) -> EufyMeasurement:

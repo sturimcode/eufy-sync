@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 
-from src.config import EufyConfig
+from eufy_garmin_sync.config import EufyConfig
 
 logger = logging.getLogger(__name__)
 

@@ -1,0 +1,2 @@
+[console_scripts]
+eufy-sync = eufy_garmin_sync.cli:main

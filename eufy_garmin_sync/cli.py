@@ -25,6 +25,21 @@ def _write_config(path: Path, config: dict) -> None:
         yaml.dump(config, f, default_flow_style=False)
 
 
+def _ensure_chromium() -> None:
+    """Install Playwright Chromium if not already present."""
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            p.chromium.executable_path
+    except Exception:
+        print("Installing Chromium for Garmin login (one-time)...")
+        import subprocess
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True,
+        )
+
+
 def _first_run_setup(config_path: Path) -> None:
     """Interactive setup wizard for first-time users."""
     print("")
@@ -123,7 +138,7 @@ def _reauth(config_path: Path, config: dict | None = None) -> None:
         with open(config_path) as f:
             config = yaml.safe_load(f)
 
-    from src.garmin_auth import GarminAuth
+    from eufy_garmin_sync.garmin_auth import GarminAuth
 
     user = config["users"][0]
     auth = GarminAuth(user["garmin"]["email"], user["garmin"]["password"])
@@ -164,13 +179,14 @@ def main() -> None:
     # First-run setup if no config exists
     first_run = not config_path.exists()
     if first_run:
+        _ensure_chromium()
         _first_run_setup(config_path)
 
     # Load config
     with open(config_path) as f:
         raw = yaml.safe_load(f)
 
-    from src.config import AppConfig, EufyConfig, GarminConfig, UserConfig
+    from eufy_garmin_sync.config import AppConfig, EufyConfig, GarminConfig, UserConfig
 
     users = []
     for u in raw["users"]:
@@ -188,8 +204,8 @@ def main() -> None:
 
     # Handle status
     if args.status:
-        from src.state import SyncState
-        from src.sync import show_status
+        from eufy_garmin_sync.state import SyncState
+        from eufy_garmin_sync.sync import show_status
         state = SyncState(db_path)
         show_status(state, config.users)
         state.close()
@@ -197,8 +213,8 @@ def main() -> None:
 
     # Run sync
     import logging
-    from src.sync import _check_for_updates, _notify, sync_user
-    from src.state import SyncState
+    from eufy_garmin_sync.sync import _check_for_updates, _notify, sync_user
+    from eufy_garmin_sync.state import SyncState
 
     logging.basicConfig(
         level=getattr(logging, config.log_level),

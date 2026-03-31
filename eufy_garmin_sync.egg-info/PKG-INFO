@@ -1,3 +1,17 @@
+Metadata-Version: 2.4
+Name: eufy-garmin-sync
+Version: 1.0.0
+Summary: Sync Eufy smart scale body composition data to Garmin Connect
+License: MIT
+Project-URL: Repository, https://github.com/sturimcode/eufy-garmin-sync
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: playwright>=1.40.0
+Requires-Dist: pyyaml>=6.0
+Dynamic: license-file
+
 # eufy-garmin-sync
 
 ![Python](https://img.shields.io/badge/python-3.9+-blue)
@@ -18,34 +32,33 @@ Every Python library that talked to Garmin broke in March 2026. Garmin put Cloud
 
 This project gets around it with Playwright. On first run, a real Chromium window opens and you log in normally. OAuth2 tokens get saved locally and refresh on their own for about a year. After that first login, no browser needed - body comp data goes up as FIT files through Garmin's upload endpoint.
 
-## Install
+## Setup
 
 You need Python 3.9+, a Eufy scale with cloud sync, and a Garmin Connect account.
 
-**Option A - pip (recommended):**
-```bash
-pip install git+https://github.com/sturimcode/eufy-garmin-sync.git
-eufy-sync
-```
-
-**Option B - clone and run:**
 ```bash
 git clone https://github.com/sturimcode/eufy-garmin-sync.git
 cd eufy-garmin-sync
 ./setup.sh
 ```
 
-Both options walk you through setup on first run - enter your credentials, log into Garmin in the browser that opens, and your data syncs automatically.
+The setup script walks you through everything:
+1. Installs dependencies and downloads Chromium
+2. Asks for your Eufy and Garmin emails/passwords
+3. Runs your first sync (opens a browser for Garmin login)
+4. Asks if you want automatic sync on a schedule
+
+After install, your data should show up in Garmin Connect within a minute.
 
 ## Usage
 
 ```bash
-eufy-sync                      # sync new measurements
-eufy-sync --status           # check last sync + token health
-eufy-sync --dry-run          # preview without uploading
-eufy-sync --reauth           # re-login to Garmin if tokens expire
-eufy-sync --update-password  # change stored passwords
-eufy-sync --backfill-days 30 # sync last 30 days
+./eufy-sync                    # sync new measurements
+./eufy-sync --status           # check last sync + token health
+./eufy-sync --dry-run          # preview without uploading
+./eufy-sync --reauth           # re-login to Garmin if tokens expire
+./eufy-sync --update-password  # change stored passwords
+./eufy-sync --backfill-days 30 # sync last 30 days
 ```
 
 ## Automatic sync (macOS)

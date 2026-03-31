@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from src.eufy_client import EufyClient, EufyMeasurement
+from eufy_garmin_sync.eufy_client import EufyClient, EufyMeasurement
 
 
 def test_parse_record_basic():

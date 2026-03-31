@@ -9,12 +9,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.config import UserConfig, load_config
-from src.eufy_client import EufyClient
-from src.garmin_auth import GarminAuth
-from src.garmin_client import GarminClient
-from src.state import SyncState
-from src.transform import transform
+from eufy_garmin_sync.config import UserConfig, load_config
+from eufy_garmin_sync.eufy_client import EufyClient
+from eufy_garmin_sync.garmin_auth import GarminAuth
+from eufy_garmin_sync.garmin_client import GarminClient
+from eufy_garmin_sync.state import SyncState
+from eufy_garmin_sync.transform import transform
 
 logger = logging.getLogger("eufy_garmin_sync")
 
@@ -271,17 +271,17 @@ def main() -> None:
 
         if failures:
             # Check failure type and send appropriate notification
-            reauth_needed = any("./setup.sh --reauth" in err for _, err in failures)
+            reauth_needed = any("re-authenticate" in err for _, err in failures)
             eufy_password = any("changed your Eufy password" in err for _, err in failures)
             if reauth_needed:
                 _notify(
-                    "eufy-garmin-sync: re-login needed",
-                    "Garmin session expired. Open a terminal and run: ./setup.sh --reauth",
+                    "eufy-sync: re-login needed",
+                    "Garmin session expired. Run: eufy-sync --reauth",
                 )
             elif eufy_password:
                 _notify(
-                    "eufy-garmin-sync: Eufy login failed",
-                    "Password may have changed. Run: ./setup.sh --update-password",
+                    "eufy-sync: Eufy login failed",
+                    "Password may have changed. Run: eufy-sync --update-password",
                 )
             else:
                 fail_msg = "; ".join(f"{name}: {err[:80]}" for name, err in failures)
