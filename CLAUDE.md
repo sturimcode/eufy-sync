@@ -96,12 +96,13 @@ eufy-sync --dry-run            # preview without uploading
 eufy-sync --reauth             # force Garmin browser re-login
 eufy-sync --update-password    # change stored passwords
 eufy-sync --backfill-days 30   # sync last N days
+eufy-sync --verbose            # show detailed sync logs (default output is one line)
 eufy-sync --headless           # no browser popups (Launch Agent uses this)
 ```
 
 ## Publishing
 
-- PyPI: `eufy-garmin-sync` v1.0.2
+- PyPI: `eufy-garmin-sync` v1.1.2
 - Publish via GitHub Actions trusted publishing (create a release -> auto-publishes)
 - Bump version in both `pyproject.toml` and `eufy_garmin_sync/__init__.py`
 
