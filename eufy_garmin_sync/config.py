@@ -60,6 +60,25 @@ def _walk_and_interpolate(obj: dict | list | str) -> dict | list | str:
     return obj
 
 
+def _get_password(user_name: str, service: str, email: str, yaml_password: str | None) -> str:
+    """Resolve password: keychain first, then YAML fallback."""
+    from eufy_garmin_sync.credentials import get_password, _keyring_available
+
+    if _keyring_available():
+        key = f"{user_name}:{service}"
+        stored = get_password(key)
+        if stored:
+            return stored
+
+    if yaml_password:
+        return yaml_password
+
+    raise ValueError(
+        f"No {service} password found for user '{user_name}'. "
+        f"Run: eufy-sync --update-password"
+    )
+
+
 def load_config(path: Path) -> AppConfig:
     with open(path) as f:
         raw = yaml.safe_load(f)
@@ -68,10 +87,17 @@ def load_config(path: Path) -> AppConfig:
 
     users = []
     for u in raw["users"]:
+        name = u["name"]
         users.append(UserConfig(
-            name=u["name"],
-            eufy=EufyConfig(email=u["eufy"]["email"], password=u["eufy"]["password"]),
-            garmin=GarminConfig(email=u["garmin"]["email"], password=u["garmin"]["password"]),
+            name=name,
+            eufy=EufyConfig(
+                email=u["eufy"]["email"],
+                password=_get_password(name, "eufy", u["eufy"]["email"], u["eufy"].get("password")),
+            ),
+            garmin=GarminConfig(
+                email=u["garmin"]["email"],
+                password=_get_password(name, "garmin", u["garmin"]["email"], u["garmin"].get("password")),
+            ),
         ))
 
     return AppConfig(

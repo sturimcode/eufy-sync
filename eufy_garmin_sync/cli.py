@@ -22,6 +22,7 @@ import yaml
 DATA_DIR = Path.home() / ".garmin-sync"
 DEFAULT_CONFIG = DATA_DIR / "config.yaml"
 DEFAULT_DB = DATA_DIR / "state.db"
+LOG_FILE = DATA_DIR / "sync.log"
 LAUNCH_AGENT_LABEL = "com.sturimcode.eufy-garmin-sync"
 LAUNCH_AGENT_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
 
@@ -100,6 +101,16 @@ def _write_config(path: Path, config: dict) -> None:
         yaml.dump(config, f, default_flow_style=False)
 
 
+def _store_passwords_in_keychain(user_name: str, eufy_password: str, garmin_password: str) -> bool:
+    """Store passwords in keychain. Returns True if successful."""
+    from eufy_garmin_sync.credentials import store_password, _keyring_available
+    if not _keyring_available():
+        return False
+    store_password(f"{user_name}:eufy", eufy_password)
+    store_password(f"{user_name}:garmin", garmin_password)
+    return True
+
+
 def _ensure_chromium() -> None:
     """Install Playwright Chromium if not already present."""
     try:
@@ -123,7 +134,7 @@ def _first_run_setup(config_path: Path) -> None:
     """Interactive setup wizard for first-time users."""
     print("")
     print("  eufy-garmin-sync - first time setup")
-    print("  Credentials are stored locally and only sent to Eufy/Garmin over HTTPS.")
+    print("  Credentials are stored in your system keychain (macOS Keychain / Secret Service).")
     print("")
 
     eufy_email = input("Eufy email: ").strip()
@@ -145,14 +156,26 @@ def _first_run_setup(config_path: Path) -> None:
         print("Error: Garmin password is required.")
         sys.exit(1)
 
-    config = {
-        "users": [{
-            "name": "default",
-            "eufy": {"email": eufy_email, "password": eufy_password},
-            "garmin": {"email": garmin_email, "password": garmin_password},
-        }],
-    }
+    user_name = "default"
 
+    # Store passwords in keychain
+    keychain_ok = _store_passwords_in_keychain(user_name, eufy_password, garmin_password)
+
+    # Config YAML stores only emails (no passwords) when keychain is available
+    user_config: dict = {
+        "name": user_name,
+        "eufy": {"email": eufy_email},
+        "garmin": {"email": garmin_email},
+    }
+    if not keychain_ok:
+        # Fallback: store passwords in config file (with 0o600 permissions)
+        user_config["eufy"]["password"] = eufy_password
+        user_config["garmin"]["password"] = garmin_password
+        print("Warning: keychain not available, passwords stored in config file.")
+    else:
+        print("Passwords saved to system keychain.")
+
+    config = {"users": [user_config]}
     _write_config(config_path, config)
 
     print("")
@@ -171,31 +194,47 @@ def _update_password(config_path: Path) -> None:
         config = yaml.safe_load(f)
 
     user = config["users"][0]
+    user_name = user.get("name", "default")
 
     print("Press Enter to keep current password.")
     print("")
 
     eufy_pw = getpass.getpass("New Eufy password: ")
-    if eufy_pw:
-        user["eufy"]["password"] = eufy_pw
-
     garmin_pw = getpass.getpass("New Garmin password: ")
-    if garmin_pw:
-        user["garmin"]["password"] = garmin_pw
 
     if not eufy_pw and not garmin_pw:
         print("No changes made.")
         return
 
-    _write_config(config_path, config)
+    from eufy_garmin_sync.credentials import store_password, delete_token, _keyring_available
+    keychain_ok = _keyring_available()
+
+    if eufy_pw:
+        if keychain_ok:
+            store_password(f"{user_name}:eufy", eufy_pw)
+        else:
+            user["eufy"]["password"] = eufy_pw
+
+    if garmin_pw:
+        if keychain_ok:
+            store_password(f"{user_name}:garmin", garmin_pw)
+        else:
+            user["garmin"]["password"] = garmin_pw
+
+    if not keychain_ok:
+        _write_config(config_path, config)
 
     # Clear cached tokens for changed services
     if eufy_pw:
+        if keychain_ok:
+            delete_token("eufy")
         eufy_token = DATA_DIR / "eufy_token.json"
         if eufy_token.exists():
             eufy_token.unlink()
 
     if garmin_pw:
+        if keychain_ok:
+            delete_token("garmin")
         garmin_session = DATA_DIR / "session.json"
         if garmin_session.exists():
             garmin_session.unlink()
@@ -218,16 +257,21 @@ def _reauth(config_path: Path, config: dict | None = None) -> None:
         with open(config_path) as f:
             config = yaml.safe_load(f)
 
+    from eufy_garmin_sync.config import _get_password
     from eufy_garmin_sync.garmin_auth import GarminAuth
 
     user = config["users"][0]
-    auth = GarminAuth(user["garmin"]["email"], user["garmin"]["password"])
+    user_name = user.get("name", "default")
+    garmin_email = user["garmin"]["email"]
+    garmin_pw = _get_password(user_name, "garmin", garmin_email, user["garmin"].get("password"))
+    auth = GarminAuth(garmin_email, garmin_pw)
     auth.force_reauth()
     print("Done - Garmin tokens saved.")
 
 
 def _generate_plist(binary_path: str) -> str:
     """Generate a Launch Agent plist that runs eufy-sync every 4 hours."""
+    log_path = str(LOG_FILE)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -248,9 +292,9 @@ def _generate_plist(binary_path: str) -> str:
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/tmp/eufy-garmin-sync.log</string>
+    <string>{log_path}</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/eufy-garmin-sync.log</string>
+    <string>{log_path}</string>
 </dict>
 </plist>
 """
@@ -267,6 +311,9 @@ def _install_launch_agent() -> None:
         print("Warning: could not find eufy-sync on PATH. Skipping auto-sync setup.")
         return
 
+    # Ensure the log directory exists with restricted permissions
+    DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+
     LAUNCH_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
     LAUNCH_AGENT_PATH.write_text(_generate_plist(binary))
 
@@ -280,7 +327,7 @@ def _install_launch_agent() -> None:
         capture_output=True,
     )
 
-    print(f"Automatic sync installed. Logs: /tmp/eufy-garmin-sync.log")
+    print(f"Automatic sync installed. Logs: {LOG_FILE}")
 
 
 def _offer_launch_agent() -> None:
@@ -320,6 +367,7 @@ def _uninstall(data_dir: Path) -> None:
 
     print("This will remove:")
     print(f"  - All saved credentials and tokens in {data_dir}/")
+    print(f"  - Keychain entries for eufy-garmin-sync")
     print(f"  - Sync history database")
     if LAUNCH_AGENT_PATH.exists():
         print(f"  - Automatic sync Launch Agent")
@@ -342,6 +390,14 @@ def _uninstall(data_dir: Path) -> None:
     if LAUNCH_AGENT_PATH.exists():
         subprocess.run(["launchctl", "unload", str(LAUNCH_AGENT_PATH)], capture_output=True)
         LAUNCH_AGENT_PATH.unlink()
+
+    # Clear keychain entries
+    from eufy_garmin_sync.credentials import delete_password, delete_token, _keyring_available
+    if _keyring_available():
+        for suffix in ["eufy", "garmin"]:
+            delete_password(f"default:{suffix}")
+        delete_token("eufy")
+        delete_token("garmin")
 
     # Remove data directory (preserving DB if requested)
     if data_dir.exists():
@@ -431,6 +487,35 @@ def _show_status(state, users: list) -> None:
             print("Garmin auth: no saved session - first run will open browser")
 
 
+def _migrate_config_passwords(config_path: Path) -> None:
+    """One-time migration: move passwords from config.yaml to keychain."""
+    from eufy_garmin_sync.credentials import store_password, get_password, _keyring_available
+
+    if not _keyring_available():
+        return
+    if not config_path.exists():
+        return
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    changed = False
+    for user in config.get("users", []):
+        name = user.get("name", "default")
+        for service in ["eufy", "garmin"]:
+            pw = user.get(service, {}).get("password")
+            if pw:
+                key = f"{name}:{service}"
+                if not get_password(key):
+                    store_password(key, pw)
+                del user[service]["password"]
+                changed = True
+
+    if changed:
+        _write_config(config_path, config)
+        print("Migrated passwords from config file to system keychain.")
+
+
 def main() -> None:
     import argparse
 
@@ -486,25 +571,13 @@ def main() -> None:
     first_run = not config_path.exists()
     if first_run:
         _first_run_setup(config_path)
+    else:
+        # Migrate existing plaintext passwords to keychain (one-time)
+        _migrate_config_passwords(config_path)
 
-    # Load config
-    with open(config_path) as f:
-        raw = yaml.safe_load(f)
-
-    from eufy_garmin_sync.config import AppConfig, EufyConfig, GarminConfig, UserConfig
-
-    users = []
-    for u in raw["users"]:
-        users.append(UserConfig(
-            name=u["name"],
-            eufy=EufyConfig(email=u["eufy"]["email"], password=u["eufy"]["password"]),
-            garmin=GarminConfig(email=u["garmin"]["email"], password=u["garmin"]["password"]),
-        ))
-
-    config = AppConfig(
-        sync_interval_minutes=raw.get("sync_interval_minutes", 15),
-        users=users,
-    )
+    # Load config (passwords resolved from keychain or YAML fallback)
+    from eufy_garmin_sync.config import AppConfig, load_config
+    config = load_config(config_path)
 
     # Handle status
     if args.status:
