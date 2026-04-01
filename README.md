@@ -54,6 +54,14 @@ eufy-sync --uninstall-agent # remove automatic sync
 eufy-sync --uninstall       # remove all data and clean up
 ```
 
+## Updating
+
+The tool checks for updates weekly and will let you know when a new version is available. To update:
+
+```bash
+pipx upgrade eufy-garmin-sync
+```
+
 ## Automatic sync (macOS)
 
 On first run, you'll be asked if you want to sync automatically every 4 hours. If you say yes, a macOS Launch Agent is installed that runs in the background - weigh yourself, open your laptop later, and it syncs on its own.
