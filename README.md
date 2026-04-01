@@ -17,7 +17,7 @@ Eufy scales sync to Apple Health, Fitbit, and Google Fit - but not Garmin. If yo
 
 Every Python library that talked to Garmin broke in March 2026. Garmin put Cloudflare in front of their SSO, which blocks any login that doesn't come from a real browser. [garth](https://github.com/matin/garth) is [deprecated](https://github.com/matin/garth/discussions/222), [python-garminconnect](https://github.com/cyberjunky/python-garminconnect) can't authenticate anymore, and there's no official API.
 
-This project gets around it with Playwright. On first run, a real Chromium window opens and you log in normally. OAuth2 tokens get saved locally and refresh on their own for about a year. After that first login, no browser needed - body comp data goes up as FIT files through Garmin's upload endpoint.
+This project gets around it with Playwright. On first run, a real Chromium window opens and you log in normally. OAuth2 tokens get saved to your system keychain and refresh on their own for about a year. After that first login, no browser needed - body comp data goes up as FIT files through Garmin's upload endpoint.
 
 ## Install
 
@@ -66,7 +66,7 @@ pipx install --force eufy-garmin-sync
 
 On first run, you'll be asked if you want to sync automatically every 4 hours. If you say yes, a macOS Launch Agent is installed that runs in the background - weigh yourself, open your laptop later, and it syncs on its own.
 
-Logs go to `/tmp/eufy-garmin-sync.log`. You get a macOS notification if something fails.
+Logs go to `~/.garmin-sync/sync.log`. You get a macOS notification if something fails.
 
 To disable: `eufy-sync --uninstall-agent`
 
@@ -88,9 +88,9 @@ Eufy Cloud API --> eufy_client.py --> transform.py --> garmin_client.py --> Garm
 
 ## Security
 
-Your credentials and tokens are stored in `~/.garmin-sync/` with `600` permissions (only your user can read). They are only sent to Eufy and Garmin's own servers over HTTPS. They are never logged, uploaded, or transmitted anywhere else. The only other outbound call is a weekly version check to `pypi.org` (no credentials sent). You can verify this yourself - the codebase is small and the outbound calls are in `eufy_client.py`, `garmin_auth.py`, and the update checker in `cli.py`.
+Your passwords and OAuth tokens are stored in your system keychain (macOS Keychain) - not in plaintext files. Config files in `~/.garmin-sync/` only contain email addresses, with `600` permissions. Credentials are only sent to Eufy and Garmin's own servers over HTTPS. They are never logged, uploaded, or transmitted anywhere else. The only other outbound call is a weekly version check to `pypi.org` (no credentials sent). You can verify this yourself - the codebase is small and the outbound calls are in `eufy_client.py`, `garmin_auth.py`, and the update checker in `cli.py`.
 
-If your machine is compromised, these tokens could be used to access your Garmin account - but that's true of any saved login.
+On systems without keychain support (headless Linux), credentials fall back to file-based storage with `600` permissions.
 
 ## Known quirks
 
