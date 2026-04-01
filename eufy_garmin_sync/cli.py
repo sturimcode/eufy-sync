@@ -311,6 +311,8 @@ def _install_launch_agent() -> None:
         print("Warning: could not find eufy-sync on PATH. Skipping auto-sync setup.")
         return
 
+    already_installed = LAUNCH_AGENT_PATH.exists()
+
     # Ensure the log directory exists with restricted permissions
     DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -327,7 +329,10 @@ def _install_launch_agent() -> None:
         capture_output=True,
     )
 
-    print(f"Automatic sync installed. Logs: {LOG_FILE}")
+    if already_installed:
+        print(f"Launch Agent already installed (reloaded). Logs: {LOG_FILE}")
+    else:
+        print(f"Automatic sync installed. Logs: {LOG_FILE}")
 
 
 def _offer_launch_agent() -> None:
