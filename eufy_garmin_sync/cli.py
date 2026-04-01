@@ -79,7 +79,7 @@ def _check_for_updates() -> None:
         if latest_parsed <= current_parsed:
             return
 
-        upgrade_cmd = ("pipx upgrade eufy-garmin-sync"
+        upgrade_cmd = ("pipx install --force eufy-garmin-sync"
                        if shutil.which("pipx")
                        else "pip install --upgrade eufy-garmin-sync")
 
@@ -479,10 +479,12 @@ def main() -> None:
         _reauth(config_path)
         return
 
+    # Ensure Chromium is installed before any sync or setup
+    _ensure_chromium()
+
     # First-run setup if no config exists
     first_run = not config_path.exists()
     if first_run:
-        _ensure_chromium()
         _first_run_setup(config_path)
 
     # Load config

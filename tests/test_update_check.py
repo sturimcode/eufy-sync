@@ -121,7 +121,7 @@ def test_suggests_pipx_when_available(tmp_path: Path, capsys):
 
         _check_for_updates()
 
-    assert "pipx upgrade" in capsys.readouterr().out
+    assert "pipx install --force" in capsys.readouterr().out
 
 
 def test_suggests_pip_when_no_pipx(tmp_path: Path, capsys):

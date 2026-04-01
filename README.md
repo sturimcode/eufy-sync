@@ -59,7 +59,7 @@ eufy-sync --uninstall       # remove all data and clean up
 The tool checks for updates weekly and will let you know when a new version is available. To update:
 
 ```bash
-pipx upgrade eufy-garmin-sync
+pipx install --force eufy-garmin-sync
 ```
 
 ## Automatic sync (macOS)
