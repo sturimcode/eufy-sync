@@ -379,6 +379,19 @@ class GarminAuth:
         return {"state": "valid", "days_remaining": days}
 
     def _load_session(self) -> GarminSession | None:
+        # Try keychain first
+        from eufy_garmin_sync.credentials import get_token, _keyring_available
+        if _keyring_available():
+            data = get_token("garmin")
+            if data:
+                try:
+                    session = GarminSession.from_dict(data)
+                    logger.info("Loaded saved Garmin session from keychain")
+                    return session
+                except Exception as e:
+                    logger.warning("Failed to parse keychain session: %s", e)
+
+        # Fallback to file
         if not self.session_path.exists():
             return None
         try:
@@ -391,6 +404,16 @@ class GarminAuth:
             return None
 
     def _save_session(self) -> None:
+        from eufy_garmin_sync.credentials import store_token, _keyring_available
+        if _keyring_available():
+            store_token("garmin", self.session.to_dict())
+            # Remove legacy file if it exists
+            if self.session_path.exists():
+                self.session_path.unlink()
+            logger.info("Saved Garmin session to keychain")
+            return
+
+        # Fallback to file
         self.session_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(str(self.session_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
