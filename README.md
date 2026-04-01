@@ -51,6 +51,7 @@ eufy-sync --backfill-days 30 # sync last 30 days
 eufy-sync --verbose          # show detailed sync logs
 eufy-sync --install-agent   # set up automatic sync
 eufy-sync --uninstall-agent # remove automatic sync
+eufy-sync --uninstall       # remove all data and clean up
 ```
 
 ## Automatic sync (macOS)
