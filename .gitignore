@@ -10,3 +10,4 @@ garmin_tokens/
 .venv/
 venv/
 *.egg-info/
+*.plist

@@ -67,7 +67,7 @@ def test_generate_plist_contains_binary_path():
 
 def test_generate_plist_contains_log_path():
     plist = _generate_plist("/any/path")
-    assert "/tmp/eufy-garmin-sync.log" in plist
+    assert ".garmin-sync/sync.log" in plist
 
 
 @patch("eufy_garmin_sync.cli.subprocess.run")
