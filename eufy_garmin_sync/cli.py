@@ -105,13 +105,18 @@ def _ensure_chromium() -> None:
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            p.chromium.executable_path
+            path = p.chromium.executable_path
+            if not Path(path).exists():
+                raise FileNotFoundError(path)
     except Exception:
         print("Installing Chromium for Garmin login (one-time)...")
-        subprocess.run(
+        result = subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
-            capture_output=True,
         )
+        if result.returncode != 0:
+            print("Error: Failed to install Chromium. Try running manually:")
+            print("  playwright install chromium")
+            sys.exit(1)
 
 
 def _first_run_setup(config_path: Path) -> None:
@@ -204,6 +209,8 @@ def _update_password(config_path: Path) -> None:
 
 def _reauth(config_path: Path, config: dict | None = None) -> None:
     """Force Garmin re-authentication."""
+    _ensure_chromium()
+
     if config is None:
         if not config_path.exists():
             print("No config found. Run eufy-sync first to set up.")
@@ -305,6 +312,55 @@ def _uninstall_launch_agent() -> None:
     print("Launch Agent removed. Auto-sync disabled.")
 
 
+def _uninstall(data_dir: Path) -> None:
+    """Remove all eufy-garmin-sync data: Launch Agent, config, tokens, state DB."""
+    if not sys.stdin.isatty():
+        print("Error: --uninstall requires an interactive terminal.")
+        sys.exit(1)
+
+    print("This will remove:")
+    print(f"  - All saved credentials and tokens in {data_dir}/")
+    print(f"  - Sync history database")
+    if LAUNCH_AGENT_PATH.exists():
+        print(f"  - Automatic sync Launch Agent")
+    print("")
+
+    answer = input("Are you sure? [y/N] ").strip()
+    if not answer.lower().startswith("y"):
+        print("Cancelled.")
+        return
+
+    # Offer to keep state DB so reinstalls don't duplicate measurements
+    keep_db = False
+    db_path = data_dir / "state.db"
+    if db_path.exists():
+        print("")
+        keep_answer = input("Keep sync history? Prevents duplicates if you reinstall later. [Y/n] ").strip()
+        keep_db = not keep_answer.lower().startswith("n")
+
+    # Stop and remove Launch Agent
+    if LAUNCH_AGENT_PATH.exists():
+        subprocess.run(["launchctl", "unload", str(LAUNCH_AGENT_PATH)], capture_output=True)
+        LAUNCH_AGENT_PATH.unlink()
+
+    # Remove data directory (preserving DB if requested)
+    if data_dir.exists():
+        if keep_db and db_path.exists():
+            # Remove everything except state.db
+            for item in data_dir.iterdir():
+                if item.name != "state.db":
+                    item.unlink()
+        else:
+            shutil.rmtree(data_dir)
+
+    print("")
+    if keep_db:
+        print(f"Removed all eufy-garmin-sync data (sync history kept in {db_path}).")
+    else:
+        print("Removed all eufy-garmin-sync data.")
+    print("To remove the package itself, run: pipx uninstall eufy-garmin-sync")
+
+
 def _print_summary(total: int, failures: list, state, users: list) -> None:
     """Print a single-line sync summary."""
     from eufy_garmin_sync.garmin_auth import GarminAuth
@@ -391,12 +447,18 @@ def main() -> None:
     parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed sync logs")
     parser.add_argument("--install-agent", action="store_true", help="Set up automatic sync (macOS Launch Agent)")
     parser.add_argument("--uninstall-agent", action="store_true", help="Remove the automatic sync Launch Agent")
+    parser.add_argument("--uninstall", action="store_true", help="Remove all data, tokens, and Launch Agent")
     parser.add_argument("--config", type=Path, default=None, help="Config path (default: ~/.garmin-sync/config.yaml)")
     parser.add_argument("--db", type=Path, default=None, help="Database path (default: ~/.garmin-sync/state.db)")
     args = parser.parse_args()
 
     config_path = args.config or DEFAULT_CONFIG
     db_path = args.db or DEFAULT_DB
+
+    # Handle full uninstall
+    if args.uninstall:
+        _uninstall(DATA_DIR)
+        return
 
     # Handle Launch Agent install/uninstall
     if args.install_agent:
@@ -500,12 +562,16 @@ def main() -> None:
             _notify("eufy-sync", f"Synced {total} measurement{'s' if total != 1 else ''} to Garmin")
 
         if first_run:
-            if total > 0:
+            if failures:
                 print("")
-                print(f"Synced {total} measurements to Garmin Connect.")
-            _offer_launch_agent()
-            print("")
-            print("You're all set! Check the Garmin Connect app to see your data.")
+                print("First sync failed. Fix the issue above, then run eufy-sync again.")
+            else:
+                if total > 0:
+                    print("")
+                    print(f"Synced {total} measurements to Garmin Connect.")
+                _offer_launch_agent()
+                print("")
+                print("You're all set! Check the Garmin Connect app to see your data.")
         elif not args.verbose:
             _print_summary(total, failures, state, config.users)
 
