@@ -239,17 +239,20 @@ def _update_password(config_path: Path) -> None:
         if garmin_session.exists():
             garmin_session.unlink()
 
-    print("Passwords updated.")
+    changed = []
+    if eufy_pw:
+        changed.append("Eufy")
+    if garmin_pw:
+        changed.append("Garmin")
+    print(f"{' and '.join(changed)} password{'s' if len(changed) > 1 else ''} updated.")
 
     if garmin_pw:
         print("Garmin password changed - re-authenticating...")
         _reauth(config_path, config)
 
 
-def _reauth(config_path: Path, config: dict | None = None) -> None:
+def _reauth(config_path: Path, config: dict | None = None, force: bool = False) -> None:
     """Force Garmin re-authentication."""
-    _ensure_chromium()
-
     if config is None:
         if not config_path.exists():
             print("No config found. Run eufy-sync first to set up.")
@@ -265,6 +268,19 @@ def _reauth(config_path: Path, config: dict | None = None) -> None:
     garmin_email = user["garmin"]["email"]
     garmin_pw = _get_password(user_name, "garmin", garmin_email, user["garmin"].get("password"))
     auth = GarminAuth(garmin_email, garmin_pw)
+
+    # When called directly via --reauth (force=True), check if it's actually needed
+    if force:
+        status = auth.token_status()
+        if status["state"] == "valid":
+            print(f"Garmin tokens are still valid ({status['days_remaining']}d remaining). Re-authenticate anyway? [y/N] ", end="")
+            if sys.stdin.isatty():
+                answer = input().strip()
+                if not answer.lower().startswith("y"):
+                    print("Skipped.")
+                    return
+
+    _ensure_chromium()
     auth.force_reauth()
     print("Done - Garmin tokens saved.")
 
@@ -566,7 +582,7 @@ def main() -> None:
 
     # Handle reauth
     if args.reauth:
-        _reauth(config_path)
+        _reauth(config_path, force=True)
         return
 
     # Ensure Chromium is installed before any sync or setup
