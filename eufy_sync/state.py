@@ -36,31 +36,32 @@ class SyncState:
         if "target" in columns:
             return  # Already migrated
 
-        self._conn.executescript("""
-            BEGIN;
-            CREATE TABLE sync_log_v2 (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_name TEXT NOT NULL,
-                eufy_measurement_id TEXT NOT NULL,
-                measurement_timestamp TEXT NOT NULL,
-                weight_kg REAL,
-                target TEXT NOT NULL DEFAULT 'garmin',
-                synced_at TEXT NOT NULL,
-                response TEXT,
-                UNIQUE(user_name, eufy_measurement_id, target)
-            );
-            INSERT INTO sync_log_v2 (
-                user_name, eufy_measurement_id, measurement_timestamp,
-                weight_kg, target, synced_at, response
-            )
-            SELECT
-                user_name, eufy_measurement_id, measurement_timestamp,
-                weight_kg, 'garmin', synced_to_garmin_at, garmin_response
-            FROM sync_log;
-            DROP TABLE sync_log;
-            ALTER TABLE sync_log_v2 RENAME TO sync_log;
-            COMMIT;
-        """)
+        with self._conn:
+            self._conn.execute("""
+                CREATE TABLE sync_log_v2 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_name TEXT NOT NULL,
+                    eufy_measurement_id TEXT NOT NULL,
+                    measurement_timestamp TEXT NOT NULL,
+                    weight_kg REAL,
+                    target TEXT NOT NULL DEFAULT 'garmin',
+                    synced_at TEXT NOT NULL,
+                    response TEXT,
+                    UNIQUE(user_name, eufy_measurement_id, target)
+                )
+            """)
+            self._conn.execute("""
+                INSERT INTO sync_log_v2 (
+                    user_name, eufy_measurement_id, measurement_timestamp,
+                    weight_kg, target, synced_at, response
+                )
+                SELECT
+                    user_name, eufy_measurement_id, measurement_timestamp,
+                    weight_kg, 'garmin', synced_to_garmin_at, garmin_response
+                FROM sync_log
+            """)
+            self._conn.execute("DROP TABLE sync_log")
+            self._conn.execute("ALTER TABLE sync_log_v2 RENAME TO sync_log")
 
     def has_any_syncs(self, user_name: str, target: str) -> bool:
         """Check if a target has ever been synced to."""

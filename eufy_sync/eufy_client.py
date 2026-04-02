@@ -75,7 +75,7 @@ class EufyClient:
             msg = data.get("message", "unknown error")
             raise RuntimeError(
                 f"Eufy login failed: {msg}. "
-                "If you changed your Eufy password, update it in .env and restart the sync."
+                "If you changed your Eufy password, run: eufy-sync --update-password"
             )
 
         self.access_token = data["access_token"]
@@ -198,7 +198,7 @@ class EufyClient:
 
         raw_records = body.get("data", [])
         logger.info("Fetched %d raw measurements from Eufy", len(raw_records))
-        logger.debug("Raw Eufy response: %s", body)
+        logger.debug("Raw Eufy response: %d records", len(body.get("data", [])))
 
         measurements = []
         for record in raw_records:

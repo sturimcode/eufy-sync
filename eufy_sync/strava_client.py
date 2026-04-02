@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import time
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -43,11 +44,20 @@ def authorize_strava(config: StravaConfig) -> dict:
     Returns the token dict (access_token, refresh_token, expires_at).
     """
     captured_code: list[str] = []
+    captured_error: list[str] = []
+    state_value = secrets.token_urlsafe(32)
 
     class CallbackHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             query = parse_qs(urlparse(self.path).query)
             if "code" in query:
+                # Verify CSRF state parameter
+                if query.get("state", [None])[0] != state_value:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    self.wfile.write(b"<html><body><h2>Invalid state parameter</h2></body></html>")
+                    return
                 captured_code.append(query["code"][0])
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
@@ -58,12 +68,14 @@ def authorize_strava(config: StravaConfig) -> dict:
                     b"</body></html>"
                 )
             elif "error" in query:
+                error = query.get("error", ["unknown"])[0]
+                captured_error.append(error)
                 self.send_response(400)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()
-                error = query.get("error", ["unknown"])[0]
                 self.wfile.write(f"<html><body><h2>Authorization failed: {error}</h2></body></html>".encode())
             else:
+                # Ignore non-callback requests (favicon, etc.)
                 self.send_response(404)
                 self.end_headers()
 
@@ -71,7 +83,12 @@ def authorize_strava(config: StravaConfig) -> dict:
             pass  # Suppress HTTP server logging
 
     server = HTTPServer(("localhost", CALLBACK_PORT), CallbackHandler)
-    server_thread = Thread(target=server.handle_request, daemon=True)
+
+    def _serve_until_done():
+        while not captured_code and not captured_error:
+            server.handle_request()
+
+    server_thread = Thread(target=_serve_until_done, daemon=True)
     server_thread.start()
 
     auth_url = (
@@ -81,6 +98,7 @@ def authorize_strava(config: StravaConfig) -> dict:
         f"&redirect_uri={REDIRECT_URI}"
         f"&scope=profile:write,profile:read_all"
         f"&approval_prompt=force"
+        f"&state={state_value}"
     )
 
     print(f"\nOpening Strava authorization in your browser...")
@@ -90,11 +108,16 @@ def authorize_strava(config: StravaConfig) -> dict:
     server_thread.join(timeout=120)
     server.server_close()
 
+    if captured_error:
+        raise RuntimeError(
+            f"Strava authorization denied: {captured_error[0]}. "
+            f"Try again with: eufy-sync --setup-strava"
+        )
+
     if not captured_code:
         raise RuntimeError(
             "Strava authorization timed out - no callback received. "
-            "Make sure your Strava API app's redirect URI is set to: "
-            f"{REDIRECT_URI}"
+            "Make sure your Strava API app's Authorization Callback Domain is set to: localhost"
         )
 
     # Exchange code for tokens
@@ -111,8 +134,10 @@ def authorize_strava(config: StravaConfig) -> dict:
     )
 
     if resp.status_code != 200:
+        logger.debug("Strava token exchange failed: %d %s", resp.status_code, resp.text)
         raise RuntimeError(
-            f"Failed to exchange Strava authorization code: {resp.status_code} {resp.text}"
+            f"Failed to exchange Strava authorization code (HTTP {resp.status_code}). "
+            f"Check your Client ID and Secret, then retry with: eufy-sync --setup-strava"
         )
 
     data = resp.json()
@@ -162,8 +187,9 @@ class StravaClient:
         )
 
         if resp.status_code != 200:
+            logger.debug("Strava token refresh failed: %d %s", resp.status_code, resp.text)
             raise RuntimeError(
-                f"Failed to refresh Strava token: {resp.status_code} {resp.text}. "
+                f"Failed to refresh Strava token (HTTP {resp.status_code}). "
                 f"Re-authorize with: eufy-sync --setup-strava"
             )
 
@@ -189,8 +215,9 @@ class StravaClient:
         )
 
         if resp.status_code != 200:
+            logger.debug("Strava weight update failed: %d %s", resp.status_code, resp.text)
             raise RuntimeError(
-                f"Failed to update Strava weight: {resp.status_code} {resp.text}"
+                f"Failed to update Strava weight (HTTP {resp.status_code})"
             )
 
         logger.info("Updated Strava weight to %.2f kg", weight_kg)

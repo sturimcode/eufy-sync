@@ -215,12 +215,16 @@ def _first_run_setup(config_path: Path) -> None:
 
     # Run Strava OAuth if configured
     if strava_config:
-        from eufy_sync.config import StravaConfig
-        from eufy_sync.strava_client import authorize_strava
-        authorize_strava(StravaConfig(
-            client_id=strava_config["client_id"],
-            client_secret=strava_config["client_secret"],
-        ))
+        try:
+            from eufy_sync.config import StravaConfig
+            from eufy_sync.strava_client import authorize_strava
+            authorize_strava(StravaConfig(
+                client_id=strava_config["client_id"],
+                client_secret=strava_config["client_secret"],
+            ))
+        except Exception as e:
+            print(f"Warning: Strava authorization failed: {e}")
+            print("You can retry later with: eufy-sync --setup-strava")
 
 
 def _prompt_strava_credentials() -> dict:
@@ -529,7 +533,10 @@ def _uninstall(data_dir: Path) -> None:
             # Remove everything except state.db
             for item in data_dir.iterdir():
                 if item.name != "state.db":
-                    item.unlink()
+                    if item.is_dir():
+                        shutil.rmtree(item)
+                    else:
+                        item.unlink()
         else:
             shutil.rmtree(data_dir)
 
