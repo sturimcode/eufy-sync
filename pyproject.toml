@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eufy-sync"
-version = "1.5.3"
+version = "1.6.0"
 description = "Sync Eufy smart scale body composition data to Garmin Connect and Strava"
 readme = "README.md"
 license = "MIT"
@@ -37,7 +37,6 @@ dependencies = [
     "keyring>=25.0.0",
     "playwright>=1.40.0",
     "pyyaml>=6.0",
-    "setuptools>=68.0",
 ]
 
 [project.scripts]

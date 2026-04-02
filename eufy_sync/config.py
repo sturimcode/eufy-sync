@@ -47,9 +47,7 @@ def _interpolate_env_vars(value: str) -> str:
         env_value = os.environ.get(var_name)
         if env_value is None:
             raise ValueError(
-                f"Environment variable '{var_name}' is not set. "
-                f"Make sure you've created a .env file (cp .env.example .env) "
-                f"and loaded it (set -a && source .env && set +a)"
+                f"Environment variable '{var_name}' referenced in config is not set."
             )
         return env_value
 
