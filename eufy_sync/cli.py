@@ -703,6 +703,16 @@ def _show_upgrade_notice() -> None:
         UPGRADE_NOTICE_FILE.write_text("")
     except Exception:
         return
+    # Don't show if Strava is already configured
+    config_path = DATA_DIR / "config.yaml"
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                raw = yaml.safe_load(f)
+            if any("strava" in u for u in raw.get("users", [])):
+                return
+        except Exception:
+            pass
     if sys.stdin.isatty():
         print("New in eufy-sync: Strava support! Run eufy-sync --setup-strava to connect.")
         print("")
