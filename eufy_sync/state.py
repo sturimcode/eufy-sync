@@ -62,6 +62,14 @@ class SyncState:
             COMMIT;
         """)
 
+    def has_any_syncs(self, user_name: str, target: str) -> bool:
+        """Check if a target has ever been synced to."""
+        cursor = self._conn.execute(
+            "SELECT 1 FROM sync_log WHERE user_name = ? AND target = ? LIMIT 1",
+            (user_name, target),
+        )
+        return cursor.fetchone() is not None
+
     def is_synced(self, user_name: str, measurement_id: str, target: str) -> bool:
         cursor = self._conn.execute(
             "SELECT 1 FROM sync_log WHERE user_name = ? AND eufy_measurement_id = ? AND target = ?",

@@ -56,11 +56,20 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
         if backfill_days:
             after_timestamp = int(time.time()) - (backfill_days * 86400)
         else:
-            after_timestamp = state.get_latest_sync_timestamp(user.name)
-            if after_timestamp is None:
-                # First run - default to last 7 days
+            # Check if any target is newly added (no syncs yet)
+            new_target = any(
+                not state.has_any_syncs(user.name, name) for name, _ in targets
+            )
+            if new_target:
+                # New target added - backfill 7 days so existing measurements sync
                 after_timestamp = int(time.time()) - (7 * 86400)
-                logger.info("First run for %s, defaulting to 7-day backfill", user.name)
+                logger.info("New sync target detected for %s, backfilling 7 days", user.name)
+            else:
+                after_timestamp = state.get_latest_sync_timestamp(user.name)
+                if after_timestamp is None:
+                    # First run - default to last 7 days
+                    after_timestamp = int(time.time()) - (7 * 86400)
+                    logger.info("First run for %s, defaulting to 7-day backfill", user.name)
 
         measurements = _retry(
             lambda: eufy.fetch_measurements(after_timestamp=after_timestamp),
