@@ -1,7 +1,8 @@
-"""CLI entry point for eufy-garmin-sync.
+"""CLI entry point for eufy-sync.
 
 Provides a simple `eufy-sync` command that handles first-run setup,
-syncing, status checks, and re-authentication.
+syncing, status checks, re-authentication, and multi-target support
+(Garmin Connect and Strava).
 """
 from __future__ import annotations
 
@@ -55,7 +56,7 @@ def _check_for_updates() -> None:
                 return
 
         req = urllib.request.Request(
-            "https://pypi.org/pypi/eufy-garmin-sync/json",
+            "https://pypi.org/pypi/eufy-sync/json",
             headers={"Accept": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -63,7 +64,7 @@ def _check_for_updates() -> None:
 
         latest = data["info"]["version"]
 
-        from eufy_garmin_sync import __version__
+        from eufy_sync import __version__
 
         def _parse(v: str) -> tuple:
             if not v or len(v) > 64:
@@ -80,9 +81,9 @@ def _check_for_updates() -> None:
         if latest_parsed <= current_parsed:
             return
 
-        upgrade_cmd = ("pipx install --force eufy-garmin-sync"
+        upgrade_cmd = ("pipx install --force eufy-sync"
                        if shutil.which("pipx")
-                       else "pip install --upgrade eufy-garmin-sync")
+                       else "pip install --upgrade eufy-sync")
 
         if sys.stdin.isatty():
             print(f"Update available: v{latest} (you have v{__version__}). Run: {upgrade_cmd}")
@@ -101,13 +102,14 @@ def _write_config(path: Path, config: dict) -> None:
         yaml.dump(config, f, default_flow_style=False)
 
 
-def _store_passwords_in_keychain(user_name: str, eufy_password: str, garmin_password: str) -> bool:
+def _store_passwords_in_keychain(user_name: str, eufy_password: str, garmin_password: str | None = None) -> bool:
     """Store passwords in keychain. Returns True if successful."""
-    from eufy_garmin_sync.credentials import store_password, _keyring_available
+    from eufy_sync.credentials import store_password, _keyring_available
     if not _keyring_available():
         return False
     store_password(f"{user_name}:eufy", eufy_password)
-    store_password(f"{user_name}:garmin", garmin_password)
+    if garmin_password:
+        store_password(f"{user_name}:garmin", garmin_password)
     return True
 
 
@@ -133,7 +135,7 @@ def _ensure_chromium() -> None:
 def _first_run_setup(config_path: Path) -> None:
     """Interactive setup wizard for first-time users."""
     print("")
-    print("  eufy-garmin-sync - first time setup")
+    print("  eufy-sync - first time setup")
     print("  Credentials are stored in your system keychain (macOS Keychain / Secret Service).")
     print("")
 
@@ -147,13 +149,31 @@ def _first_run_setup(config_path: Path) -> None:
         print("Error: Eufy password is required.")
         sys.exit(1)
 
-    garmin_email = input("Garmin email (Enter if same as Eufy): ").strip()
-    if not garmin_email:
-        garmin_email = eufy_email
+    # Garmin setup (optional)
+    print("")
+    print("Sync targets (configure at least one):")
+    print("")
+    garmin_answer = input("Connect Garmin? [Y/n] ").strip()
+    garmin_email = None
+    garmin_password = None
+    if not garmin_answer.lower().startswith("n"):
+        garmin_email = input("Garmin email (Enter if same as Eufy): ").strip()
+        if not garmin_email:
+            garmin_email = eufy_email
+        garmin_password = getpass.getpass("Garmin password: ")
+        if not garmin_password:
+            print("Error: Garmin password is required.")
+            sys.exit(1)
 
-    garmin_password = getpass.getpass("Garmin password: ")
-    if not garmin_password:
-        print("Error: Garmin password is required.")
+    # Strava setup (optional)
+    print("")
+    strava_answer = input("Connect Strava? [y/N] ").strip()
+    strava_config = None
+    if strava_answer.lower().startswith("y"):
+        strava_config = _prompt_strava_credentials()
+
+    if not garmin_email and not strava_config:
+        print("Error: You must configure at least one sync target (Garmin or Strava).")
         sys.exit(1)
 
     user_name = "default"
@@ -165,12 +185,16 @@ def _first_run_setup(config_path: Path) -> None:
     user_config: dict = {
         "name": user_name,
         "eufy": {"email": eufy_email},
-        "garmin": {"email": garmin_email},
     }
+    if garmin_email:
+        user_config["garmin"] = {"email": garmin_email}
+    if strava_config:
+        user_config["strava"] = strava_config
     if not keychain_ok:
         # Fallback: store passwords in config file (with 0o600 permissions)
         user_config["eufy"]["password"] = eufy_password
-        user_config["garmin"]["password"] = garmin_password
+        if garmin_password:
+            user_config["garmin"]["password"] = garmin_password
         print("Warning: keychain not available, passwords stored in config file.")
     else:
         print("Passwords saved to system keychain.")
@@ -179,9 +203,68 @@ def _first_run_setup(config_path: Path) -> None:
     _write_config(config_path, config)
 
     print("")
-    print("Saved. Running first sync (last 7 days)...")
-    print("A browser window will open for Garmin login.")
+    targets = []
+    if garmin_email:
+        targets.append("Garmin")
+    if strava_config:
+        targets.append("Strava")
+    print(f"Saved. Running first sync to {' and '.join(targets)} (last 7 days)...")
+    if garmin_email:
+        print("A browser window will open for Garmin login.")
     print("")
+
+    # Run Strava OAuth if configured
+    if strava_config:
+        from eufy_sync.config import StravaConfig
+        from eufy_sync.strava_client import authorize_strava
+        authorize_strava(StravaConfig(
+            client_id=strava_config["client_id"],
+            client_secret=strava_config["client_secret"],
+        ))
+
+
+def _prompt_strava_credentials() -> dict:
+    """Prompt user for Strava API app credentials."""
+    print("")
+    print("  To connect Strava, you need a Strava API application.")
+    print("  Create one at: https://www.strava.com/settings/api")
+    print("  Set the redirect URI to: http://localhost:8089/callback")
+    print("")
+    client_id = input("Strava Client ID: ").strip()
+    if not client_id:
+        print("Error: Client ID is required.")
+        sys.exit(1)
+    client_secret = input("Strava Client Secret: ").strip()
+    if not client_secret:
+        print("Error: Client Secret is required.")
+        sys.exit(1)
+    return {"client_id": client_id, "client_secret": client_secret}
+
+
+def _setup_strava(config_path: Path) -> None:
+    """Add or update Strava configuration."""
+    if not config_path.exists():
+        print("No config found. Run eufy-sync first to set up.")
+        sys.exit(1)
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    strava_config = _prompt_strava_credentials()
+
+    user = config["users"][0]
+    user["strava"] = strava_config
+    _write_config(config_path, config)
+
+    print("Strava credentials saved. Starting authorization...")
+
+    from eufy_sync.config import StravaConfig
+    from eufy_sync.strava_client import authorize_strava
+    authorize_strava(StravaConfig(
+        client_id=strava_config["client_id"],
+        client_secret=strava_config["client_secret"],
+    ))
+    print("Strava connected! Future syncs will update both targets.")
 
 
 def _update_password(config_path: Path) -> None:
@@ -206,7 +289,7 @@ def _update_password(config_path: Path) -> None:
         print("No changes made.")
         return
 
-    from eufy_garmin_sync.credentials import store_password, delete_token, _keyring_available
+    from eufy_sync.credentials import store_password, delete_token, _keyring_available
     keychain_ok = _keyring_available()
 
     if eufy_pw:
@@ -251,8 +334,8 @@ def _update_password(config_path: Path) -> None:
         _reauth(config_path, config)
 
 
-def _reauth(config_path: Path, config: dict | None = None, force: bool = False) -> None:
-    """Force Garmin re-authentication."""
+def _reauth(config_path: Path, config: dict | None = None, force: bool = False, target: str | None = None) -> None:
+    """Force re-authentication for a specific target or all targets."""
     if config is None:
         if not config_path.exists():
             print("No config found. Run eufy-sync first to set up.")
@@ -260,29 +343,48 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False) 
         with open(config_path) as f:
             config = yaml.safe_load(f)
 
-    from eufy_garmin_sync.config import _get_password
-    from eufy_garmin_sync.garmin_auth import GarminAuth
-
     user = config["users"][0]
     user_name = user.get("name", "default")
-    garmin_email = user["garmin"]["email"]
-    garmin_pw = _get_password(user_name, "garmin", garmin_email, user["garmin"].get("password"))
-    auth = GarminAuth(garmin_email, garmin_pw)
 
-    # When called directly via --reauth (force=True), check if it's actually needed
-    if force:
-        status = auth.token_status()
-        if status["state"] == "valid":
-            print(f"Garmin tokens are still valid ({status['days_remaining']}d remaining). Re-authenticate anyway? [y/N] ", end="")
-            if sys.stdin.isatty():
-                answer = input().strip()
-                if not answer.lower().startswith("y"):
-                    print("Skipped.")
-                    return
+    do_garmin = (target is None or target == "garmin") and "garmin" in user
+    do_strava = (target is None or target == "strava") and "strava" in user
 
-    _ensure_chromium()
-    auth.force_reauth()
-    print("Done - Garmin tokens saved.")
+    if target and not do_garmin and not do_strava:
+        print(f"Target '{target}' is not configured. Check your config.")
+        return
+
+    if do_garmin:
+        from eufy_sync.config import _get_password
+        from eufy_sync.garmin_auth import GarminAuth
+
+        garmin_email = user["garmin"]["email"]
+        garmin_pw = _get_password(user_name, "garmin", garmin_email, user["garmin"].get("password"))
+        auth = GarminAuth(garmin_email, garmin_pw)
+
+        if force:
+            status = auth.token_status()
+            if status["state"] == "valid":
+                print(f"Garmin tokens are still valid ({status['days_remaining']}d remaining). Re-authenticate anyway? [y/N] ", end="")
+                if sys.stdin.isatty():
+                    answer = input().strip()
+                    if not answer.lower().startswith("y"):
+                        print("Garmin re-auth skipped.")
+                        do_garmin = False
+
+        if do_garmin:
+            _ensure_chromium()
+            auth.force_reauth()
+            print("Done - Garmin tokens saved.")
+
+    if do_strava:
+        from eufy_sync.config import StravaConfig
+        from eufy_sync.strava_client import authorize_strava
+        strava_cfg = StravaConfig(
+            client_id=str(user["strava"]["client_id"]),
+            client_secret=user["strava"]["client_secret"],
+        )
+        authorize_strava(strava_cfg)
+        print("Done - Strava tokens saved.")
 
 
 def _generate_plist(binary_path: str) -> str:
@@ -381,14 +483,14 @@ def _uninstall_launch_agent() -> None:
 
 
 def _uninstall(data_dir: Path) -> None:
-    """Remove all eufy-garmin-sync data: Launch Agent, config, tokens, state DB."""
+    """Remove all eufy-sync data: Launch Agent, config, tokens, state DB."""
     if not sys.stdin.isatty():
         print("Error: --uninstall requires an interactive terminal.")
         sys.exit(1)
 
     print("This will remove:")
     print(f"  - All saved credentials and tokens in {data_dir}/")
-    print(f"  - Keychain entries for eufy-garmin-sync")
+    print(f"  - Keychain entries for eufy-sync")
     print(f"  - Sync history database")
     if LAUNCH_AGENT_PATH.exists():
         print(f"  - Automatic sync Launch Agent")
@@ -413,12 +515,13 @@ def _uninstall(data_dir: Path) -> None:
         LAUNCH_AGENT_PATH.unlink()
 
     # Clear keychain entries
-    from eufy_garmin_sync.credentials import delete_password, delete_token, _keyring_available
+    from eufy_sync.credentials import delete_password, delete_token, _keyring_available
     if _keyring_available():
         for suffix in ["eufy", "garmin"]:
             delete_password(f"default:{suffix}")
         delete_token("eufy")
         delete_token("garmin")
+        delete_token("strava")
 
     # Remove data directory (preserving DB if requested)
     if data_dir.exists():
@@ -432,23 +535,28 @@ def _uninstall(data_dir: Path) -> None:
 
     print("")
     if keep_db:
-        print(f"Removed all eufy-garmin-sync data (sync history kept in {db_path}).")
+        print(f"Removed all eufy-sync data (sync history kept in {db_path}).")
     else:
-        print("Removed all eufy-garmin-sync data.")
-    print("To remove the package itself, run: pipx uninstall eufy-garmin-sync")
+        print("Removed all eufy-sync data.")
+    print("To remove the package itself, run: pipx uninstall eufy-sync")
 
 
-def _print_summary(total: int, failures: list, state, users: list) -> None:
+def _print_summary(total_counts: dict[str, int], failures: list, state, users: list) -> None:
     """Print a single-line sync summary."""
-    from eufy_garmin_sync.garmin_auth import GarminAuth
-
     if failures:
         fail_names = ", ".join(name for name, _ in failures)
         print(f"Sync failed for: {fail_names}. Run with --verbose for details.")
         return
 
+    total = sum(total_counts.values())
     if total > 0:
-        print(f"Synced {total} measurement{'s' if total != 1 else ''} to Garmin Connect.")
+        target_names = list(total_counts.keys())
+        if len(target_names) == 1:
+            name = "Garmin Connect" if target_names[0] == "garmin" else "Strava"
+            print(f"Synced {total} measurement{'s' if total != 1 else ''} to {name}.")
+        else:
+            parts = [f"{n.capitalize()}: {c}" for n, c in total_counts.items()]
+            print(f"Synced {total} measurement{'s' if total != 1 else ''} ({', '.join(parts)}).")
         return
 
     # No-op sync - build an informative one-liner
@@ -466,21 +574,29 @@ def _print_summary(total: int, failures: list, state, users: list) -> None:
         else:
             parts.append(f"last sync: {hours}h ago")
 
-    status = GarminAuth(user.garmin.email, user.garmin.password).token_status()
-    if status["state"] == "expired":
-        parts.append("Garmin token EXPIRED")
-    elif status["state"] == "refresh_needed":
-        parts.append(f"token refresh pending ({status['days_remaining']}d until re-login)")
-    elif status["days_remaining"] is not None:
-        parts.append(f"token valid {status['days_remaining']}d")
+    if user.garmin:
+        from eufy_sync.garmin_auth import GarminAuth
+        status = GarminAuth(user.garmin.email, user.garmin.password).token_status()
+        if status["state"] == "expired":
+            parts.append("Garmin token EXPIRED")
+        elif status["state"] == "refresh_needed":
+            parts.append(f"token refresh pending ({status['days_remaining']}d until re-login)")
+        elif status["days_remaining"] is not None:
+            parts.append(f"Garmin token valid {status['days_remaining']}d")
+
+    if user.strava:
+        from eufy_sync.strava_client import StravaClient
+        strava_status = StravaClient(user.strava).token_status()
+        if strava_status["state"] == "expired":
+            parts.append("Strava token EXPIRED")
+        elif strava_status["state"] == "no_session":
+            parts.append("Strava: not authorized")
 
     print(" | ".join(parts))
 
 
 def _show_status(state, users: list) -> None:
     """Print detailed sync status for all users."""
-    from eufy_garmin_sync.garmin_auth import GarminAuth
-
     for user in users:
         print(f"\n{'=' * 40}")
         print(f"User: {user.name}")
@@ -497,20 +613,35 @@ def _show_status(state, users: list) -> None:
             print("Last synced measurement: never")
 
         # Garmin token health
-        status = GarminAuth(user.garmin.email, user.garmin.password).token_status()
-        if status["state"] == "expired":
-            print("Garmin auth: EXPIRED - browser re-login needed")
-        elif status["state"] == "refresh_needed":
-            print(f"Garmin auth: access token expired, will refresh on next sync ({status['days_remaining']}d until re-login)")
-        elif status["state"] == "valid":
-            print(f"Garmin auth: valid ({status['days_remaining']} days until re-login needed)")
-        else:
-            print("Garmin auth: no saved session - first run will open browser")
+        if user.garmin:
+            from eufy_sync.garmin_auth import GarminAuth
+            status = GarminAuth(user.garmin.email, user.garmin.password).token_status()
+            if status["state"] == "expired":
+                print("Garmin auth: EXPIRED - browser re-login needed")
+            elif status["state"] == "refresh_needed":
+                print(f"Garmin auth: access token expired, will refresh on next sync ({status['days_remaining']}d until re-login)")
+            elif status["state"] == "valid":
+                print(f"Garmin auth: valid ({status['days_remaining']} days until re-login needed)")
+            else:
+                print("Garmin auth: no saved session - first run will open browser")
+
+        # Strava token health
+        if user.strava:
+            from eufy_sync.strava_client import StravaClient
+            strava_status = StravaClient(user.strava).token_status()
+            if strava_status["state"] == "expired":
+                print("Strava auth: EXPIRED - re-authorize with --reauth strava")
+            elif strava_status["state"] == "no_session":
+                print("Strava auth: not authorized - run --setup-strava")
+            elif strava_status["state"] == "refresh_needed":
+                print("Strava auth: access token expired, will refresh on next sync")
+            else:
+                print("Strava auth: valid (refresh token active)")
 
 
 def _migrate_config_passwords(config_path: Path) -> None:
     """One-time migration: move passwords from config.yaml to keychain."""
-    from eufy_garmin_sync.credentials import store_password, get_password, _keyring_available
+    from eufy_sync.credentials import store_password, get_password, _keyring_available
 
     if not _keyring_available():
         return
@@ -542,10 +673,12 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="eufy-sync",
-        description="Sync Eufy smart scale data to Garmin Connect",
+        description="Sync Eufy smart scale data to Garmin Connect and Strava",
     )
     parser.add_argument("--status", action="store_true", help="Show sync status and token health")
-    parser.add_argument("--reauth", action="store_true", help="Re-login to Garmin")
+    parser.add_argument("--reauth", nargs="?", const="all", default=None, metavar="TARGET",
+                        help="Re-authenticate (optionally: garmin or strava)")
+    parser.add_argument("--setup-strava", action="store_true", help="Connect Strava to your account")
     parser.add_argument("--update-password", action="store_true", help="Change stored passwords")
     parser.add_argument("--backfill-days", type=int, default=None, help="Sync last N days")
     parser.add_argument("--dry-run", action="store_true", help="Preview without uploading")
@@ -575,18 +708,21 @@ def main() -> None:
         _uninstall_launch_agent()
         return
 
+    # Handle Strava setup
+    if args.setup_strava:
+        _setup_strava(config_path)
+        return
+
     # Handle password update
     if args.update_password:
         _update_password(config_path)
         return
 
     # Handle reauth
-    if args.reauth:
-        _reauth(config_path, force=True)
+    if args.reauth is not None:
+        target = None if args.reauth == "all" else args.reauth
+        _reauth(config_path, force=True, target=target)
         return
-
-    # Ensure Chromium is installed before any sync or setup
-    _ensure_chromium()
 
     # First-run setup if no config exists
     first_run = not config_path.exists()
@@ -597,12 +733,17 @@ def main() -> None:
         _migrate_config_passwords(config_path)
 
     # Load config (passwords resolved from keychain or YAML fallback)
-    from eufy_garmin_sync.config import AppConfig, load_config
+    from eufy_sync.config import AppConfig, load_config
     config = load_config(config_path)
+
+    # Only install Chromium if Garmin is configured
+    has_garmin = any(u.garmin for u in config.users)
+    if has_garmin:
+        _ensure_chromium()
 
     # Handle status
     if args.status:
-        from eufy_garmin_sync.state import SyncState
+        from eufy_sync.state import SyncState
         state = SyncState(db_path)
         _show_status(state, config.users)
         state.close()
@@ -610,8 +751,8 @@ def main() -> None:
 
     # Run sync
     import logging
-    from eufy_garmin_sync.sync import sync_user
-    from eufy_garmin_sync.state import SyncState
+    from eufy_sync.sync import sync_user
+    from eufy_sync.state import SyncState
 
     log_level = "DEBUG" if args.verbose else "WARNING"
     logging.basicConfig(
@@ -620,7 +761,7 @@ def main() -> None:
     )
     if not args.verbose:
         logging.getLogger("httpx").setLevel(logging.WARNING)
-    logger = logging.getLogger("eufy_garmin_sync")
+    logger = logging.getLogger("eufy_sync")
 
     _check_for_updates()
 
@@ -631,16 +772,19 @@ def main() -> None:
     state = SyncState(db_path)
 
     try:
-        total = 0
+        total_counts: dict[str, int] = {}
         failures = []
         for user in config.users:
             try:
-                count = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
-                total += count
-                logger.info("User %s: synced %d measurements", user.name, count)
+                counts = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                for target_name, count in counts.items():
+                    total_counts[target_name] = total_counts.get(target_name, 0) + count
+                logger.info("User %s: synced %s", user.name, counts)
             except Exception as e:
                 logger.exception("Failed to sync user %s", user.name)
                 failures.append((user.name, str(e)))
+
+        total = sum(total_counts.values())
 
         if failures:
             reauth_needed = any("re-authenticate" in err for _, err in failures)
@@ -655,7 +799,8 @@ def main() -> None:
             logger.error("Sync failed for: %s", "; ".join(f"{n}: {e[:80]}" for n, e in failures))
 
         if total > 0:
-            _notify("eufy-sync", f"Synced {total} measurement{'s' if total != 1 else ''} to Garmin")
+            target_label = " and ".join(n.capitalize() for n in total_counts if total_counts[n] > 0)
+            _notify("eufy-sync", f"Synced {total} measurement{'s' if total != 1 else ''} to {target_label}")
 
         if first_run:
             if failures:
@@ -663,13 +808,19 @@ def main() -> None:
                 print("First sync failed. Fix the issue above, then run eufy-sync again.")
             else:
                 if total > 0:
+                    target_label = " and ".join(n.capitalize() for n in total_counts if total_counts[n] > 0)
                     print("")
-                    print(f"Synced {total} measurements to Garmin Connect.")
+                    print(f"Synced {total} measurements to {target_label}.")
                 _offer_launch_agent()
                 print("")
-                print("You're all set! Check the Garmin Connect app to see your data.")
+                apps = []
+                if has_garmin:
+                    apps.append("Garmin Connect")
+                if any(u.strava for u in config.users):
+                    apps.append("Strava")
+                print(f"You're all set! Check the {' and '.join(apps)} app to see your data.")
         elif not args.verbose:
-            _print_summary(total, failures, state, config.users)
+            _print_summary(total_counts, failures, state, config.users)
 
         sys.exit(1 if failures else 0)
 

@@ -21,10 +21,17 @@ class GarminConfig:
 
 
 @dataclass
+class StravaConfig:
+    client_id: str
+    client_secret: str
+
+
+@dataclass
 class UserConfig:
     name: str
     eufy: EufyConfig
-    garmin: GarminConfig
+    garmin: GarminConfig | None = None
+    strava: StravaConfig | None = None
 
 
 @dataclass
@@ -62,7 +69,7 @@ def _walk_and_interpolate(obj: dict | list | str) -> dict | list | str:
 
 def _get_password(user_name: str, service: str, email: str, yaml_password: str | None) -> str:
     """Resolve password: keychain first, then YAML fallback."""
-    from eufy_garmin_sync.credentials import get_password, _keyring_available
+    from eufy_sync.credentials import get_password, _keyring_available
 
     if _keyring_available():
         key = f"{user_name}:{service}"
@@ -88,16 +95,35 @@ def load_config(path: Path) -> AppConfig:
     users = []
     for u in raw["users"]:
         name = u["name"]
+
+        garmin = None
+        if "garmin" in u:
+            garmin = GarminConfig(
+                email=u["garmin"]["email"],
+                password=_get_password(name, "garmin", u["garmin"]["email"], u["garmin"].get("password")),
+            )
+
+        strava = None
+        if "strava" in u:
+            strava = StravaConfig(
+                client_id=str(u["strava"]["client_id"]),
+                client_secret=u["strava"]["client_secret"],
+            )
+
+        if not garmin and not strava:
+            raise ValueError(
+                f"User '{name}' has no sync targets configured. "
+                f"Add a 'garmin' and/or 'strava' section to your config."
+            )
+
         users.append(UserConfig(
             name=name,
             eufy=EufyConfig(
                 email=u["eufy"]["email"],
                 password=_get_password(name, "eufy", u["eufy"]["email"], u["eufy"].get("password")),
             ),
-            garmin=GarminConfig(
-                email=u["garmin"]["email"],
-                password=_get_password(name, "garmin", u["garmin"]["email"], u["garmin"].get("password")),
-            ),
+            garmin=garmin,
+            strava=strava,
         ))
 
     return AppConfig(

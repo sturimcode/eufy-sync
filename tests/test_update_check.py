@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from eufy_garmin_sync.cli import _check_for_updates, UPDATE_CHECK_INTERVAL
+from eufy_sync.cli import _check_for_updates, UPDATE_CHECK_INTERVAL
 
 
 def _mock_pypi_response(version: str) -> MagicMock:
@@ -22,8 +22,8 @@ def test_skips_when_cache_is_fresh(tmp_path: Path):
     cache_file = tmp_path / "update_check"
     cache_file.write_text(str(time.time()))  # just checked
 
-    with patch("eufy_garmin_sync.cli.DATA_DIR", tmp_path), \
-         patch("eufy_garmin_sync.cli.urllib.request.urlopen") as mock_urlopen:
+    with patch("eufy_sync.cli.DATA_DIR", tmp_path), \
+         patch("eufy_sync.cli.urllib.request.urlopen") as mock_urlopen:
 
         _check_for_updates()
 
@@ -34,9 +34,9 @@ def test_checks_pypi_when_cache_stale(tmp_path: Path, capsys):
     cache_file = tmp_path / "update_check"
     cache_file.write_text(str(time.time() - UPDATE_CHECK_INTERVAL - 1))
 
-    with patch("eufy_garmin_sync.cli.DATA_DIR", tmp_path), \
-         patch("eufy_garmin_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response("99.0.0")), \
-         patch("eufy_garmin_sync.cli.sys.stdin") as mock_stdin:
+    with patch("eufy_sync.cli.DATA_DIR", tmp_path), \
+         patch("eufy_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response("99.0.0")), \
+         patch("eufy_sync.cli.sys.stdin") as mock_stdin:
         mock_stdin.isatty.return_value = True
 
         _check_for_updates()
@@ -50,10 +50,10 @@ def test_no_message_when_up_to_date(tmp_path: Path, capsys):
     cache_file = tmp_path / "update_check"
     cache_file.write_text(str(time.time() - UPDATE_CHECK_INTERVAL - 1))
 
-    from eufy_garmin_sync import __version__
+    from eufy_sync import __version__
 
-    with patch("eufy_garmin_sync.cli.DATA_DIR", tmp_path), \
-         patch("eufy_garmin_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response(__version__)):
+    with patch("eufy_sync.cli.DATA_DIR", tmp_path), \
+         patch("eufy_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response(__version__)):
 
         _check_for_updates()
 
@@ -64,8 +64,8 @@ def test_no_message_when_local_is_newer(tmp_path: Path, capsys):
     cache_file = tmp_path / "update_check"
     cache_file.write_text(str(time.time() - UPDATE_CHECK_INTERVAL - 1))
 
-    with patch("eufy_garmin_sync.cli.DATA_DIR", tmp_path), \
-         patch("eufy_garmin_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response("0.0.1")):
+    with patch("eufy_sync.cli.DATA_DIR", tmp_path), \
+         patch("eufy_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response("0.0.1")):
 
         _check_for_updates()
 
@@ -76,8 +76,8 @@ def test_silent_on_network_error(tmp_path: Path, capsys):
     cache_file = tmp_path / "update_check"
     cache_file.write_text(str(time.time() - UPDATE_CHECK_INTERVAL - 1))
 
-    with patch("eufy_garmin_sync.cli.DATA_DIR", tmp_path), \
-         patch("eufy_garmin_sync.cli.urllib.request.urlopen", side_effect=OSError("no network")):
+    with patch("eufy_sync.cli.DATA_DIR", tmp_path), \
+         patch("eufy_sync.cli.urllib.request.urlopen", side_effect=OSError("no network")):
 
         _check_for_updates()
 
@@ -86,10 +86,10 @@ def test_silent_on_network_error(tmp_path: Path, capsys):
 
 def test_cache_written_after_successful_check(tmp_path: Path):
     # No cache file initially
-    from eufy_garmin_sync import __version__
+    from eufy_sync import __version__
 
-    with patch("eufy_garmin_sync.cli.DATA_DIR", tmp_path), \
-         patch("eufy_garmin_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response(__version__)):
+    with patch("eufy_sync.cli.DATA_DIR", tmp_path), \
+         patch("eufy_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response(__version__)):
 
         _check_for_updates()
 
@@ -100,8 +100,8 @@ def test_cache_written_after_successful_check(tmp_path: Path):
 
 
 def test_cache_not_written_on_network_error(tmp_path: Path):
-    with patch("eufy_garmin_sync.cli.DATA_DIR", tmp_path), \
-         patch("eufy_garmin_sync.cli.urllib.request.urlopen", side_effect=OSError("no network")):
+    with patch("eufy_sync.cli.DATA_DIR", tmp_path), \
+         patch("eufy_sync.cli.urllib.request.urlopen", side_effect=OSError("no network")):
 
         _check_for_updates()
 
@@ -113,10 +113,10 @@ def test_suggests_pipx_when_available(tmp_path: Path, capsys):
     cache_file = tmp_path / "update_check"
     cache_file.write_text(str(time.time() - UPDATE_CHECK_INTERVAL - 1))
 
-    with patch("eufy_garmin_sync.cli.DATA_DIR", tmp_path), \
-         patch("eufy_garmin_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response("99.0.0")), \
-         patch("eufy_garmin_sync.cli.shutil.which", return_value="/usr/local/bin/pipx"), \
-         patch("eufy_garmin_sync.cli.sys.stdin") as mock_stdin:
+    with patch("eufy_sync.cli.DATA_DIR", tmp_path), \
+         patch("eufy_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response("99.0.0")), \
+         patch("eufy_sync.cli.shutil.which", return_value="/usr/local/bin/pipx"), \
+         patch("eufy_sync.cli.sys.stdin") as mock_stdin:
         mock_stdin.isatty.return_value = True
 
         _check_for_updates()
@@ -128,10 +128,10 @@ def test_suggests_pip_when_no_pipx(tmp_path: Path, capsys):
     cache_file = tmp_path / "update_check"
     cache_file.write_text(str(time.time() - UPDATE_CHECK_INTERVAL - 1))
 
-    with patch("eufy_garmin_sync.cli.DATA_DIR", tmp_path), \
-         patch("eufy_garmin_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response("99.0.0")), \
-         patch("eufy_garmin_sync.cli.shutil.which", return_value=None), \
-         patch("eufy_garmin_sync.cli.sys.stdin") as mock_stdin:
+    with patch("eufy_sync.cli.DATA_DIR", tmp_path), \
+         patch("eufy_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response("99.0.0")), \
+         patch("eufy_sync.cli.shutil.which", return_value=None), \
+         patch("eufy_sync.cli.sys.stdin") as mock_stdin:
         mock_stdin.isatty.return_value = True
 
         _check_for_updates()

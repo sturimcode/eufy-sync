@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 
-from eufy_garmin_sync.config import EufyConfig
+from eufy_sync.config import EufyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ class EufyClient:
 
     def _load_cached_token(self) -> bool:
         # Try keychain first
-        from eufy_garmin_sync.credentials import get_token, _keyring_available
+        from eufy_sync.credentials import get_token, _keyring_available
         if _keyring_available():
             data = get_token("eufy")
             if data and time.time() < data.get("expires_at", 0) - 3600:
@@ -118,7 +118,7 @@ class EufyClient:
             "expires_at": time.time() + expires_in,
         }
 
-        from eufy_garmin_sync.credentials import store_token, _keyring_available
+        from eufy_sync.credentials import store_token, _keyring_available
         if _keyring_available():
             store_token("eufy", token_data)
             # Remove legacy file if it exists
@@ -133,7 +133,7 @@ class EufyClient:
             json.dump(token_data, f)
 
     def _clear_cached_token(self) -> None:
-        from eufy_garmin_sync.credentials import delete_token, _keyring_available
+        from eufy_sync.credentials import delete_token, _keyring_available
         if _keyring_available():
             delete_token("eufy")
         if self.token_path.exists():

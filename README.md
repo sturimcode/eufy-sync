@@ -1,17 +1,17 @@
-# eufy-garmin-sync
+# eufy-sync
 
-[![PyPI](https://img.shields.io/pypi/v/eufy-garmin-sync)](https://pypi.org/project/eufy-garmin-sync/)
-[![Downloads](https://img.shields.io/pypi/dm/eufy-garmin-sync)](https://pypi.org/project/eufy-garmin-sync/)
-![Python](https://img.shields.io/pypi/pyversions/eufy-garmin-sync)
+[![PyPI](https://img.shields.io/pypi/v/eufy-sync)](https://pypi.org/project/eufy-sync/)
+[![Downloads](https://img.shields.io/pypi/dm/eufy-sync)](https://pypi.org/project/eufy-sync/)
+![Python](https://img.shields.io/pypi/pyversions/eufy-sync)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Syncs body composition data from a Eufy smart scale to Garmin Connect. Weight, body fat %, muscle mass, bone mass, hydration, BMR, visceral fat, and metabolic age all come through.
+Syncs body composition data from a Eufy smart scale to Garmin Connect and/or Strava. Weight, body fat %, muscle mass, bone mass, hydration, BMR, visceral fat, and metabolic age all come through to Garmin. Strava gets weight updates.
 
 > macOS only. Requires Python 3.9+ and a terminal. Setup is guided - you just answer a few prompts.
 
 ## The problem
 
-Eufy scales sync to Apple Health, Fitbit, and Google Fit - but not Garmin. If you use Garmin for training, your body comp data is stuck in a separate app. This fixes that.
+Eufy scales sync to Apple Health, Fitbit, and Google Fit - but not Garmin or Strava. If you use either for training, your body comp data is stuck in a separate app. This fixes that.
 
 ## Why not just use python-garminconnect?
 
@@ -21,7 +21,7 @@ This project gets around it with Playwright. On first run, a real Chromium windo
 
 ## Install
 
-You need Python 3.9+, a Eufy scale with cloud sync, and a Garmin Connect account.
+You need Python 3.9+, a Eufy scale with cloud sync, and a Garmin Connect and/or Strava account.
 
 First, install pipx if you don't have it:
 ```bash
@@ -31,21 +31,24 @@ Or if you don't use Homebrew: `pip3 install pipx`
 
 Then install and run:
 ```bash
-pipx install eufy-garmin-sync
+pipx install eufy-sync
 eufy-sync
 ```
 
-Setup is guided on first run - enter your credentials, log into Garmin in the browser that opens, and your data syncs automatically.
+Setup is guided on first run - choose your sync targets (Garmin, Strava, or both), enter your credentials, and your data syncs automatically.
 
-> **Note:** If you've cloned this repo, run pipx commands from outside the repo directory to avoid path conflicts (e.g., `cd /tmp && pipx install eufy-garmin-sync`).
+> **Note:** If you've cloned this repo, run pipx commands from outside the repo directory to avoid path conflicts (e.g., `cd /tmp && pipx install eufy-sync`).
 
 ## Usage
 
 ```bash
-eufy-sync                      # sync new measurements
+eufy-sync                      # sync new measurements to all configured targets
 eufy-sync --status           # check last sync + token health
 eufy-sync --dry-run          # preview without uploading
-eufy-sync --reauth           # re-login to Garmin if tokens expire
+eufy-sync --setup-strava     # connect Strava (add to existing setup)
+eufy-sync --reauth           # re-login to all targets
+eufy-sync --reauth garmin    # re-login to Garmin only
+eufy-sync --reauth strava    # re-authorize Strava only
 eufy-sync --update-password  # change stored passwords
 eufy-sync --backfill-days 30 # sync last 30 days
 eufy-sync --verbose          # show detailed sync logs
@@ -59,7 +62,7 @@ eufy-sync --uninstall       # remove all data and clean up
 The tool checks for updates weekly and will let you know when a new version is available. To update:
 
 ```bash
-pipx install --force eufy-garmin-sync
+pipx install --force eufy-sync
 ```
 
 ## Automatic sync (macOS)
@@ -70,25 +73,38 @@ Logs go to `~/.garmin-sync/sync.log`. You get a macOS notification if something 
 
 To disable: `eufy-sync --uninstall-agent`
 
+## Adding Strava
+
+If you already have Garmin set up and want to add Strava:
+
+1. Create a Strava API application at https://www.strava.com/settings/api
+2. Set the redirect URI to `http://localhost:8089/callback`
+3. Run `eufy-sync --setup-strava` and enter your Client ID and Secret
+4. Authorize in the browser when it opens
+
+Future syncs will update both Garmin and Strava automatically. Strava receives weight only (no body composition - Strava's API limitation).
+
 ## How it works
 
 ```
-Eufy Cloud API --> eufy_client.py --> transform.py --> garmin_client.py --> Garmin Connect
-(fetch history)    (auth + pull)     (filter, dedup)   (FIT file + upload)
-                                          |
-                                      state.db
+                                                  /--> garmin_client.py --> Garmin Connect
+Eufy Cloud API --> eufy_client.py --> transform.py     (FIT file + upload)
+(fetch history)    (auth + pull)     (filter, dedup) \
+                                          |           \--> strava_client.py --> Strava
+                                      state.db              (weight update)
                                    (sync watermark)
 ```
 
 1. Authenticate to Eufy cloud API, pull measurement history
-2. Check local SQLite DB for what's already been synced
-3. Check Garmin for existing entries on the same date (handles multi-machine dedup)
-4. Generate a FIT binary file for each new measurement
-5. Upload to Garmin Connect, record in DB
+2. Check local SQLite DB for what's already been synced (per target)
+3. For Garmin: check for existing entries on the same date (multi-machine dedup)
+4. Generate a FIT binary file and upload to Garmin Connect
+5. Update athlete weight on Strava
+6. Record syncs in DB
 
 ## Security
 
-Your passwords and OAuth tokens are stored in your system keychain (macOS Keychain) - not in plaintext files. Config files in `~/.garmin-sync/` only contain email addresses, with `600` permissions. Credentials are only sent to Eufy and Garmin's own servers over HTTPS. They are never logged, uploaded, or transmitted anywhere else. The only other outbound call is a weekly version check to `pypi.org` (no credentials sent). You can verify this yourself - the codebase is small and the outbound calls are in `eufy_client.py`, `garmin_auth.py`, and the update checker in `cli.py`.
+Your passwords and OAuth tokens are stored in your system keychain (macOS Keychain) - not in plaintext files. Config files in `~/.garmin-sync/` only contain email addresses and Strava API app credentials, with `600` permissions. Credentials are only sent to Eufy, Garmin, and Strava's own servers over HTTPS. They are never logged, uploaded, or transmitted anywhere else. The only other outbound call is a weekly version check to `pypi.org` (no credentials sent). You can verify this yourself - the codebase is small and the outbound calls are in `eufy_client.py`, `garmin_auth.py`, `strava_client.py`, and the update checker in `cli.py`.
 
 On systems without keychain support (headless Linux), credentials fall back to file-based storage with `600` permissions.
 
@@ -104,5 +120,5 @@ pytest tests/ -v
 
 ## Disclaimer
 
-Uses unofficial APIs for both Eufy and Garmin. Could break if either company changes things. Use at your own risk.
+Uses unofficial APIs for Eufy and Garmin, and the official Strava API. Could break if any of these companies change things. Use at your own risk.
 

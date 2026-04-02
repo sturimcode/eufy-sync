@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 import yaml
 
-from eufy_garmin_sync.cli import (
+from eufy_sync.cli import (
     _write_config,
     _generate_plist,
     _install_launch_agent,
@@ -70,10 +70,10 @@ def test_generate_plist_contains_log_path():
     assert ".garmin-sync/sync.log" in plist
 
 
-@patch("eufy_garmin_sync.cli.subprocess.run")
-@patch("eufy_garmin_sync.cli.shutil.which", return_value="/home/user/.local/bin/eufy-sync")
-@patch("eufy_garmin_sync.cli.platform.system", return_value="Darwin")
-@patch("eufy_garmin_sync.cli.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.cli.subprocess.run")
+@patch("eufy_sync.cli.shutil.which", return_value="/home/user/.local/bin/eufy-sync")
+@patch("eufy_sync.cli.platform.system", return_value="Darwin")
+@patch("eufy_sync.cli.LAUNCH_AGENT_PATH")
 def test_install_launch_agent_writes_plist_and_loads(mock_path, mock_system, mock_which, mock_run):
     mock_path.parent.mkdir = MagicMock()
     mock_path.write_text = MagicMock()
@@ -91,21 +91,21 @@ def test_install_launch_agent_writes_plist_and_loads(mock_path, mock_system, moc
     assert "load" in mock_run.call_args_list[1][0][0]
 
 
-@patch("eufy_garmin_sync.cli.platform.system", return_value="Linux")
+@patch("eufy_sync.cli.platform.system", return_value="Linux")
 def test_install_launch_agent_skips_on_linux(mock_system, capsys):
     _install_launch_agent()
     assert "only supported on macOS" in capsys.readouterr().out
 
 
-@patch("eufy_garmin_sync.cli.shutil.which", return_value=None)
-@patch("eufy_garmin_sync.cli.platform.system", return_value="Darwin")
+@patch("eufy_sync.cli.shutil.which", return_value=None)
+@patch("eufy_sync.cli.platform.system", return_value="Darwin")
 def test_install_launch_agent_warns_if_binary_not_found(mock_system, mock_which, capsys):
     _install_launch_agent()
     assert "could not find eufy-sync" in capsys.readouterr().out
 
 
-@patch("eufy_garmin_sync.cli.subprocess.run")
-@patch("eufy_garmin_sync.cli.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.cli.subprocess.run")
+@patch("eufy_sync.cli.LAUNCH_AGENT_PATH")
 def test_uninstall_launch_agent_removes_plist(mock_path, mock_run):
     mock_path.exists.return_value = True
     mock_path.unlink = MagicMock()
@@ -117,7 +117,7 @@ def test_uninstall_launch_agent_removes_plist(mock_path, mock_run):
     mock_path.unlink.assert_called_once()
 
 
-@patch("eufy_garmin_sync.cli.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.cli.LAUNCH_AGENT_PATH")
 def test_uninstall_launch_agent_noop_if_not_installed(mock_path, capsys):
     mock_path.exists.return_value = False
 
@@ -126,10 +126,10 @@ def test_uninstall_launch_agent_noop_if_not_installed(mock_path, capsys):
     assert "No Launch Agent installed" in capsys.readouterr().out
 
 
-@patch("eufy_garmin_sync.cli._install_launch_agent")
+@patch("eufy_sync.cli._install_launch_agent")
 @patch("builtins.input", return_value="y")
-@patch("eufy_garmin_sync.cli.sys.stdin")
-@patch("eufy_garmin_sync.cli.platform.system", return_value="Darwin")
+@patch("eufy_sync.cli.sys.stdin")
+@patch("eufy_sync.cli.platform.system", return_value="Darwin")
 def test_offer_launch_agent_installs_on_yes(mock_system, mock_stdin, mock_input, mock_install):
     mock_stdin.isatty.return_value = True
 
@@ -138,10 +138,10 @@ def test_offer_launch_agent_installs_on_yes(mock_system, mock_stdin, mock_input,
     mock_install.assert_called_once()
 
 
-@patch("eufy_garmin_sync.cli._install_launch_agent")
+@patch("eufy_sync.cli._install_launch_agent")
 @patch("builtins.input", return_value="n")
-@patch("eufy_garmin_sync.cli.sys.stdin")
-@patch("eufy_garmin_sync.cli.platform.system", return_value="Darwin")
+@patch("eufy_sync.cli.sys.stdin")
+@patch("eufy_sync.cli.platform.system", return_value="Darwin")
 def test_offer_launch_agent_skips_on_no(mock_system, mock_stdin, mock_input, mock_install):
     mock_stdin.isatty.return_value = True
 
@@ -150,9 +150,9 @@ def test_offer_launch_agent_skips_on_no(mock_system, mock_stdin, mock_input, moc
     mock_install.assert_not_called()
 
 
-@patch("eufy_garmin_sync.cli._install_launch_agent")
-@patch("eufy_garmin_sync.cli.sys.stdin")
-@patch("eufy_garmin_sync.cli.platform.system", return_value="Darwin")
+@patch("eufy_sync.cli._install_launch_agent")
+@patch("eufy_sync.cli.sys.stdin")
+@patch("eufy_sync.cli.platform.system", return_value="Darwin")
 def test_offer_launch_agent_skips_non_interactive(mock_system, mock_stdin, mock_install):
     mock_stdin.isatty.return_value = False
 

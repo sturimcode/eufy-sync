@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from eufy_garmin_sync.eufy_client import EufyMeasurement
+from eufy_sync.eufy_client import EufyMeasurement
 
 
 @dataclass
