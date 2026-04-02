@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+import time
+from unittest.mock import patch, MagicMock
+
+from eufy_sync.config import StravaConfig
+from eufy_sync.strava_client import StravaClient
+
+
+def _make_config():
+    return StravaConfig(client_id="12345", client_secret="secret")
+
+
+def _make_tokens(expired: bool = False):
+    if expired:
+        return {
+            "access_token": "old_access",
+            "refresh_token": "refresh_tok",
+            "expires_at": time.time() - 3600,
+        }
+    return {
+        "access_token": "valid_access",
+        "refresh_token": "refresh_tok",
+        "expires_at": time.time() + 3600,
+    }
+
+
+def test_token_status_valid():
+    client = StravaClient(_make_config())
+    with patch("eufy_sync.strava_client._load_tokens", return_value=_make_tokens()):
+        status = client.token_status()
+    assert status["state"] == "valid"
+    assert "hours_remaining" in status
+
+
+def test_token_status_refresh_needed():
+    client = StravaClient(_make_config())
+    with patch("eufy_sync.strava_client._load_tokens", return_value=_make_tokens(expired=True)):
+        status = client.token_status()
+    assert status["state"] == "refresh_needed"
+
+
+def test_token_status_no_session():
+    client = StravaClient(_make_config())
+    with patch("eufy_sync.strava_client._load_tokens", return_value=None):
+        status = client.token_status()
+    assert status["state"] == "no_session"
+
+
+def test_token_status_expired_no_refresh():
+    client = StravaClient(_make_config())
+    tokens = {"access_token": "old", "refresh_token": "", "expires_at": time.time() - 3600}
+    with patch("eufy_sync.strava_client._load_tokens", return_value=tokens):
+        status = client.token_status()
+    assert status["state"] == "expired"
+
+
+@patch("eufy_sync.strava_client._save_tokens")
+@patch("eufy_sync.strava_client._load_tokens")
+def test_authenticate_with_valid_token(mock_load, mock_save):
+    mock_load.return_value = _make_tokens()
+    client = StravaClient(_make_config())
+    client.authenticate()
+    assert "Bearer valid_access" in client._client.headers.get("Authorization", "")
+    client.close()
+
+
+@patch("eufy_sync.strava_client._save_tokens")
+@patch("eufy_sync.strava_client._load_tokens")
+def test_authenticate_refreshes_expired_token(mock_load, mock_save):
+    mock_load.return_value = _make_tokens(expired=True)
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "access_token": "new_access",
+        "refresh_token": "new_refresh",
+        "expires_at": time.time() + 21600,
+    }
+
+    client = StravaClient(_make_config())
+    with patch.object(client._client, "post", return_value=mock_response):
+        client.authenticate()
+
+    assert "Bearer new_access" in client._client.headers.get("Authorization", "")
+    mock_save.assert_called()
+    client.close()
+
+
+@patch("eufy_sync.strava_client._load_tokens", return_value=None)
+def test_authenticate_raises_without_tokens(mock_load):
+    client = StravaClient(_make_config())
+    try:
+        client.authenticate()
+        assert False, "Should have raised"
+    except RuntimeError as e:
+        assert "--setup-strava" in str(e)
+    client.close()
+
+
+@patch("eufy_sync.strava_client._save_tokens")
+@patch("eufy_sync.strava_client._load_tokens")
+def test_update_weight(mock_load, mock_save):
+    mock_load.return_value = _make_tokens()
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"weight": 86.2}
+
+    client = StravaClient(_make_config())
+    client.authenticate()
+
+    with patch.object(client._client, "put", return_value=mock_response) as mock_put:
+        result = client.update_weight(86.2)
+
+    assert result == {"weight": 86.2}
+    call_kwargs = mock_put.call_args
+    assert "athlete" in call_kwargs[0][0]
+    client.close()
+
+
+@patch("eufy_sync.strava_client._save_tokens")
+@patch("eufy_sync.strava_client._load_tokens")
+def test_update_weight_failure_raises(mock_load, mock_save):
+    mock_load.return_value = _make_tokens()
+
+    mock_response = MagicMock()
+    mock_response.status_code = 401
+    mock_response.text = "Unauthorized"
+
+    client = StravaClient(_make_config())
+    client.authenticate()
+
+    with patch.object(client._client, "put", return_value=mock_response):
+        try:
+            client.update_weight(86.2)
+            assert False, "Should have raised"
+        except RuntimeError as e:
+            assert "401" in str(e)
+    client.close()

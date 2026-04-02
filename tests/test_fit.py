@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from eufy_garmin_sync.fit import FitEncoder, _crc16, _fit_timestamp, FIT_EPOCH
+from eufy_sync.fit import FitEncoder, _crc16, _fit_timestamp, FIT_EPOCH
 
 
 def test_fit_timestamp_conversion():

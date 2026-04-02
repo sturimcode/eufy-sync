@@ -10,10 +10,10 @@ from datetime import datetime, timedelta
 
 import httpx
 
-from eufy_garmin_sync.config import GarminConfig
-from eufy_garmin_sync.fit import FitEncoder
-from eufy_garmin_sync.garmin_auth import API_HEADERS, GarminAuth
-from eufy_garmin_sync.transform import GarminBodyComposition
+from eufy_sync.config import GarminConfig
+from eufy_sync.fit import FitEncoder
+from eufy_sync.garmin_auth import API_HEADERS, GarminAuth
+from eufy_sync.transform import GarminBodyComposition
 
 logger = logging.getLogger(__name__)
 

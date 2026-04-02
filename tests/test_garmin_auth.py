@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from unittest.mock import patch, MagicMock
 
-from eufy_garmin_sync.garmin_auth import GarminAuth, GarminSession, TokenPair
+from eufy_sync.garmin_auth import GarminAuth, GarminSession, TokenPair
 
 
 def _make_token(access_expires_in: float = 3600, refresh_expires_in: float = 86400 * 365) -> TokenPair:

@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from eufy_garmin_sync.sync import _retry
+from eufy_sync.sync import _retry
 
 
 def test_retry_succeeds_first_try():
@@ -21,7 +21,7 @@ def test_retry_succeeds_after_failures():
             raise RuntimeError("fail")
         return "ok"
 
-    with patch("eufy_garmin_sync.sync.time.sleep"):
+    with patch("eufy_sync.sync.time.sleep"):
         result = _retry(flaky, "flaky op")
     assert result == "ok"
     assert attempts[0] == 3
@@ -31,6 +31,6 @@ def test_retry_raises_after_max_attempts():
     def always_fail():
         raise RuntimeError("permanent failure")
 
-    with patch("eufy_garmin_sync.sync.time.sleep"):
+    with patch("eufy_sync.sync.time.sleep"):
         with pytest.raises(RuntimeError, match="permanent failure"):
             _retry(always_fail, "doomed op")

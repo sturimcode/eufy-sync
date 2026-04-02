@@ -3,15 +3,16 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "eufy-garmin-sync"
-version = "1.4.0"
-description = "Sync Eufy smart scale body composition data to Garmin Connect"
+name = "eufy-sync"
+version = "1.5.0"
+description = "Sync Eufy smart scale body composition data to Garmin Connect and Strava"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
 keywords = [
     "garmin",
     "garmin connect",
+    "strava",
     "eufy",
     "eufylife",
     "smart scale",
@@ -40,14 +41,14 @@ dependencies = [
 ]
 
 [project.scripts]
-eufy-sync = "eufy_garmin_sync.cli:main"
+eufy-sync = "eufy_sync.cli:main"
 
 [project.urls]
-Repository = "https://github.com/sturimcode/eufy-garmin-sync"
-Issues = "https://github.com/sturimcode/eufy-garmin-sync/issues"
+Repository = "https://github.com/sturimcode/eufy-sync"
+Issues = "https://github.com/sturimcode/eufy-sync/issues"
 
 [tool.setuptools.packages.find]
-include = ["eufy_garmin_sync*"]
+include = ["eufy_sync*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

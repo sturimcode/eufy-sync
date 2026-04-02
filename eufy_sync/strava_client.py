@@ -1,0 +1,248 @@
+"""Strava OAuth2 authentication and weight sync.
+
+Flow:
+1. First run: User registers a Strava API app at strava.com/settings/api,
+   then runs --setup-strava. We open the browser for OAuth authorization,
+   capture the callback code via a local HTTP server, and exchange for tokens.
+2. Tokens stored in keychain (file fallback).
+3. Access tokens expire after 6 hours; refresh tokens are indefinite.
+4. On each sync, we PUT /api/v3/athlete with the latest weight.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import time
+import webbrowser
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
+from threading import Thread
+from urllib.parse import parse_qs, urlparse
+
+import httpx
+
+from eufy_sync.config import StravaConfig
+
+logger = logging.getLogger(__name__)
+
+STRAVA_AUTH_URL = "https://www.strava.com/oauth/authorize"
+STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
+STRAVA_API_BASE = "https://www.strava.com/api/v3"
+CALLBACK_PORT = 8089
+REDIRECT_URI = f"http://localhost:{CALLBACK_PORT}/callback"
+REFRESH_SAFETY_MARGIN = 300  # seconds before expiry to trigger refresh
+
+
+def authorize_strava(config: StravaConfig) -> dict:
+    """Run the OAuth authorization flow in the browser.
+
+    Starts a local HTTP server to capture the callback, opens the browser,
+    and exchanges the authorization code for tokens.
+
+    Returns the token dict (access_token, refresh_token, expires_at).
+    """
+    captured_code: list[str] = []
+
+    class CallbackHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            query = parse_qs(urlparse(self.path).query)
+            if "code" in query:
+                captured_code.append(query["code"][0])
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body><h2>Authorization successful!</h2>"
+                    b"<p>You can close this tab and return to the terminal.</p>"
+                    b"</body></html>"
+                )
+            elif "error" in query:
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                error = query.get("error", ["unknown"])[0]
+                self.wfile.write(f"<html><body><h2>Authorization failed: {error}</h2></body></html>".encode())
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, format, *args):
+            pass  # Suppress HTTP server logging
+
+    server = HTTPServer(("localhost", CALLBACK_PORT), CallbackHandler)
+    server_thread = Thread(target=server.handle_request, daemon=True)
+    server_thread.start()
+
+    auth_url = (
+        f"{STRAVA_AUTH_URL}"
+        f"?client_id={config.client_id}"
+        f"&response_type=code"
+        f"&redirect_uri={REDIRECT_URI}"
+        f"&scope=profile:write,profile:read_all"
+        f"&approval_prompt=force"
+    )
+
+    print(f"\nOpening Strava authorization in your browser...")
+    print(f"If it doesn't open, visit:\n{auth_url}\n")
+    webbrowser.open(auth_url)
+
+    server_thread.join(timeout=120)
+    server.server_close()
+
+    if not captured_code:
+        raise RuntimeError(
+            "Strava authorization timed out - no callback received. "
+            "Make sure your Strava API app's redirect URI is set to: "
+            f"{REDIRECT_URI}"
+        )
+
+    # Exchange code for tokens
+    now = time.time()
+    resp = httpx.post(
+        STRAVA_TOKEN_URL,
+        data={
+            "client_id": config.client_id,
+            "client_secret": config.client_secret,
+            "code": captured_code[0],
+            "grant_type": "authorization_code",
+        },
+        timeout=30.0,
+    )
+
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Failed to exchange Strava authorization code: {resp.status_code} {resp.text}"
+        )
+
+    data = resp.json()
+    tokens = {
+        "access_token": data["access_token"],
+        "refresh_token": data["refresh_token"],
+        "expires_at": data.get("expires_at", now + data.get("expires_in", 21600)),
+    }
+
+    _save_tokens(tokens)
+    logger.info("Strava authorization complete")
+    return tokens
+
+
+class StravaClient:
+    """Syncs weight to Strava via PUT /api/v3/athlete."""
+
+    def __init__(self, config: StravaConfig):
+        self.config = config
+        self._client = httpx.Client(timeout=30.0)
+        self._tokens: dict | None = None
+
+    def authenticate(self) -> None:
+        """Load tokens and refresh if needed."""
+        self._tokens = _load_tokens()
+
+        if self._tokens is None:
+            raise RuntimeError(
+                "No Strava tokens found. Run: eufy-sync --setup-strava"
+            )
+
+        if time.time() >= (self._tokens["expires_at"] - REFRESH_SAFETY_MARGIN):
+            self._refresh_access_token()
+
+        self._client.headers["Authorization"] = f"Bearer {self._tokens['access_token']}"
+
+    def _refresh_access_token(self) -> None:
+        """Refresh the access token using the refresh token."""
+        resp = self._client.post(
+            STRAVA_TOKEN_URL,
+            data={
+                "client_id": self.config.client_id,
+                "client_secret": self.config.client_secret,
+                "grant_type": "refresh_token",
+                "refresh_token": self._tokens["refresh_token"],
+            },
+        )
+
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Failed to refresh Strava token: {resp.status_code} {resp.text}. "
+                f"Re-authorize with: eufy-sync --setup-strava"
+            )
+
+        data = resp.json()
+        self._tokens = {
+            "access_token": data["access_token"],
+            "refresh_token": data["refresh_token"],
+            "expires_at": data.get("expires_at", time.time() + data.get("expires_in", 21600)),
+        }
+        _save_tokens(self._tokens)
+        logger.info("Refreshed Strava access token")
+
+    def update_weight(self, weight_kg: float) -> dict:
+        """Update the athlete's weight on Strava.
+
+        Note: Strava only accepts current weight - no timestamp or body
+        composition fields. When syncing multiple measurements, send in
+        chronological order so the final weight is correct.
+        """
+        resp = self._client.put(
+            f"{STRAVA_API_BASE}/athlete",
+            data={"weight": round(weight_kg, 2)},
+        )
+
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Failed to update Strava weight: {resp.status_code} {resp.text}"
+            )
+
+        logger.info("Updated Strava weight to %.2f kg", weight_kg)
+        return resp.json()
+
+    def token_status(self) -> dict:
+        """Return token health matching GarminAuth.token_status() shape."""
+        tokens = _load_tokens()
+        if tokens is None:
+            return {"state": "no_session", "days_remaining": None}
+        if "refresh_token" not in tokens or not tokens["refresh_token"]:
+            return {"state": "expired", "days_remaining": 0}
+        # Strava refresh tokens are indefinite, so we report based on that
+        if time.time() >= (tokens["expires_at"] - REFRESH_SAFETY_MARGIN):
+            return {"state": "refresh_needed", "days_remaining": None}
+        hours = int((tokens["expires_at"] - time.time()) / 3600)
+        return {"state": "valid", "days_remaining": None, "hours_remaining": hours}
+
+    def close(self) -> None:
+        self._client.close()
+
+
+def _load_tokens() -> dict | None:
+    """Load Strava tokens from keychain or file fallback."""
+    from eufy_sync.credentials import get_token, _keyring_available
+    if _keyring_available():
+        data = get_token("strava")
+        if data:
+            return data
+
+    token_path = Path.home() / ".garmin-sync" / "strava_token.json"
+    if token_path.exists():
+        try:
+            return json.loads(token_path.read_text())
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return None
+
+
+def _save_tokens(tokens: dict) -> None:
+    """Save Strava tokens to keychain or file fallback."""
+    from eufy_sync.credentials import store_token, _keyring_available
+    if _keyring_available():
+        store_token("strava", tokens)
+        # Remove legacy file if it exists
+        token_path = Path.home() / ".garmin-sync" / "strava_token.json"
+        if token_path.exists():
+            token_path.unlink()
+        return
+
+    token_path = Path.home() / ".garmin-sync" / "strava_token.json"
+    token_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(str(token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(tokens, indent=2))

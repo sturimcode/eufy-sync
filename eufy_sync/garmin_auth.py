@@ -380,7 +380,7 @@ class GarminAuth:
 
     def _load_session(self) -> GarminSession | None:
         # Try keychain first
-        from eufy_garmin_sync.credentials import get_token, _keyring_available
+        from eufy_sync.credentials import get_token, _keyring_available
         if _keyring_available():
             data = get_token("garmin")
             if data:
@@ -404,7 +404,7 @@ class GarminAuth:
             return None
 
     def _save_session(self) -> None:
-        from eufy_garmin_sync.credentials import store_token, _keyring_available
+        from eufy_sync.credentials import store_token, _keyring_available
         if _keyring_available():
             store_token("garmin", self.session.to_dict())
             # Remove legacy file if it exists
