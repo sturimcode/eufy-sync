@@ -84,6 +84,25 @@ class EufyClient:
         self._save_token(expires_in)
         logger.info("Authenticated to Eufy as user %s", self.user_id)
 
+    def token_status(self) -> dict:
+        """Return token health without authenticating."""
+        from eufy_sync.credentials import get_token, _keyring_available
+        data = None
+        if _keyring_available():
+            data = get_token("eufy")
+        if data is None and self.token_path.exists():
+            try:
+                data = json.loads(self.token_path.read_text())
+            except Exception:
+                pass
+        if data is None:
+            return {"state": "no_token", "days_remaining": None}
+        remaining = data.get("expires_at", 0) - time.time()
+        if remaining < 3600:
+            return {"state": "expired", "days_remaining": 0}
+        days = int(remaining / 86400)
+        return {"state": "valid", "days_remaining": days}
+
     def _load_cached_token(self) -> bool:
         # Try keychain first
         from eufy_sync.credentials import get_token, _keyring_available

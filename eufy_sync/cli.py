@@ -574,6 +574,15 @@ def _print_summary(total_counts: dict[str, int], failures: list, state, users: l
         else:
             parts.append(f"last sync: {hours}h ago")
 
+    from eufy_sync.eufy_client import EufyClient
+    eufy_status = EufyClient(user.eufy).token_status()
+    if eufy_status["state"] == "expired":
+        parts.append("Eufy token EXPIRED (will re-login on next sync)")
+    elif eufy_status["state"] == "no_token":
+        parts.append("Eufy: no token")
+    elif eufy_status["days_remaining"] is not None:
+        parts.append(f"Eufy token valid {eufy_status['days_remaining']}d")
+
     if user.garmin:
         from eufy_sync.garmin_auth import GarminAuth
         status = GarminAuth(user.garmin.email, user.garmin.password).token_status()
@@ -591,6 +600,10 @@ def _print_summary(total_counts: dict[str, int], failures: list, state, users: l
             parts.append("Strava token EXPIRED")
         elif strava_status["state"] == "no_session":
             parts.append("Strava: not authorized")
+        elif strava_status["state"] == "refresh_needed":
+            parts.append("Strava token refresh pending")
+        else:
+            parts.append("Strava connected")
 
     print(" | ".join(parts))
 
@@ -611,6 +624,16 @@ def _show_status(state, users: list) -> None:
             print(f"Last synced measurement: {last_sync.strftime('%Y-%m-%d %H:%M UTC')} ({hours}h ago)")
         else:
             print("Last synced measurement: never")
+
+        # Eufy token health
+        from eufy_sync.eufy_client import EufyClient
+        eufy_status = EufyClient(user.eufy).token_status()
+        if eufy_status["state"] == "expired":
+            print("Eufy auth: token expired (will re-login automatically on next sync)")
+        elif eufy_status["state"] == "no_token":
+            print("Eufy auth: no saved token - will login on next sync")
+        else:
+            print(f"Eufy auth: valid ({eufy_status['days_remaining']} days remaining)")
 
         # Garmin token health
         if user.garmin:
