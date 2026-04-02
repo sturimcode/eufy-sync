@@ -105,3 +105,4 @@ pytest tests/ -v
 ## Disclaimer
 
 Uses unofficial APIs for both Eufy and Garmin. Could break if either company changes things. Use at your own risk.
+
