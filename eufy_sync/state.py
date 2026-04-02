@@ -109,5 +109,26 @@ class SyncState:
             return int(dt.timestamp())
         return None
 
+    def get_history(self, user_name: str, limit: int = 14) -> list[dict]:
+        """Return recent synced measurements with per-target status."""
+        cursor = self._conn.execute(
+            """SELECT measurement_timestamp, weight_kg, GROUP_CONCAT(target) as targets
+               FROM sync_log
+               WHERE user_name = ?
+               GROUP BY eufy_measurement_id
+               ORDER BY measurement_timestamp DESC
+               LIMIT ?""",
+            (user_name, limit),
+        )
+        results = []
+        for row in cursor.fetchall():
+            synced_targets = set(row[2].split(",")) if row[2] else set()
+            results.append({
+                "timestamp": row[0],
+                "weight_kg": row[1],
+                "targets": synced_targets,
+            })
+        return results
+
     def close(self) -> None:
         self._conn.close()

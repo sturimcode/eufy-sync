@@ -131,7 +131,9 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     response=response_str,
                 )
                 counts[target_name] += 1
-                logger.info("Synced measurement %s to %s: %.1f kg", m.measurement_id, target_name, m.weight_kg)
+                lb = m.weight_kg * 2.20462
+                detail = "full body comp" if target_name == "garmin" else "weight only"
+                logger.info("Synced %.2f kg (%.1f lb) → %s (%s)", m.weight_kg, lb, target_name.capitalize(), detail)
 
                 # Small delay between uploads to avoid rate limiting
                 time.sleep(1 if target_name == "garmin" else 0.5)

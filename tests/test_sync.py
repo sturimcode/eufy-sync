@@ -110,6 +110,33 @@ def test_v1_to_v2_migration(tmp_path: Path):
     state.close()
 
 
+def test_get_history(tmp_path: Path):
+    """get_history returns recent measurements with per-target status."""
+    state = SyncState(tmp_path / "test.db")
+
+    state.record_sync("user1", "m1", "2024-04-01T12:00:00+00:00", 86.2, "2024-04-01T12:01:00+00:00", target="garmin")
+    state.record_sync("user1", "m1", "2024-04-01T12:00:00+00:00", 86.2, "2024-04-01T12:01:30+00:00", target="strava")
+    state.record_sync("user1", "m2", "2024-04-02T08:00:00+00:00", 85.9, "2024-04-02T08:01:00+00:00", target="garmin")
+
+    history = state.get_history("user1", limit=10)
+    assert len(history) == 2
+
+    # Most recent first
+    assert history[0]["weight_kg"] == 85.9
+    assert history[0]["targets"] == {"garmin"}
+
+    assert history[1]["weight_kg"] == 86.2
+    assert history[1]["targets"] == {"garmin", "strava"}
+
+    state.close()
+
+
+def test_get_history_empty(tmp_path: Path):
+    state = SyncState(tmp_path / "test.db")
+    assert state.get_history("user1") == []
+    state.close()
+
+
 def test_latest_timestamp_is_target_agnostic(tmp_path: Path):
     """get_latest_sync_timestamp returns the most recent across all targets."""
     state = SyncState(tmp_path / "test.db")

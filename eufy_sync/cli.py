@@ -669,6 +669,47 @@ def _show_status(state, users: list) -> None:
                 print("Strava auth: valid (refresh token active)")
 
 
+def _show_history(state, users: list, limit: int = 14) -> None:
+    """Print recent sync history as a table."""
+    KG_TO_LB = 2.20462
+
+    for user in users:
+        history = state.get_history(user.name, limit=limit)
+        if not history:
+            print("No sync history yet.")
+            return
+
+        # Determine which targets are in the data
+        all_targets = set()
+        for entry in history:
+            all_targets.update(entry["targets"])
+        target_cols = sorted(all_targets)
+
+        # Header
+        header = f"{'Date':<12} {'Weight':<22}"
+        for t in target_cols:
+            header += f" {t.capitalize():<8}"
+        print(header)
+        print("-" * len(header))
+
+        # Rows
+        for entry in history:
+            ts = entry["timestamp"]
+            date_str = ts[:10] if len(ts) >= 10 else ts
+            kg = entry["weight_kg"]
+            lb = kg * KG_TO_LB
+            weight_str = f"{kg:.2f} kg ({lb:.1f} lb)"
+
+            row = f"{date_str:<12} {weight_str:<22}"
+            for t in target_cols:
+                mark = "✓" if t in entry["targets"] else "-"
+                row += f" {mark:<8}"
+            print(row)
+
+        print("")
+        print("Weight from Eufy cloud API. May differ from your scale display by up to ~0.5 lb.")
+
+
 def _migrate_config_passwords(config_path: Path) -> None:
     """One-time migration: move passwords from config.yaml to keychain."""
     from eufy_sync.credentials import store_password, get_password, _keyring_available
@@ -737,6 +778,8 @@ def main() -> None:
                         help="Re-authenticate (optionally: garmin or strava)")
     parser.add_argument("--setup-strava", action="store_true", help="Connect Strava to your account")
     parser.add_argument("--update-password", action="store_true", help="Change stored passwords")
+    parser.add_argument("--history", nargs="?", const=14, type=int, default=None, metavar="DAYS",
+                        help="Show recent sync history (default: 14 entries)")
     parser.add_argument("--backfill-days", type=int, default=None, help="Sync last N days")
     parser.add_argument("--dry-run", action="store_true", help="Preview without uploading")
     parser.add_argument("--headless", action="store_true", help="No browser popups (for Launch Agent)")
@@ -805,6 +848,14 @@ def main() -> None:
         from eufy_sync.state import SyncState
         state = SyncState(db_path)
         _show_status(state, config.users)
+        state.close()
+        return
+
+    # Handle history
+    if args.history is not None:
+        from eufy_sync.state import SyncState
+        state = SyncState(db_path)
+        _show_history(state, config.users, limit=args.history)
         state.close()
         return
 
