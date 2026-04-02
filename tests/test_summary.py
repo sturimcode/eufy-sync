@@ -36,12 +36,22 @@ def _patch_token_status(return_value):
     )
 
 
+def _patch_eufy_token_status(return_value=None):
+    """Patch EufyClient.token_status to avoid hitting real tokens."""
+    if return_value is None:
+        return_value = {"state": "valid", "days_remaining": 25}
+    return patch(
+        "eufy_sync.eufy_client.EufyClient.token_status",
+        return_value=return_value,
+    )
+
+
 def test_summary_no_new_measurements(capsys):
     last_sync = int(time.time()) - 3600 * 5  # 5 hours ago
     state = _mock_state(last_sync)
     user = _mock_user()
 
-    with _patch_token_status({"state": "valid", "days_remaining": 200}):
+    with _patch_eufy_token_status(), _patch_token_status({"state": "valid", "days_remaining": 200}):
         _print_summary({}, [], state, [user])
 
     output = capsys.readouterr().out.strip()
@@ -55,7 +65,7 @@ def test_summary_no_new_measurements_days_ago(capsys):
     state = _mock_state(last_sync)
     user = _mock_user()
 
-    with _patch_token_status({"state": "valid", "days_remaining": 100}):
+    with _patch_eufy_token_status(), _patch_token_status({"state": "valid", "days_remaining": 100}):
         _print_summary({}, [], state, [user])
 
     output = capsys.readouterr().out.strip()
@@ -120,13 +130,12 @@ def test_summary_refresh_needed(capsys):
     state = _mock_state(last_sync)
     user = _mock_user()
 
-    with _patch_token_status({"state": "refresh_needed", "days_remaining": 300}):
+    with _patch_eufy_token_status(), _patch_token_status({"state": "refresh_needed", "days_remaining": 300}):
         _print_summary({}, [], state, [user])
 
     output = capsys.readouterr().out.strip()
     assert "token refresh pending" in output
     assert "300d" in output
-    assert "token valid" not in output
 
 
 def test_summary_expired_token(capsys):
@@ -134,7 +143,7 @@ def test_summary_expired_token(capsys):
     state = _mock_state(last_sync)
     user = _mock_user()
 
-    with _patch_token_status({"state": "expired", "days_remaining": 0}):
+    with _patch_eufy_token_status(), _patch_token_status({"state": "expired", "days_remaining": 0}):
         _print_summary({}, [], state, [user])
 
     output = capsys.readouterr().out.strip()
@@ -145,8 +154,9 @@ def test_summary_no_session(capsys):
     state = _mock_state(None)  # never synced
     user = _mock_user()
 
-    with _patch_token_status({"state": "no_session", "days_remaining": None}):
+    with _patch_eufy_token_status(), _patch_token_status({"state": "no_session", "days_remaining": None}):
         _print_summary({}, [], state, [user])
 
     output = capsys.readouterr().out.strip()
-    assert output == "No new measurements"
+    assert "No new measurements" in output
+    assert "Eufy token valid" in output
