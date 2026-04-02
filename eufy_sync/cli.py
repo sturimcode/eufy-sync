@@ -228,7 +228,7 @@ def _prompt_strava_credentials() -> dict:
     print("")
     print("  To connect Strava, you need a Strava API application.")
     print("  Create one at: https://www.strava.com/settings/api")
-    print("  Set the redirect URI to: http://localhost:8089/callback")
+    print("  Set 'Authorization Callback Domain' to: localhost")
     print("")
     client_id = input("Strava Client ID: ").strip()
     if not client_id:
@@ -668,6 +668,23 @@ def _migrate_config_passwords(config_path: Path) -> None:
         print("Migrated passwords from config file to system keychain.")
 
 
+UPGRADE_NOTICE_FILE = DATA_DIR / ".strava_notice_shown"
+
+
+def _show_upgrade_notice() -> None:
+    """One-time notice for users upgrading to eufy-sync with Strava support."""
+    if UPGRADE_NOTICE_FILE.exists():
+        return
+    try:
+        UPGRADE_NOTICE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        UPGRADE_NOTICE_FILE.write_text("")
+    except Exception:
+        return
+    if sys.stdin.isatty():
+        print("New in eufy-sync: Strava support! Run eufy-sync --setup-strava to connect.")
+        print("")
+
+
 def main() -> None:
     import argparse
 
@@ -731,6 +748,8 @@ def main() -> None:
     else:
         # Migrate existing plaintext passwords to keychain (one-time)
         _migrate_config_passwords(config_path)
+        # One-time upgrade notice for users coming from eufy-garmin-sync
+        _show_upgrade_notice()
 
     # Load config (passwords resolved from keychain or YAML fallback)
     from eufy_sync.config import AppConfig, load_config

@@ -78,7 +78,7 @@ To disable: `eufy-sync --uninstall-agent`
 If you already have Garmin set up and want to add Strava:
 
 1. Create a Strava API application at https://www.strava.com/settings/api
-2. Set the redirect URI to `http://localhost:8089/callback`
+2. Set 'Authorization Callback Domain' to `localhost`
 3. Run `eufy-sync --setup-strava` and enter your Client ID and Secret
 4. Authorize in the browser when it opens
 
