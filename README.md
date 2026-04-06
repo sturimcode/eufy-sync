@@ -7,7 +7,7 @@
 
 Syncs body composition data from a Eufy smart scale to Garmin Connect and/or Strava. Weight, body fat %, muscle mass, bone mass, hydration, BMR, visceral fat, and metabolic age all come through to Garmin. Strava gets weight updates.
 
-> macOS only. Requires Python 3.9+ and a terminal. Setup is guided - you just answer a few prompts.
+> macOS only. Requires Python 3.12+ and a terminal. Setup is guided - you just answer a few prompts.
 
 ## The problem
 
@@ -21,7 +21,7 @@ This project gets around it with Playwright. On first run, a real Chromium windo
 
 ## Install
 
-You need Python 3.9+, a Eufy scale with cloud sync, and a Garmin Connect and/or Strava account.
+You need Python 3.12+, a Eufy scale with cloud sync, and a Garmin Connect and/or Strava account.
 
 First, install pipx if you don't have it:
 ```bash
