@@ -769,10 +769,13 @@ def _show_upgrade_notice() -> None:
 def main() -> None:
     import argparse
 
+    from eufy_sync import __version__
+
     parser = argparse.ArgumentParser(
         prog="eufy-sync",
         description="Sync Eufy smart scale data to Garmin Connect and Strava",
     )
+    parser.add_argument("--version", "-V", action="version", version=f"eufy-sync {__version__}")
     parser.add_argument("--status", action="store_true", help="Show sync status and token health")
     parser.add_argument("--reauth", nargs="?", const="all", default=None, metavar="TARGET",
                         help="Re-authenticate (optionally: garmin or strava)")
