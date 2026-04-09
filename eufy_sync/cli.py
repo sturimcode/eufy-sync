@@ -1,8 +1,7 @@
 """CLI entry point for eufy-sync.
 
-Provides a simple `eufy-sync` command that handles first-run setup,
-syncing, status checks, re-authentication, and multi-target support
-(Garmin Connect and Strava).
+Handles first-run setup, syncing, status checks, re-authentication,
+and multi-target support (Garmin Connect and Strava).
 """
 from __future__ import annotations
 
