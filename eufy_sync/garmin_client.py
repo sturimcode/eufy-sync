@@ -79,8 +79,10 @@ class GarminClient:
             data = resp.json()
             entries = data.get("dailyWeightSummaries", data.get("dateWeightList", []))
             return len(entries) > 0
-        except Exception:
-            # If we can't check, assume no duplicate and let the upload proceed
+        except Exception as e:
+            # If we can't check, assume no duplicate and let the upload proceed.
+            # Garmin de-dupes by timestamp server-side, so worst case is a re-upload.
+            logger.warning("Garmin duplicate-check failed for %s: %s", date_str, e)
             return False
 
     def upload_body_composition(self, body_comp: GarminBodyComposition) -> dict:

@@ -5,6 +5,8 @@ import logging
 import time
 from datetime import datetime, timezone
 
+import httpx
+
 from eufy_sync.config import UserConfig
 from eufy_sync.eufy_client import EufyClient
 from eufy_sync.state import SyncState
@@ -16,12 +18,28 @@ MAX_RETRIES = 3
 RETRY_BASE_DELAY = 5  # seconds
 
 
+class PermanentSyncError(RuntimeError):
+    """Raised for failures that retries can't fix (bad password, revoked token)."""
+
+
+def _is_permanent(exc: BaseException) -> bool:
+    if isinstance(exc, PermanentSyncError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        # 4xx is client error - won't recover. 429 is the exception (rate-limited).
+        return 400 <= status < 500 and status != 429
+    return False
+
+
 def _retry(fn, description: str):
     """Call fn() with exponential backoff. Returns the result or raises."""
     for attempt in range(MAX_RETRIES):
         try:
             return fn()
         except Exception as e:
+            if _is_permanent(e):
+                raise
             if attempt == MAX_RETRIES - 1:
                 raise
             delay = RETRY_BASE_DELAY * (2 ** attempt)
@@ -75,6 +93,9 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
             lambda: eufy.fetch_measurements(after_timestamp=after_timestamp),
             "Eufy fetch",
         )
+        # Strava only stores a single current weight; iterating oldest→newest
+        # ensures the final PUT leaves the newest value on the profile.
+        measurements.sort(key=lambda m: m.timestamp)
         logger.info("Found %d measurements for %s", len(measurements), user.name)
 
         counts = {name: 0 for name, _ in targets}

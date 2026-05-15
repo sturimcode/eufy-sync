@@ -110,7 +110,7 @@ On systems without keychain support (headless Linux), credentials fall back to f
 
 ## Known quirks
 
-**Weight precision:** The Eufy cloud API returns weight at ~0.05 kg resolution, which can differ slightly from what the Eufy app displays (the app may read from Bluetooth/local storage with higher precision). In testing, most days match within 0.1 lbs, but occasional readings can be off by up to ~0.5 lbs. If Garmin displays in lbs, the kg-to-lbs conversion adds a bit more rounding on top.
+The Eufy cloud API returns weight at ~0.05 kg resolution, which can differ from what the Eufy app shows (the app may read from Bluetooth with higher precision). Most days match within 0.1 lbs, but some readings can be off by up to ~0.5 lbs. Displaying in lbs on Garmin adds a bit more rounding from the kg conversion.
 
 ## Tests
 

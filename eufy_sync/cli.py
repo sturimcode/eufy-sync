@@ -1,8 +1,7 @@
 """CLI entry point for eufy-sync.
 
-Provides a simple `eufy-sync` command that handles first-run setup,
-syncing, status checks, re-authentication, and multi-target support
-(Garmin Connect and Strava).
+Handles first-run setup, syncing, status checks, re-authentication,
+and multi-target support (Garmin Connect and Strava).
 """
 from __future__ import annotations
 
@@ -10,6 +9,7 @@ import getpass
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -67,9 +67,13 @@ def _check_for_updates() -> None:
         from eufy_sync import __version__
 
         def _parse(v: str) -> tuple:
+            # Compare numeric prefix only - tolerates suffixes like "1.7.2rc1" or "1.7.2.dev0".
             if not v or len(v) > 64:
                 raise ValueError(f"Implausible version string: {v!r}")
-            return tuple(int(x) for x in v.split("."))
+            match = re.match(r"^\d+(?:\.\d+)*", v)
+            if not match:
+                raise ValueError(f"Implausible version string: {v!r}")
+            return tuple(int(x) for x in match.group(0).split("."))
 
         latest_parsed = _parse(latest)
         current_parsed = _parse(__version__)
@@ -518,11 +522,24 @@ def _uninstall(data_dir: Path) -> None:
         subprocess.run(["launchctl", "unload", str(LAUNCH_AGENT_PATH)], capture_output=True)
         LAUNCH_AGENT_PATH.unlink()
 
-    # Clear keychain entries
+    # Clear keychain entries for every user named in the config
+    user_names = ["default"]
+    config_path = data_dir / "config.yaml"
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                raw = yaml.safe_load(f) or {}
+            names = [u.get("name", "default") for u in raw.get("users", [])]
+            if names:
+                user_names = names
+        except Exception:
+            pass
+
     from eufy_sync.credentials import delete_password, delete_token, _keyring_available
     if _keyring_available():
-        for suffix in ["eufy", "garmin"]:
-            delete_password(f"default:{suffix}")
+        for name in user_names:
+            for suffix in ["eufy", "garmin"]:
+                delete_password(f"{name}:{suffix}")
         delete_token("eufy")
         delete_token("garmin")
         delete_token("strava")
@@ -781,8 +798,8 @@ def main() -> None:
                         help="Re-authenticate (optionally: garmin or strava)")
     parser.add_argument("--setup-strava", action="store_true", help="Connect Strava to your account")
     parser.add_argument("--update-password", action="store_true", help="Change stored passwords")
-    parser.add_argument("--history", nargs="?", const=14, type=int, default=None, metavar="DAYS",
-                        help="Show recent sync history (default: 14 entries)")
+    parser.add_argument("--history", nargs="?", const=14, type=int, default=None, metavar="N",
+                        help="Show recent sync history, last N entries (default: 14)")
     parser.add_argument("--backfill-days", type=int, default=None, help="Sync last N days")
     parser.add_argument("--dry-run", action="store_true", help="Preview without uploading")
     parser.add_argument("--headless", action="store_true", help="No browser popups (for Launch Agent)")

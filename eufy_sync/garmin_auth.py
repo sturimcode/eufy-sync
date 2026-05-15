@@ -199,9 +199,9 @@ def browser_login(email: str, password: str) -> str:
             except Exception:
                 continue
 
-        # Wait for the ticket to be captured (up to 60s for MFA, CAPTCHA, etc.)
+        # Wait for the ticket to be captured (up to 3 min - SMS MFA can be slow)
         logger.info("Waiting for Garmin login to complete (check the browser window)...")
-        for _ in range(120):
+        for _ in range(360):
             if captured_ticket:
                 break
             page.wait_for_timeout(500)
