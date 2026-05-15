@@ -216,6 +216,12 @@ class StravaClient:
 
         if resp.status_code != 200:
             logger.debug("Strava weight update failed: %d %s", resp.status_code, resp.text)
+            # 4xx (except 429) won't recover by retrying; signal that to _retry.
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                from eufy_sync.sync import PermanentSyncError
+                raise PermanentSyncError(
+                    f"Failed to update Strava weight (HTTP {resp.status_code})"
+                )
             raise RuntimeError(
                 f"Failed to update Strava weight (HTTP {resp.status_code})"
             )

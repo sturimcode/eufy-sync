@@ -1,7 +1,12 @@
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+from eufy_sync.config import EufyConfig, StravaConfig, UserConfig
+from eufy_sync.eufy_client import EufyMeasurement
 from eufy_sync.state import SyncState
+from eufy_sync.sync import sync_user
 
 
 def test_state_init_and_roundtrip(tmp_path: Path):
@@ -134,6 +139,57 @@ def test_get_history(tmp_path: Path):
 def test_get_history_empty(tmp_path: Path):
     state = SyncState(tmp_path / "test.db")
     assert state.get_history("user1") == []
+    state.close()
+
+
+def _measurement(weight_kg: float, dt: datetime) -> EufyMeasurement:
+    return EufyMeasurement(
+        measurement_id=f"cust_{int(dt.timestamp())}",
+        customer_id="cust",
+        device_id="dev",
+        timestamp=dt,
+        weight_kg=weight_kg,
+    )
+
+
+def test_strava_receives_measurements_in_chronological_order(tmp_path: Path):
+    """Strava only stores latest weight; multi-measurement syncs must finish on the newest."""
+    state = SyncState(tmp_path / "test.db")
+
+    older = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+    middle = _measurement(85.5, datetime(2026, 5, 11, 8, 0, tzinfo=timezone.utc))
+    newest = _measurement(86.0, datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc))
+
+    # Eufy API typically returns newest-first
+    fetched = [newest, middle, older]
+
+    user = UserConfig(
+        name="default",
+        eufy=EufyConfig(email="e@example.com", password="pw"),
+        strava=StravaConfig(client_id="cid", client_secret="csec"),
+    )
+
+    fake_eufy = MagicMock()
+    fake_eufy.authenticate.return_value = None
+    fake_eufy.fetch_measurements.return_value = fetched
+    fake_eufy.close.return_value = None
+
+    fake_strava = MagicMock()
+    fake_strava.authenticate.return_value = None
+    fake_strava.update_weight.return_value = {"weight": None}
+    fake_strava.close.return_value = None
+
+    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
+         patch("eufy_sync.strava_client.StravaClient", return_value=fake_strava), \
+         patch("eufy_sync.sync.time.sleep"):
+        sync_user(user, state, backfill_days=7)
+
+    weights_uploaded = [call.args[0] for call in fake_strava.update_weight.call_args_list]
+    assert weights_uploaded == [85.0, 85.5, 86.0], (
+        f"Strava must receive weights oldest→newest so the final value is the newest, "
+        f"got order: {weights_uploaded}"
+    )
+
     state.close()
 
 

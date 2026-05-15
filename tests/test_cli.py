@@ -10,6 +10,7 @@ from eufy_sync.cli import (
     _write_config,
     _generate_plist,
     _install_launch_agent,
+    _uninstall,
     _uninstall_launch_agent,
     _offer_launch_agent,
     LAUNCH_AGENT_LABEL,
@@ -159,3 +160,41 @@ def test_offer_launch_agent_skips_non_interactive(mock_system, mock_stdin, mock_
     _offer_launch_agent()
 
     mock_install.assert_not_called()
+
+
+# --- _uninstall keychain cleanup ---
+
+
+@patch("eufy_sync.cli.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.cli.subprocess.run")
+@patch("eufy_sync.credentials._keyring_available", return_value=True)
+@patch("eufy_sync.credentials.delete_token")
+@patch("eufy_sync.credentials.delete_password")
+@patch("eufy_sync.cli.sys.stdin")
+@patch("builtins.input", side_effect=["y", "n"])
+def test_uninstall_clears_keychain_for_configured_user_name(
+    mock_input, mock_stdin, mock_delete_pw, mock_delete_tok,
+    mock_keyring, mock_run, mock_launch_path, tmp_path,
+):
+    """_uninstall must read the user's name from config, not assume 'default'."""
+    mock_stdin.isatty.return_value = True
+    mock_launch_path.exists.return_value = False
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    config_path = data_dir / "config.yaml"
+    _write_config(config_path, {
+        "users": [{
+            "name": "elias",
+            "eufy": {"email": "e@example.com"},
+            "garmin": {"email": "g@example.com"},
+        }],
+    })
+
+    _uninstall(data_dir)
+
+    deleted_accounts = {call.args[0] for call in mock_delete_pw.call_args_list}
+    assert "elias:eufy" in deleted_accounts, (
+        f"_uninstall should clear keychain for the configured username, got {deleted_accounts}"
+    )
+    assert "elias:garmin" in deleted_accounts

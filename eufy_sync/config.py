@@ -90,6 +90,12 @@ def load_config(path: Path) -> AppConfig:
 
     raw = _walk_and_interpolate(raw)
 
+    if len(raw.get("users", [])) > 1:
+        raise ValueError(
+            "eufy-sync supports a single user per installation. "
+            "Found multiple entries under 'users:' - edit your config to keep only one."
+        )
+
     users = []
     for u in raw["users"]:
         name = u["name"]

@@ -72,8 +72,9 @@ class EufyClient:
         data = resp.json()
 
         if data.get("res_code") != 1:
+            from eufy_sync.sync import PermanentSyncError
             msg = data.get("message", "unknown error")
-            raise RuntimeError(
+            raise PermanentSyncError(
                 f"Eufy login failed: {msg}. "
                 "If you changed your Eufy password, run: eufy-sync --update-password"
             )

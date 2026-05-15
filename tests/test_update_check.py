@@ -124,6 +124,26 @@ def test_suggests_pipx_when_available(tmp_path: Path, capsys):
     assert "pipx install --force" in capsys.readouterr().out
 
 
+def test_handles_pypi_prerelease_version(tmp_path: Path, capsys):
+    """PyPI can return versions like '1.7.2rc1' or '1.7.2.dev0' - parser must not crash silently."""
+    cache_file = tmp_path / "update_check"
+    cache_file.write_text(str(time.time() - UPDATE_CHECK_INTERVAL - 1))
+
+    with patch("eufy_sync.cli.DATA_DIR", tmp_path), \
+         patch("eufy_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response("99.0.0rc1")), \
+         patch("eufy_sync.cli.sys.stdin") as mock_stdin:
+        mock_stdin.isatty.return_value = True
+
+        _check_for_updates()
+
+    output = capsys.readouterr().out
+    assert "Update available" in output
+    assert "99.0.0rc1" in output
+
+    # Cache should be written - we successfully evaluated the version
+    assert cache_file.exists()
+
+
 def test_suggests_pip_when_no_pipx(tmp_path: Path, capsys):
     cache_file = tmp_path / "update_check"
     cache_file.write_text(str(time.time() - UPDATE_CHECK_INTERVAL - 1))
