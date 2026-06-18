@@ -46,6 +46,28 @@ class EufyMeasurement:
     bmi: float | None = None
 
 
+@dataclass
+class EufyProfile:
+    customer_id: str
+    last_measured: datetime
+    last_weight_kg: float
+    name: str | None = None
+
+
+class AmbiguousProfileError(Exception):
+    """Several Eufy profiles exist on the account and none has been selected.
+
+    Carries the detected profiles so the CLI can show a picker. Not retryable.
+    """
+
+    def __init__(self, profiles: list["EufyProfile"]):
+        self.profiles = profiles
+        super().__init__(
+            f"{len(profiles)} Eufy profiles found but none selected. "
+            "Run: eufy-sync --select-profile"
+        )
+
+
 class EufyClient:
     def __init__(self, config: EufyConfig, token_path: Path | None = None):
         self.config = config
@@ -160,7 +182,7 @@ class EufyClient:
             self.token_path.unlink()
             logger.info("Cleared cached Eufy token")
 
-    def fetch_measurements(self, after_timestamp: int | None = None) -> list[EufyMeasurement]:
+    def _get_records(self, after_timestamp: int | None) -> list[dict]:
         if not self.access_token or not self.user_id:
             raise RuntimeError("Must authenticate before fetching measurements")
 
@@ -174,7 +196,6 @@ class EufyClient:
             headers={"Token": self.access_token, "Uid": self.user_id},
         )
 
-        # If token was rejected, clear cache and re-login
         needs_reauth = resp.status_code in (401, 403)
         if not needs_reauth and resp.status_code == 200:
             try:
@@ -193,20 +214,58 @@ class EufyClient:
 
         resp.raise_for_status()
         body = resp.json()
-
         if body.get("res_code") != 1:
             raise RuntimeError(f"Eufy fetch failed: {body.get('message', 'unknown error')}")
 
         raw_records = body.get("data", [])
         logger.info("Fetched %d raw measurements from Eufy", len(raw_records))
-        logger.debug("Raw Eufy response: %d records", len(body.get("data", [])))
+        return raw_records
 
-        measurements = []
-        for record in raw_records:
+    def _parse_all(self, records: list[dict]) -> list[EufyMeasurement]:
+        out = []
+        for record in records:
             m = self._parse_record(record)
             if m is not None:
-                measurements.append(m)
+                out.append(m)
+        return out
 
+    def _profiles_from(self, measurements: list[EufyMeasurement]) -> list[EufyProfile]:
+        latest: dict[str, EufyMeasurement] = {}
+        for m in measurements:
+            cur = latest.get(m.customer_id)
+            if cur is None or m.timestamp > cur.timestamp:
+                latest[m.customer_id] = m
+        profiles = [
+            EufyProfile(
+                customer_id=m.customer_id,
+                last_measured=m.timestamp,
+                last_weight_kg=m.weight_kg,
+            )
+            for m in latest.values()
+        ]
+        profiles.sort(key=lambda p: p.last_measured, reverse=True)
+        return profiles
+
+    def list_profiles(self) -> list[EufyProfile]:
+        """Return one profile per customer_id seen in the full history, newest first."""
+        records = self._get_records(None)
+        return self._profiles_from(self._parse_all(records))
+
+    def fetch_measurements(self, after_timestamp: int | None = None) -> list[EufyMeasurement]:
+        if self.config.customer_id:
+            measurements = self._parse_all(self._get_records(after_timestamp))
+            return [m for m in measurements if m.customer_id == self.config.customer_id]
+
+        # No profile selected: read full history so the profile count is reliable
+        # even when only one person has weighed in recently.
+        measurements = self._parse_all(self._get_records(None))
+        distinct = {m.customer_id for m in measurements}
+        if len(distinct) > 1:
+            raise AmbiguousProfileError(self._profiles_from(measurements))
+
+        if after_timestamp is not None:
+            cutoff = datetime.fromtimestamp(after_timestamp, tz=timezone.utc)
+            measurements = [m for m in measurements if m.timestamp >= cutoff]
         return measurements
 
     def _parse_record(self, record: dict) -> EufyMeasurement | None:
