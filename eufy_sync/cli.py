@@ -275,6 +275,64 @@ def _setup_strava(config_path: Path) -> None:
     print("Strava connected! Future syncs will update both targets.")
 
 
+def _format_profile(profile, index: int) -> str:
+    lb = profile.last_weight_kg * 2.20462
+    when = profile.last_measured.strftime("%Y-%m-%d")
+    label = profile.name or f"profile ...{profile.customer_id[-4:]}"
+    return f"  {index}. {label}  -  {profile.last_weight_kg:.1f} kg ({lb:.1f} lb), last weigh-in {when}"
+
+
+def _prompt_profile_choice(profiles: list) -> str:
+    """Print the profiles and return the customer_id the user picks."""
+    print("")
+    print("Multiple profiles were found on this Eufy account:")
+    for i, p in enumerate(profiles, 1):
+        print(_format_profile(p, i))
+    print("")
+    while True:
+        choice = input(f"Which profile is yours? [1-{len(profiles)}] ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(profiles):
+            return profiles[int(choice) - 1].customer_id
+        print("Enter a number from the list.")
+
+
+def _select_profile(config_path: Path) -> None:
+    """Choose which Eufy profile to sync, for an existing install."""
+    if not config_path.exists():
+        print("No config found. Run eufy-sync first to set up.")
+        sys.exit(1)
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    from eufy_sync.config import load_config
+    from eufy_sync.eufy_client import EufyClient
+
+    cfg = load_config(config_path)
+    eufy = EufyClient(cfg.users[0].eufy)
+    try:
+        eufy.authenticate()
+        profiles = eufy.list_profiles()
+    finally:
+        eufy.close()
+
+    if not profiles:
+        print("No profiles found yet. Weigh in and open the Eufy app, then try again.")
+        return
+
+    user = config["users"][0]
+    user.setdefault("eufy", {})
+    if len(profiles) == 1:
+        user["eufy"]["customer_id"] = profiles[0].customer_id
+        _write_config(config_path, config)
+        print("Only one profile found on this account; saved it as yours.")
+        return
+
+    user["eufy"]["customer_id"] = _prompt_profile_choice(profiles)
+    _write_config(config_path, config)
+    print("Saved. Future syncs will use only your profile.")
+
+
 def _update_password(config_path: Path) -> None:
     """Update stored passwords."""
     if not config_path.exists():
@@ -797,6 +855,7 @@ def main() -> None:
     parser.add_argument("--reauth", nargs="?", const="all", default=None, metavar="TARGET",
                         help="Re-authenticate (optionally: garmin or strava)")
     parser.add_argument("--setup-strava", action="store_true", help="Connect Strava to your account")
+    parser.add_argument("--select-profile", action="store_true", help="Choose which Eufy profile to sync")
     parser.add_argument("--update-password", action="store_true", help="Change stored passwords")
     parser.add_argument("--history", nargs="?", const=14, type=int, default=None, metavar="N",
                         help="Show recent sync history, last N entries (default: 14)")
@@ -831,6 +890,11 @@ def main() -> None:
     # Handle Strava setup
     if args.setup_strava:
         _setup_strava(config_path)
+        return
+
+    # Handle profile selection
+    if args.select_profile:
+        _select_profile(config_path)
         return
 
     # Handle password update
