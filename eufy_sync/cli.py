@@ -963,6 +963,7 @@ def main() -> None:
     import logging
     from eufy_sync.sync import sync_user
     from eufy_sync.state import SyncState
+    from eufy_sync.eufy_client import AmbiguousProfileError
 
     log_level = "DEBUG" if args.verbose else "WARNING"
     logging.basicConfig(
@@ -990,6 +991,14 @@ def main() -> None:
                 for target_name, count in counts.items():
                     total_counts[target_name] = total_counts.get(target_name, 0) + count
                 logger.info("User %s: synced %s", user.name, counts)
+            except AmbiguousProfileError as e:
+                print("")
+                print("Multiple profiles were found on this Eufy account:")
+                for i, p in enumerate(e.profiles, 1):
+                    print(_format_profile(p, i))
+                print("")
+                print("Nothing was synced. Choose your profile with: eufy-sync --select-profile")
+                failures.append((user.name, "multiple Eufy profiles; run eufy-sync --select-profile"))
             except Exception as e:
                 logger.exception("Failed to sync user %s", user.name)
                 failures.append((user.name, str(e)))
