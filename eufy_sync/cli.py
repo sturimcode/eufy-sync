@@ -683,6 +683,10 @@ def _print_summary(total_counts: dict[str, int], failures: list, state, users: l
             parts.append("Strava connected")
 
     print(" | ".join(parts))
+    print(
+        "If you weighed in recently and it isn't here, open the Eufy app so it "
+        "uploads to the cloud, then run eufy-sync again."
+    )
 
 
 def _show_status(state, users: list) -> None:

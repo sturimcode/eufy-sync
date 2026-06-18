@@ -35,6 +35,8 @@ pipx install eufy-sync
 eufy-sync
 ```
 
+> **Python older than 3.12?** eufy-sync needs Python 3.12+. The simplest path is [uv](https://docs.astral.sh/uv/): `uv tool install eufy-sync` fetches a compatible Python for you, with no changes to your system Python. Or install 3.12 with `brew install python@3.12` and run `pipx install --python python3.12 eufy-sync`.
+
 Setup is guided on first run - choose your sync targets (Garmin, Strava, or both), enter your credentials, and your data syncs automatically.
 
 > **Note:** If you've cloned this repo, run pipx commands from outside the repo directory to avoid path conflicts (e.g., `cd /tmp && pipx install eufy-sync`).
@@ -114,6 +116,8 @@ On systems without keychain support (headless Linux), credentials fall back to f
 The Eufy cloud API returns weight at ~0.05 kg resolution, which can differ from what the Eufy app shows (the app may read from Bluetooth with higher precision). Most days match within 0.1 lbs, but some readings can be off by up to ~0.5 lbs. Displaying in lbs on Garmin adds a bit more rounding from the kg conversion.
 
 If more than one person uses the same Eufy account, the tool asks which profile is yours during setup, so only your weigh-ins sync. If you set it up before this was added, run `eufy-sync --select-profile` once. Until you choose, a sync that sees several profiles stops and shows them rather than guessing whose weight to upload. If you are setting your profile after an earlier version already synced someone else's weight, run `eufy-sync --backfill-days 30` once afterward to pull any of your own weigh-ins that were skipped.
+
+The Eufy cloud only returns a weigh-in after the Eufy phone app has processed it. If you step on the scale but a sync finds nothing, open the Eufy app once so it uploads to the cloud, then run `eufy-sync` again. The tool cannot trigger that upload on its own, so this shows up most on headless or scheduled setups where the app is rarely opened.
 
 ## Tests
 
