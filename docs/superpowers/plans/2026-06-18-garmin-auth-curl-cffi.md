@@ -110,7 +110,7 @@ The exact attribute that holds the token dump/load methods varies by version. Co
 ~/.local/bin/uv run python -c "import garminconnect, inspect; g=garminconnect.Garmin; print([m for m in dir(g) if not m.startswith('__')])"
 ~/.local/bin/uv run python -c "import garminconnect, inspect; print(inspect.signature(garminconnect.Garmin.__init__)); print(inspect.signature(garminconnect.Garmin.login))"
 ```
-You are looking for: the constructor's `prompt_mfa` parameter, the `login()` method, and the token serialize/deserialize methods. On 0.3.x the token methods are typically reached via `garmin.garth.dumps()` / `garmin.garth.loads(json_str)`; if the installed version exposes them elsewhere (e.g. `garmin.client.dumps()`), use that path in the two helper functions below and keep everything else identical.
+CONFIRMED on the installed garminconnect 0.3.6 (verified during planning): the token serialize/deserialize methods are on `garmin.client` — `garmin.client.dumps()` returns a JSON string, `garmin.client.loads(json_str)` restores. (`garmin.garth` does NOT exist on 0.3.6.) The constructor takes `prompt_mfa`, and `login()` does a fresh credential login when called with no `tokenstore`. The code below already uses `garmin.client`; just confirm it still holds on the installed version before relying on it.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -226,9 +226,7 @@ class GarminAuth:
         blob = self._load_token()
         if blob is not None:
             try:
-                # NOTE: confirmed in Task 2 Step 1 - adjust `.garth` if the
-                # installed garminconnect exposes loads/dumps elsewhere.
-                garmin.garth.loads(json.dumps(blob))
+                garmin.client.loads(json.dumps(blob))
                 logger.info("Restored saved Garmin session")
                 return garmin
             except Exception as e:
@@ -278,7 +276,7 @@ class GarminAuth:
             return None
 
     def _save_token(self, garmin: Garmin) -> None:
-        blob = json.loads(garmin.garth.dumps())
+        blob = json.loads(garmin.client.dumps())
         from eufy_sync.credentials import store_token, _keyring_available
         if _keyring_available():
             store_token("garmin", blob)
