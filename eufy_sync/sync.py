@@ -65,7 +65,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
         eufy.authenticate()
         for target_name, client in targets:
             if target_name == "garmin":
-                client.authenticate(allow_browser=not headless)
+                client.authenticate(allow_interactive=not headless)
             else:
                 client.authenticate()
 
