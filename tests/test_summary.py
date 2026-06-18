@@ -159,3 +159,24 @@ def test_summary_no_session(capsys):
     output = capsys.readouterr().out.strip()
     assert "No new measurements" in output
     assert "Eufy token valid" in output
+
+
+def test_summary_no_op_includes_open_app_hint(capsys):
+    state = _mock_state(int(time.time()) - 3600)
+    user = _mock_user()
+
+    with _patch_eufy_token_status(), _patch_token_status({"state": "valid", "days_remaining": 50}):
+        _print_summary({}, [], state, [user])
+
+    output = capsys.readouterr().out
+    assert "open the Eufy app" in output
+
+
+def test_summary_synced_omits_open_app_hint(capsys):
+    state = _mock_state()
+    user = _mock_user()
+
+    _print_summary({"garmin": 2}, [], state, [user])
+
+    output = capsys.readouterr().out
+    assert "open the Eufy app" not in output
