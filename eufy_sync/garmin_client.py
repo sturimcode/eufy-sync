@@ -40,6 +40,8 @@ class GarminClient:
             return False
 
     def _add_body_composition(self, body_comp: GarminBodyComposition):
+        # add_body_composition also accepts visceral_fat_mass, active_met, and
+        # physique_rating; the Eufy scale does not provide those, so they are omitted.
         return self._garmin.add_body_composition(
             timestamp=body_comp.timestamp,
             weight=body_comp.weight,

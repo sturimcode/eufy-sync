@@ -39,6 +39,14 @@ def test_upload_maps_fields_to_add_body_composition():
     assert kwargs["percent_fat"] == 18.5
     assert kwargs["visceral_fat_rating"] == 8.0
     assert kwargs["basal_met"] == 1650
+    assert kwargs["bmi"] is None
+
+
+def test_has_weight_on_date_true_with_daily_summaries_key():
+    fake = MagicMock()
+    fake.get_body_composition.return_value = {"dailyWeightSummaries": [{"weight": 86000}]}
+    client = _client_with_fake_garmin(fake)
+    assert client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc)) is True
 
 
 def test_has_weight_on_date_true_when_entry_exists():
