@@ -203,6 +203,22 @@ def _first_run_setup(config_path: Path) -> None:
     else:
         print("Passwords saved to system keychain.")
 
+    # On a shared account, pick the right person before the first sync.
+    try:
+        from eufy_sync.config import EufyConfig
+        from eufy_sync.eufy_client import EufyClient
+        probe = EufyClient(EufyConfig(email=eufy_email, password=eufy_password))
+        try:
+            probe.authenticate()
+            profiles = probe.list_profiles()
+        finally:
+            probe.close()
+        if len(profiles) > 1:
+            user_config["eufy"]["customer_id"] = _prompt_profile_choice(profiles)
+    except Exception as e:
+        # Non-fatal: if this fails, the first sync safely stops and prompts.
+        print(f"Note: could not check Eufy profiles right now ({e}).")
+
     config = {"users": [user_config]}
     _write_config(config_path, config)
 
