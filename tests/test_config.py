@@ -47,3 +47,31 @@ def test_load_config_rejects_multiple_users(_keyring, tmp_path: Path):
     })
     with pytest.raises(ValueError, match="single user"):
         load_config(path)
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_load_config_parses_customer_id(_keyring, tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    _write(path, {
+        "users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com", "password": "pw", "customer_id": "cust-42"},
+            "garmin": {"email": "g@example.com", "password": "pw"},
+        }],
+    })
+    cfg = load_config(path)
+    assert cfg.users[0].eufy.customer_id == "cust-42"
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_load_config_customer_id_defaults_none(_keyring, tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    _write(path, {
+        "users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com", "password": "pw"},
+            "garmin": {"email": "g@example.com", "password": "pw"},
+        }],
+    })
+    cfg = load_config(path)
+    assert cfg.users[0].eufy.customer_id is None
