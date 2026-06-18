@@ -126,7 +126,7 @@ def load_config(path: Path) -> AppConfig:
             eufy=EufyConfig(
                 email=u["eufy"]["email"],
                 password=_get_password(name, "eufy", u["eufy"]["email"], u["eufy"].get("password")),
-                customer_id=u["eufy"].get("customer_id"),
+                customer_id=str(u["eufy"]["customer_id"]) if u["eufy"].get("customer_id") is not None else None,
             ),
             garmin=garmin,
             strava=strava,

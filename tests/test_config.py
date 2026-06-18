@@ -75,3 +75,17 @@ def test_load_config_customer_id_defaults_none(_keyring, tmp_path: Path):
     })
     cfg = load_config(path)
     assert cfg.users[0].eufy.customer_id is None
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_load_config_customer_id_coerced_to_str(_keyring, tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    _write(path, {
+        "users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com", "password": "pw", "customer_id": 12345},
+            "garmin": {"email": "g@example.com", "password": "pw"},
+        }],
+    })
+    cfg = load_config(path)
+    assert cfg.users[0].eufy.customer_id == "12345"
