@@ -113,7 +113,7 @@ On systems without keychain support (headless Linux), credentials fall back to f
 
 The Eufy cloud API returns weight at ~0.05 kg resolution, which can differ from what the Eufy app shows (the app may read from Bluetooth with higher precision). Most days match within 0.1 lbs, but some readings can be off by up to ~0.5 lbs. Displaying in lbs on Garmin adds a bit more rounding from the kg conversion.
 
-If more than one person uses the same Eufy account, the tool asks which profile is yours during setup, so only your weigh-ins sync. If you set it up before this was added, run `eufy-sync --select-profile` once. Until you choose, a sync that sees several profiles stops and shows them rather than guessing whose weight to upload.
+If more than one person uses the same Eufy account, the tool asks which profile is yours during setup, so only your weigh-ins sync. If you set it up before this was added, run `eufy-sync --select-profile` once. Until you choose, a sync that sees several profiles stops and shows them rather than guessing whose weight to upload. If you are setting your profile after an earlier version already synced someone else's weight, run `eufy-sync --backfill-days 30` once afterward to pull any of your own weigh-ins that were skipped.
 
 ## Tests
 
