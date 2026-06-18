@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from garminconnect import GarminConnectTooManyRequestsError
+
 from eufy_sync.config import UserConfig
 from eufy_sync.eufy_client import AmbiguousProfileError, EufyClient
 from eufy_sync.state import SyncState
@@ -23,11 +25,15 @@ class PermanentSyncError(RuntimeError):
 
 
 def _is_permanent(exc: BaseException) -> bool:
-    if isinstance(exc, (PermanentSyncError, AmbiguousProfileError)):
+    # GarminConnectTooManyRequestsError: a 429 on login/refresh won't clear by
+    # retrying seconds later, and retrying makes the IP rate limit worse, so
+    # fail fast and let the next scheduled run try on a cooled-down limit.
+    if isinstance(exc, (PermanentSyncError, AmbiguousProfileError, GarminConnectTooManyRequestsError)):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
-        # 4xx is client error - won't recover. 429 is the exception (rate-limited).
+        # httpx 4xx is a client error and won't recover; a 429 (rate-limited)
+        # stays retryable here. The Garmin login 429 is handled above.
         return 400 <= status < 500 and status != 429
     return False
 

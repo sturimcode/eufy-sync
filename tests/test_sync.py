@@ -212,3 +212,9 @@ def test_ambiguous_profile_error_is_permanent():
     from eufy_sync.sync import _is_permanent
     from eufy_sync.eufy_client import AmbiguousProfileError
     assert _is_permanent(AmbiguousProfileError([])) is True
+
+
+def test_rate_limit_error_is_permanent():
+    from eufy_sync.sync import _is_permanent
+    from garminconnect import GarminConnectTooManyRequestsError
+    assert _is_permanent(GarminConnectTooManyRequestsError("429")) is True
