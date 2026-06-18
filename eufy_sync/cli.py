@@ -436,8 +436,13 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
                         do_garmin = False
 
         if do_garmin:
-            auth.force_reauth()
-            print("Done - Garmin tokens saved.")
+            from eufy_sync.sync import PermanentSyncError
+            try:
+                auth.force_reauth()
+                print("Done - Garmin tokens saved.")
+            except PermanentSyncError as e:
+                print(str(e))
+                sys.exit(1)
 
     if do_strava:
         from eufy_sync.config import StravaConfig

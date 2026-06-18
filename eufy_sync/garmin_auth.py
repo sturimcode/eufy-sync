@@ -11,7 +11,11 @@ import logging
 import os
 from pathlib import Path
 
-from garminconnect import Garmin
+from garminconnect import (
+    Garmin,
+    GarminConnectAuthenticationError,
+    GarminConnectTooManyRequestsError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +54,7 @@ class GarminAuth:
             from eufy_sync.sync import PermanentSyncError
             raise PermanentSyncError("Garmin login needed; run: eufy-sync --reauth")
 
-        garmin.login()
+        self._fresh_login(garmin)
         self._save_token(garmin)
         logger.info("Authenticated to Garmin as %s", self.email)
         return garmin
@@ -59,10 +63,26 @@ class GarminAuth:
         """Clear the stored token and do a fresh interactive login."""
         self._clear_token()
         garmin = Garmin(self.email, self.password, prompt_mfa=_mfa_prompt)
-        garmin.login()
+        self._fresh_login(garmin)
         self._save_token(garmin)
         logger.info("Re-authenticated to Garmin as %s", self.email)
         return garmin
+
+    def _fresh_login(self, garmin: Garmin) -> None:
+        """Run garmin.login(), turning library errors into clear messages."""
+        from eufy_sync.sync import PermanentSyncError
+        try:
+            garmin.login()
+        except GarminConnectTooManyRequestsError:
+            raise PermanentSyncError(
+                "Garmin is rate-limiting login attempts from your IP. "
+                "Wait a while (about an hour) and run: eufy-sync --reauth"
+            )
+        except GarminConnectAuthenticationError:
+            raise PermanentSyncError(
+                "Garmin login failed. If you changed your password, "
+                "run: eufy-sync --update-password"
+            )
 
     def token_status(self) -> dict:
         """Return token health. The library auto-refreshes, so the states

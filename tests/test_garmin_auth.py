@@ -100,3 +100,38 @@ def test_load_token_accepts_new_library_blob(monkeypatch):
     monkeypatch.setattr("eufy_sync.credentials._keyring_available", lambda: True)
     monkeypatch.setattr("eufy_sync.credentials.get_token", lambda name: dict(BLOB))
     assert auth._load_token() == BLOB
+
+
+def test_login_rate_limited_raises_clear_error(monkeypatch):
+    from garminconnect import GarminConnectTooManyRequestsError
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: None)
+    fake = MagicMock()
+    fake.login.side_effect = GarminConnectTooManyRequestsError("rate limited")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        with pytest.raises(PermanentSyncError) as exc_info:
+            auth.login(interactive=True)
+    assert "rate-limiting" in str(exc_info.value)
+
+
+def test_login_bad_credentials_raises_clear_error(monkeypatch):
+    from garminconnect import GarminConnectAuthenticationError
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: None)
+    fake = MagicMock()
+    fake.login.side_effect = GarminConnectAuthenticationError("bad creds")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        with pytest.raises(PermanentSyncError) as exc_info:
+            auth.login(interactive=True)
+    assert "--update-password" in str(exc_info.value)
+
+
+def test_force_reauth_rate_limited_raises_clear_error(monkeypatch):
+    from garminconnect import GarminConnectTooManyRequestsError
+    auth = _auth()
+    monkeypatch.setattr(auth, "_clear_token", lambda: None)
+    fake = MagicMock()
+    fake.login.side_effect = GarminConnectTooManyRequestsError("rate limited")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        with pytest.raises(PermanentSyncError):
+            auth.force_reauth()
