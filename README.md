@@ -15,9 +15,9 @@ Eufy scales sync to Apple Health, Fitbit, and Google Fit - but not Garmin or Str
 
 ## How Garmin login works
 
-Garmin has no official API for writing body composition into Connect, and in March 2026 it put Cloudflare in front of its login, which broke the Python libraries that talked to it. [garth](https://github.com/matin/garth) was [deprecated](https://github.com/matin/garth/discussions/222) and stays that way. [python-garminconnect](https://github.com/cyberjunky/python-garminconnect) has since recovered with a browser-free workaround.
+Garmin has no official API for writing body composition into Connect. In March 2026 it put Cloudflare in front of its login, which broke the Python libraries that talked to it; [garth](https://github.com/matin/garth) was [deprecated](https://github.com/matin/garth/discussions/222) and stays that way.
 
-eufy-sync currently handles the login with Playwright: on first run a Chromium window opens and you log in normally. OAuth2 tokens are saved to your system keychain and refresh on their own for about a year, so after that first login no browser is needed. Body composition then goes up as FIT files through Garmin's upload endpoint.
+eufy-sync logs in through [python-garminconnect](https://github.com/cyberjunky/python-garminconnect), which gets past Cloudflare without a browser. On first run you enter your Garmin email and password in the terminal, and a code if your account uses two-factor. Tokens are saved to your system keychain and refresh on their own, so later runs need no login. Body composition is uploaded through the same library.
 
 ## Install
 
