@@ -1,8 +1,10 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -16,6 +18,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver=$(grep -E '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          if [ "$tag" != "$ver" ]; then
+            echo "Tag $GITHUB_REF_NAME ($tag) does not match pyproject.toml version ($ver). Refusing to publish."
+            exit 1
+          fi
+          echo "Tag and package version agree: $ver"
       - run: pip install build
       - run: python -m build
       - uses: pypa/gh-action-pypi-publish@release/v1

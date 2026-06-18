@@ -10,5 +10,7 @@ garmin_tokens/
 .venv/
 venv/
 *.egg-info/
+dist/
+build/
 *.plist
 CLAUDE.md
