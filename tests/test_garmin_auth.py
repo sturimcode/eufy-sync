@@ -1,65 +1,58 @@
 from __future__ import annotations
 
-import time
-from unittest.mock import patch, MagicMock
+import json
+from unittest.mock import MagicMock, patch
 
-from eufy_sync.garmin_auth import GarminAuth, GarminSession, TokenPair
+import pytest
 
+from eufy_sync.garmin_auth import GarminAuth
+from eufy_sync.sync import PermanentSyncError
 
-def _make_token(access_expires_in: float = 3600, refresh_expires_in: float = 86400 * 365) -> TokenPair:
-    now = time.time()
-    return TokenPair(
-        access_token="access",
-        refresh_token="refresh",
-        expires_at=now + access_expires_in,
-        refresh_expires_at=now + refresh_expires_in,
-    )
+BLOB = {"di_token": "tok", "di_refresh_token": "rtok", "di_client_id": "cid"}
 
 
-def test_token_status_valid():
-    auth = GarminAuth("test@example.com", "pw")
-    token = _make_token(access_expires_in=3600, refresh_expires_in=86400 * 30)
-    session = GarminSession(di_token=token)
-
-    with patch.object(auth, "_load_session", return_value=session):
-        status = auth.token_status()
-
-    assert status["state"] == "valid"
-    assert status["days_remaining"] is not None
-    assert status["days_remaining"] >= 29
+def _auth():
+    return GarminAuth("test@example.com", "pw")
 
 
-def test_token_status_refresh_needed():
-    auth = GarminAuth("test@example.com", "pw")
-    # Access token expired, refresh token still valid
-    token = _make_token(access_expires_in=-100, refresh_expires_in=86400 * 30)
-    session = GarminSession(di_token=token)
-
-    with patch.object(auth, "_load_session", return_value=session):
-        status = auth.token_status()
-
-    assert status["state"] == "refresh_needed"
-    assert status["days_remaining"] >= 29
+def test_login_restores_saved_blob_without_fresh_login(monkeypatch):
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: dict(BLOB))
+    fake_garmin = MagicMock()
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake_garmin) as ctor:
+        result = auth.login(interactive=True)
+    assert result is fake_garmin
+    fake_garmin.login.assert_not_called()       # restored from blob, no fresh login
+    assert ctor.call_count == 1
 
 
-def test_token_status_expired():
-    auth = GarminAuth("test@example.com", "pw")
-    # Both tokens expired
-    token = _make_token(access_expires_in=-100, refresh_expires_in=-100)
-    session = GarminSession(di_token=token)
+def test_login_fresh_when_no_blob_and_interactive(monkeypatch):
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: None)
+    saved = {}
+    monkeypatch.setattr(auth, "_save_token", lambda g: saved.setdefault("called", True))
+    fake_garmin = MagicMock()
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake_garmin):
+        auth.login(interactive=True)
+    fake_garmin.login.assert_called_once()
+    assert saved.get("called") is True
 
-    with patch.object(auth, "_load_session", return_value=session):
-        status = auth.token_status()
 
-    assert status["state"] == "expired"
-    assert status["days_remaining"] == 0
+def test_login_raises_when_no_blob_and_not_interactive(monkeypatch):
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: None)
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=MagicMock()):
+        with pytest.raises(PermanentSyncError):
+            auth.login(interactive=False)
 
 
-def test_token_status_no_session():
-    auth = GarminAuth("test@example.com", "pw")
+def test_token_status_valid_with_blob(monkeypatch):
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: dict(BLOB))
+    assert auth.token_status()["state"] == "valid"
 
-    with patch.object(auth, "_load_session", return_value=None):
-        status = auth.token_status()
 
-    assert status["state"] == "no_session"
-    assert status["days_remaining"] is None
+def test_token_status_no_session_without_blob(monkeypatch):
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: None)
+    assert auth.token_status()["state"] == "no_session"
