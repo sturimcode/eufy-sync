@@ -241,3 +241,16 @@ def test_select_profile_writes_chosen_customer_id(_keyring, tmp_path: Path):
 
     written = yaml.safe_load(cfg_path.read_text())
     assert written["users"][0]["eufy"]["customer_id"] == "cid-a"
+
+
+def test_prompt_profile_choice_retries_on_invalid_input():
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+    from eufy_sync.cli import _prompt_profile_choice
+    from eufy_sync.eufy_client import EufyProfile
+    profiles = [
+        EufyProfile("cid-a", datetime(2026, 6, 1, tzinfo=timezone.utc), 80.0),
+        EufyProfile("cid-b", datetime(2026, 6, 2, tzinfo=timezone.utc), 62.0),
+    ]
+    with patch("builtins.input", side_effect=["abc", "9", "1"]):
+        assert _prompt_profile_choice(profiles) == "cid-a"

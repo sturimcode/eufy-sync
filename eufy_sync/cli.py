@@ -291,7 +291,7 @@ def _setup_strava(config_path: Path) -> None:
     print("Strava connected! Future syncs will update both targets.")
 
 
-def _format_profile(profile, index: int) -> str:
+def _format_profile(profile: "EufyProfile", index: int) -> str:
     lb = profile.last_weight_kg * 2.20462
     when = profile.last_measured.strftime("%Y-%m-%d")
     label = profile.name or f"profile ...{profile.customer_id[-4:]}"
@@ -329,6 +329,9 @@ def _select_profile(config_path: Path) -> None:
     try:
         eufy.authenticate()
         profiles = eufy.list_profiles()
+    except Exception as e:
+        print(f"Could not reach Eufy: {e}")
+        sys.exit(1)
     finally:
         eufy.close()
 
