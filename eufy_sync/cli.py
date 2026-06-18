@@ -852,7 +852,7 @@ def main() -> None:
                         help="Show recent sync history, last N entries (default: 14)")
     parser.add_argument("--backfill-days", type=int, default=None, help="Sync last N days")
     parser.add_argument("--dry-run", action="store_true", help="Preview without uploading")
-    parser.add_argument("--headless", action="store_true", help="No browser popups (for Launch Agent)")
+    parser.add_argument("--headless", action="store_true", help="Never prompt; fail with a reauth message if login is needed (for Launch Agent)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed sync logs")
     parser.add_argument("--install-agent", action="store_true", help="Set up automatic sync (macOS Launch Agent)")
     parser.add_argument("--uninstall-agent", action="store_true", help="Remove the automatic sync Launch Agent")

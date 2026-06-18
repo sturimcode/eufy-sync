@@ -81,3 +81,22 @@ def test_token_status_no_session_without_blob(monkeypatch):
     auth = _auth()
     monkeypatch.setattr(auth, "_load_token", lambda: None)
     assert auth.token_status()["state"] == "no_session"
+
+
+def test_load_token_rejects_old_playwright_session(monkeypatch):
+    # Old Playwright session stored di_token as a nested dict; must be rejected
+    # so the user re-logs in once under the new library.
+    auth = _auth()
+    monkeypatch.setattr("eufy_sync.credentials._keyring_available", lambda: True)
+    monkeypatch.setattr(
+        "eufy_sync.credentials.get_token",
+        lambda name: {"di_token": {"access_token": "x"}},
+    )
+    assert auth._load_token() is None
+
+
+def test_load_token_accepts_new_library_blob(monkeypatch):
+    auth = _auth()
+    monkeypatch.setattr("eufy_sync.credentials._keyring_available", lambda: True)
+    monkeypatch.setattr("eufy_sync.credentials.get_token", lambda name: dict(BLOB))
+    assert auth._load_token() == BLOB
