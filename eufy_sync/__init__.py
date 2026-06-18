@@ -5,7 +5,6 @@ __version__ = "1.7.3"
 # Public API for programmatic use
 from eufy_sync.garmin_auth import GarminAuth
 from eufy_sync.eufy_client import EufyClient, EufyMeasurement
-from eufy_sync.fit import FitEncoder
 from eufy_sync.strava_client import StravaClient
 from eufy_sync.transform import GarminBodyComposition, transform
 
@@ -13,7 +12,6 @@ __all__ = [
     "GarminAuth",
     "EufyClient",
     "EufyMeasurement",
-    "FitEncoder",
     "GarminBodyComposition",
     "StravaClient",
     "transform",

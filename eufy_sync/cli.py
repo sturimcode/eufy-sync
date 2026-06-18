@@ -117,25 +117,6 @@ def _store_passwords_in_keychain(user_name: str, eufy_password: str, garmin_pass
     return True
 
 
-def _ensure_chromium() -> None:
-    """Install Playwright Chromium if not already present."""
-    try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            path = p.chromium.executable_path
-            if not Path(path).exists():
-                raise FileNotFoundError(path)
-    except Exception:
-        print("Installing Chromium for Garmin login (one-time)...")
-        result = subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-        )
-        if result.returncode != 0:
-            print("Error: Failed to install Chromium. Try running manually:")
-            print("  playwright install chromium")
-            sys.exit(1)
-
-
 def _first_run_setup(config_path: Path) -> None:
     """Interactive setup wizard for first-time users."""
     print("")
@@ -229,8 +210,6 @@ def _first_run_setup(config_path: Path) -> None:
     if strava_config:
         targets.append("Strava")
     print(f"Saved. Running first sync to {' and '.join(targets)} (last 7 days)...")
-    if garmin_email:
-        print("A browser window will open for Garmin login.")
     print("")
 
     # Run Strava OAuth if configured
@@ -449,7 +428,7 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
         if force:
             status = auth.token_status()
             if status["state"] == "valid":
-                print(f"Garmin tokens are still valid ({status['days_remaining']}d remaining). Re-authenticate anyway? [y/N] ", end="")
+                print("Garmin is already connected. Re-authenticate anyway? [y/N] ", end="")
                 if sys.stdin.isatty():
                     answer = input().strip()
                     if not answer.lower().startswith("y"):
@@ -457,7 +436,6 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
                         do_garmin = False
 
         if do_garmin:
-            _ensure_chromium()
             auth.force_reauth()
             print("Done - Garmin tokens saved.")
 
@@ -687,12 +665,10 @@ def _print_summary(total_counts: dict[str, int], failures: list, state, users: l
     if user.garmin:
         from eufy_sync.garmin_auth import GarminAuth
         status = GarminAuth(user.garmin.email, user.garmin.password).token_status()
-        if status["state"] == "expired":
-            parts.append("Garmin token EXPIRED")
-        elif status["state"] == "refresh_needed":
-            parts.append(f"token refresh pending ({status['days_remaining']}d until re-login)")
-        elif status["days_remaining"] is not None:
-            parts.append(f"Garmin token valid {status['days_remaining']}d")
+        if status["state"] == "valid":
+            parts.append("Garmin connected")
+        else:
+            parts.append("Garmin not connected")
 
     if user.strava:
         from eufy_sync.strava_client import StravaClient
@@ -740,14 +716,10 @@ def _show_status(state, users: list) -> None:
         if user.garmin:
             from eufy_sync.garmin_auth import GarminAuth
             status = GarminAuth(user.garmin.email, user.garmin.password).token_status()
-            if status["state"] == "expired":
-                print("Garmin auth: EXPIRED - browser re-login needed")
-            elif status["state"] == "refresh_needed":
-                print(f"Garmin auth: access token expired, will refresh on next sync ({status['days_remaining']}d until re-login)")
-            elif status["state"] == "valid":
-                print(f"Garmin auth: valid ({status['days_remaining']} days until re-login needed)")
+            if status["state"] == "valid":
+                print("Garmin auth: valid (auto-refreshes; re-login only if it expires)")
             else:
-                print("Garmin auth: no saved session - first run will open browser")
+                print("Garmin auth: not connected - run: eufy-sync --reauth")
 
         # Strava token health
         if user.strava:
@@ -880,7 +852,7 @@ def main() -> None:
                         help="Show recent sync history, last N entries (default: 14)")
     parser.add_argument("--backfill-days", type=int, default=None, help="Sync last N days")
     parser.add_argument("--dry-run", action="store_true", help="Preview without uploading")
-    parser.add_argument("--headless", action="store_true", help="No browser popups (for Launch Agent)")
+    parser.add_argument("--headless", action="store_true", help="Never prompt; fail with a reauth message if login is needed (for Launch Agent)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed sync logs")
     parser.add_argument("--install-agent", action="store_true", help="Set up automatic sync (macOS Launch Agent)")
     parser.add_argument("--uninstall-agent", action="store_true", help="Remove the automatic sync Launch Agent")
@@ -941,10 +913,7 @@ def main() -> None:
     from eufy_sync.config import AppConfig, load_config
     config = load_config(config_path)
 
-    # Only install Chromium if Garmin is configured
     has_garmin = any(u.garmin for u in config.users)
-    if has_garmin:
-        _ensure_chromium()
 
     # Handle status
     if args.status:
