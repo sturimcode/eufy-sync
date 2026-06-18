@@ -39,6 +39,7 @@ class GarminAuth:
         blob = self._load_token()
         if blob is not None:
             try:
+                # client.loads() takes a JSON string; the stored blob is a dict.
                 garmin.client.loads(json.dumps(blob))
                 logger.info("Restored saved Garmin session")
                 return garmin

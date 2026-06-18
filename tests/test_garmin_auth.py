@@ -24,6 +24,7 @@ def test_login_restores_saved_blob_without_fresh_login(monkeypatch):
     assert result is fake_garmin
     fake_garmin.login.assert_not_called()       # restored from blob, no fresh login
     assert ctor.call_count == 1
+    fake_garmin.client.loads.assert_called_once()
 
 
 def test_login_fresh_when_no_blob_and_interactive(monkeypatch):
@@ -50,6 +51,30 @@ def test_token_status_valid_with_blob(monkeypatch):
     auth = _auth()
     monkeypatch.setattr(auth, "_load_token", lambda: dict(BLOB))
     assert auth.token_status()["state"] == "valid"
+
+
+def test_force_reauth_clears_token_logs_in_and_saves(monkeypatch):
+    auth = _auth()
+    calls = []
+    monkeypatch.setattr(auth, "_clear_token", lambda: calls.append("clear"))
+    monkeypatch.setattr(auth, "_save_token", lambda g: calls.append("save"))
+    fake_garmin = MagicMock()
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake_garmin):
+        result = auth.force_reauth()
+    assert result is fake_garmin
+    fake_garmin.login.assert_called_once()
+    assert calls == ["clear", "save"]   # cleared before login, saved after
+
+
+def test_login_falls_back_to_fresh_when_blob_unusable(monkeypatch):
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: dict(BLOB))
+    monkeypatch.setattr(auth, "_save_token", lambda g: None)
+    fake_garmin = MagicMock()
+    fake_garmin.client.loads.side_effect = ValueError("corrupt")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake_garmin):
+        auth.login(interactive=True)
+    fake_garmin.login.assert_called_once()   # fell back to fresh login when restore failed
 
 
 def test_token_status_no_session_without_blob(monkeypatch):
