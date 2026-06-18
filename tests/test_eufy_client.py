@@ -59,6 +59,8 @@ def test_parse_record_zero_weight():
 def _client(customer_id=None):
     c = EufyClient.__new__(EufyClient)
     c.config = EufyConfig(email="e@example.com", password="pw", customer_id=customer_id)
+    c.access_token = "tok"
+    c.user_id = "uid"
     return c
 
 
@@ -124,3 +126,12 @@ def test_fetch_single_profile_windowed_by_after_timestamp():
         measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
     assert len(measurements) == 1
     assert measurements[0].weight_kg == 81.0
+
+
+def test_fetch_configured_profile_forwards_after_timestamp():
+    from unittest.mock import MagicMock
+    c = _client(customer_id="a")
+    mock = MagicMock(return_value=[_record("a", 800, 2_000_000_000)])
+    with patch.object(c, "_get_records", mock):
+        c.fetch_measurements(after_timestamp=1_500_000_000)
+    mock.assert_called_once_with(1_500_000_000)
