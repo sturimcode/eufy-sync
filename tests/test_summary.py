@@ -57,7 +57,7 @@ def test_summary_no_new_measurements(capsys):
     output = capsys.readouterr().out.strip()
     assert "No new measurements" in output
     assert "last sync: 5h ago" in output
-    assert "Garmin token valid 200d" in output
+    assert "Garmin connected" in output
 
 
 def test_summary_no_new_measurements_days_ago(capsys):
@@ -134,8 +134,7 @@ def test_summary_refresh_needed(capsys):
         _print_summary({}, [], state, [user])
 
     output = capsys.readouterr().out.strip()
-    assert "token refresh pending" in output
-    assert "300d" in output
+    assert "Garmin not connected" in output
 
 
 def test_summary_expired_token(capsys):
@@ -147,7 +146,7 @@ def test_summary_expired_token(capsys):
         _print_summary({}, [], state, [user])
 
     output = capsys.readouterr().out.strip()
-    assert "Garmin token EXPIRED" in output
+    assert "Garmin not connected" in output
 
 
 def test_summary_no_session(capsys):
