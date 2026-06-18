@@ -13,11 +13,11 @@ Syncs body composition data from a Eufy smart scale to Garmin Connect and/or Str
 
 Eufy scales sync to Apple Health, Fitbit, and Google Fit - but not Garmin or Strava. If you use either for training, your body comp data is stuck in a separate app. This fixes that.
 
-## Why not just use python-garminconnect?
+## How Garmin login works
 
-Every Python library that talked to Garmin broke in March 2026. Garmin put Cloudflare in front of their SSO, which blocks any login that doesn't come from a real browser. [garth](https://github.com/matin/garth) is [deprecated](https://github.com/matin/garth/discussions/222), [python-garminconnect](https://github.com/cyberjunky/python-garminconnect) can't authenticate anymore, and there's no official API.
+Garmin has no official API for writing body composition into Connect, and in March 2026 it put Cloudflare in front of its login, which broke the Python libraries that talked to it. [garth](https://github.com/matin/garth) was [deprecated](https://github.com/matin/garth/discussions/222) and stays that way. [python-garminconnect](https://github.com/cyberjunky/python-garminconnect) has since recovered with a browser-free workaround.
 
-This project gets around it with Playwright. On first run, a real Chromium window opens and you log in normally. OAuth2 tokens get saved to your system keychain and refresh on their own for about a year. After that first login, no browser needed - body comp data goes up as FIT files through Garmin's upload endpoint.
+eufy-sync currently handles the login with Playwright: on first run a Chromium window opens and you log in normally. OAuth2 tokens are saved to your system keychain and refresh on their own for about a year, so after that first login no browser is needed. Body composition then goes up as FIT files through Garmin's upload endpoint.
 
 ## Install
 
