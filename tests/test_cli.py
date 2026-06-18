@@ -198,3 +198,59 @@ def test_uninstall_clears_keychain_for_configured_user_name(
         f"_uninstall should clear keychain for the configured username, got {deleted_accounts}"
     )
     assert "elias:garmin" in deleted_accounts
+
+
+def test_prompt_profile_choice_returns_selected_customer_id():
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+    from eufy_sync.cli import _prompt_profile_choice
+    from eufy_sync.eufy_client import EufyProfile
+    profiles = [
+        EufyProfile("cid-a", datetime(2026, 6, 1, tzinfo=timezone.utc), 80.0),
+        EufyProfile("cid-b", datetime(2026, 6, 2, tzinfo=timezone.utc), 62.0),
+    ]
+    with patch("builtins.input", return_value="2"):
+        assert _prompt_profile_choice(profiles) == "cid-b"
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_select_profile_writes_chosen_customer_id(_keyring, tmp_path: Path):
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock, patch
+    from eufy_sync.cli import _select_profile, _write_config
+    from eufy_sync.eufy_client import EufyProfile
+
+    cfg_path = tmp_path / "config.yaml"
+    _write_config(cfg_path, {
+        "users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com", "password": "pw"},
+            "garmin": {"email": "g@example.com", "password": "pw"},
+        }],
+    })
+
+    fake = MagicMock()
+    fake.list_profiles.return_value = [
+        EufyProfile("cid-a", datetime(2026, 6, 2, tzinfo=timezone.utc), 80.0),
+        EufyProfile("cid-b", datetime(2026, 6, 1, tzinfo=timezone.utc), 62.0),
+    ]
+
+    with patch("eufy_sync.eufy_client.EufyClient", return_value=fake), \
+         patch("builtins.input", return_value="1"):
+        _select_profile(cfg_path)
+
+    written = yaml.safe_load(cfg_path.read_text())
+    assert written["users"][0]["eufy"]["customer_id"] == "cid-a"
+
+
+def test_prompt_profile_choice_retries_on_invalid_input():
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+    from eufy_sync.cli import _prompt_profile_choice
+    from eufy_sync.eufy_client import EufyProfile
+    profiles = [
+        EufyProfile("cid-a", datetime(2026, 6, 1, tzinfo=timezone.utc), 80.0),
+        EufyProfile("cid-b", datetime(2026, 6, 2, tzinfo=timezone.utc), 62.0),
+    ]
+    with patch("builtins.input", side_effect=["abc", "9", "1"]):
+        assert _prompt_profile_choice(profiles) == "cid-a"

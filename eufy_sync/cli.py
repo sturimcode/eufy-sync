@@ -203,6 +203,22 @@ def _first_run_setup(config_path: Path) -> None:
     else:
         print("Passwords saved to system keychain.")
 
+    # On a shared account, pick the right person before the first sync.
+    try:
+        from eufy_sync.config import EufyConfig
+        from eufy_sync.eufy_client import EufyClient
+        probe = EufyClient(EufyConfig(email=eufy_email, password=eufy_password))
+        try:
+            probe.authenticate()
+            profiles = probe.list_profiles()
+        finally:
+            probe.close()
+        if len(profiles) > 1:
+            user_config["eufy"]["customer_id"] = _prompt_profile_choice(profiles)
+    except Exception as e:
+        # Non-fatal: if this fails, the first sync safely stops and prompts.
+        print(f"Note: could not check Eufy profiles right now ({e}).")
+
     config = {"users": [user_config]}
     _write_config(config_path, config)
 
@@ -273,6 +289,67 @@ def _setup_strava(config_path: Path) -> None:
         client_secret=strava_config["client_secret"],
     ))
     print("Strava connected! Future syncs will update both targets.")
+
+
+def _format_profile(profile: "EufyProfile", index: int) -> str:
+    lb = profile.last_weight_kg * 2.20462
+    when = profile.last_measured.strftime("%Y-%m-%d")
+    label = profile.name or f"profile ...{profile.customer_id[-4:]}"
+    return f"  {index}. {label}  -  {profile.last_weight_kg:.1f} kg ({lb:.1f} lb), last weigh-in {when}"
+
+
+def _prompt_profile_choice(profiles: list) -> str:
+    """Print the profiles and return the customer_id the user picks."""
+    print("")
+    print("Multiple profiles were found on this Eufy account:")
+    for i, p in enumerate(profiles, 1):
+        print(_format_profile(p, i))
+    print("")
+    while True:
+        choice = input(f"Which profile is yours? [1-{len(profiles)}] ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(profiles):
+            return profiles[int(choice) - 1].customer_id
+        print("Enter a number from the list.")
+
+
+def _select_profile(config_path: Path) -> None:
+    """Choose which Eufy profile to sync, for an existing install."""
+    if not config_path.exists():
+        print("No config found. Run eufy-sync first to set up.")
+        sys.exit(1)
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    from eufy_sync.config import load_config
+    from eufy_sync.eufy_client import EufyClient
+
+    cfg = load_config(config_path)
+    eufy = EufyClient(cfg.users[0].eufy)
+    try:
+        eufy.authenticate()
+        profiles = eufy.list_profiles()
+    except Exception as e:
+        print(f"Could not reach Eufy: {e}")
+        sys.exit(1)
+    finally:
+        eufy.close()
+
+    if not profiles:
+        print("No profiles found yet. Weigh in and open the Eufy app, then try again.")
+        return
+
+    user = config["users"][0]
+    user.setdefault("eufy", {})
+    if len(profiles) == 1:
+        user["eufy"]["customer_id"] = profiles[0].customer_id
+        _write_config(config_path, config)
+        print("Only one profile found on this account; saved it as yours.")
+        return
+
+    user["eufy"]["customer_id"] = _prompt_profile_choice(profiles)
+    _write_config(config_path, config)
+    print("Saved. Future syncs will use only your profile.")
 
 
 def _update_password(config_path: Path) -> None:
@@ -797,6 +874,7 @@ def main() -> None:
     parser.add_argument("--reauth", nargs="?", const="all", default=None, metavar="TARGET",
                         help="Re-authenticate (optionally: garmin or strava)")
     parser.add_argument("--setup-strava", action="store_true", help="Connect Strava to your account")
+    parser.add_argument("--select-profile", action="store_true", help="Choose which Eufy profile to sync")
     parser.add_argument("--update-password", action="store_true", help="Change stored passwords")
     parser.add_argument("--history", nargs="?", const=14, type=int, default=None, metavar="N",
                         help="Show recent sync history, last N entries (default: 14)")
@@ -831,6 +909,11 @@ def main() -> None:
     # Handle Strava setup
     if args.setup_strava:
         _setup_strava(config_path)
+        return
+
+    # Handle profile selection
+    if args.select_profile:
+        _select_profile(config_path)
         return
 
     # Handle password update
@@ -883,6 +966,7 @@ def main() -> None:
     import logging
     from eufy_sync.sync import sync_user
     from eufy_sync.state import SyncState
+    from eufy_sync.eufy_client import AmbiguousProfileError
 
     log_level = "DEBUG" if args.verbose else "WARNING"
     logging.basicConfig(
@@ -910,6 +994,14 @@ def main() -> None:
                 for target_name, count in counts.items():
                     total_counts[target_name] = total_counts.get(target_name, 0) + count
                 logger.info("User %s: synced %s", user.name, counts)
+            except AmbiguousProfileError as e:
+                print("")
+                print("Multiple profiles were found on this Eufy account:")
+                for i, p in enumerate(e.profiles, 1):
+                    print(_format_profile(p, i))
+                print("")
+                print("Nothing was synced. Choose your profile with: eufy-sync --select-profile")
+                failures.append((user.name, "multiple Eufy profiles; run eufy-sync --select-profile"))
             except Exception as e:
                 logger.exception("Failed to sync user %s", user.name)
                 failures.append((user.name, str(e)))

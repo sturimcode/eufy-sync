@@ -1,6 +1,10 @@
 from datetime import datetime, timezone
+from unittest.mock import patch
 
-from eufy_sync.eufy_client import EufyClient, EufyMeasurement
+import pytest
+
+from eufy_sync.config import EufyConfig
+from eufy_sync.eufy_client import AmbiguousProfileError, EufyClient, EufyMeasurement, EufyProfile
 
 
 def test_parse_record_basic():
@@ -46,3 +50,88 @@ def test_parse_record_zero_weight():
         "scale_data": {"weight": 0},
     }
     assert client._parse_record(record) is None
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by Task 2 and Task 3 tests
+# ---------------------------------------------------------------------------
+
+def _client(customer_id=None):
+    c = EufyClient.__new__(EufyClient)
+    c.config = EufyConfig(email="e@example.com", password="pw", customer_id=customer_id)
+    c.access_token = "tok"
+    c.user_id = "uid"
+    return c
+
+
+def _record(customer_id, weight_dg, update_time):
+    return {
+        "customer_id": customer_id,
+        "device_id": "d",
+        "update_time": update_time,
+        "scale_data": {"weight": weight_dg},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Task 2: list_profiles
+# ---------------------------------------------------------------------------
+
+def test_list_profiles_groups_by_customer_id_newest_first():
+    c = _client()
+    records = [_record("a", 800, 100), _record("a", 810, 200), _record("b", 600, 150)]
+    with patch.object(c, "_get_records", return_value=records):
+        profiles = c.list_profiles()
+    assert {p.customer_id for p in profiles} == {"a", "b"}
+    a = next(p for p in profiles if p.customer_id == "a")
+    assert a.last_weight_kg == 81.0  # most recent record for "a" (810 -> 81.0)
+    assert profiles[0].last_measured >= profiles[1].last_measured  # newest first
+    assert isinstance(profiles[0], EufyProfile)
+
+
+# ---------------------------------------------------------------------------
+# Task 3: fetch_measurements filtering and AmbiguousProfileError
+# ---------------------------------------------------------------------------
+
+def test_fetch_filters_to_configured_profile():
+    c = _client(customer_id="a")
+    records = [_record("a", 800, 100), _record("b", 600, 150)]
+    with patch.object(c, "_get_records", return_value=records):
+        measurements = c.fetch_measurements()
+    assert {m.customer_id for m in measurements} == {"a"}
+
+
+def test_fetch_single_profile_returns_all_when_unconfigured():
+    c = _client()
+    records = [_record("a", 800, 100), _record("a", 810, 200)]
+    with patch.object(c, "_get_records", return_value=records):
+        measurements = c.fetch_measurements()
+    assert len(measurements) == 2
+
+
+def test_fetch_raises_ambiguous_when_multiple_profiles_unconfigured():
+    c = _client()
+    records = [_record("a", 800, 100), _record("b", 600, 150)]
+    with patch.object(c, "_get_records", return_value=records):
+        with pytest.raises(AmbiguousProfileError) as exc_info:
+            c.fetch_measurements()
+    assert {p.customer_id for p in exc_info.value.profiles} == {"a", "b"}
+
+
+def test_fetch_single_profile_windowed_by_after_timestamp():
+    c = _client()
+    old = _record("a", 800, 1_000)              # long ago
+    new = _record("a", 810, 2_000_000_000)      # year 2033
+    with patch.object(c, "_get_records", return_value=[old, new]):
+        measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert len(measurements) == 1
+    assert measurements[0].weight_kg == 81.0
+
+
+def test_fetch_configured_profile_forwards_after_timestamp():
+    from unittest.mock import MagicMock
+    c = _client(customer_id="a")
+    mock = MagicMock(return_value=[_record("a", 800, 2_000_000_000)])
+    with patch.object(c, "_get_records", mock):
+        c.fetch_measurements(after_timestamp=1_500_000_000)
+    mock.assert_called_once_with(1_500_000_000)

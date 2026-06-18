@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import httpx
 
 from eufy_sync.config import UserConfig
-from eufy_sync.eufy_client import EufyClient
+from eufy_sync.eufy_client import AmbiguousProfileError, EufyClient
 from eufy_sync.state import SyncState
 from eufy_sync.transform import transform
 
@@ -23,7 +23,7 @@ class PermanentSyncError(RuntimeError):
 
 
 def _is_permanent(exc: BaseException) -> bool:
-    if isinstance(exc, PermanentSyncError):
+    if isinstance(exc, (PermanentSyncError, AmbiguousProfileError)):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code

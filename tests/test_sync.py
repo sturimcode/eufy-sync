@@ -206,3 +206,9 @@ def test_latest_timestamp_is_target_agnostic(tmp_path: Path):
     assert ts > 0
 
     state.close()
+
+
+def test_ambiguous_profile_error_is_permanent():
+    from eufy_sync.sync import _is_permanent
+    from eufy_sync.eufy_client import AmbiguousProfileError
+    assert _is_permanent(AmbiguousProfileError([])) is True
