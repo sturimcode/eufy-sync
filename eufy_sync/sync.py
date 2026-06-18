@@ -32,7 +32,8 @@ def _is_permanent(exc: BaseException) -> bool:
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
-        # 4xx is client error - won't recover. 429 is the exception (rate-limited).
+        # httpx 4xx is a client error and won't recover; a 429 (rate-limited)
+        # stays retryable here. The Garmin login 429 is handled above.
         return 400 <= status < 500 and status != 429
     return False
 

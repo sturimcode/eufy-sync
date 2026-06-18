@@ -133,5 +133,6 @@ def test_force_reauth_rate_limited_raises_clear_error(monkeypatch):
     fake = MagicMock()
     fake.login.side_effect = GarminConnectTooManyRequestsError("rate limited")
     with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
-        with pytest.raises(PermanentSyncError):
+        with pytest.raises(PermanentSyncError) as exc_info:
             auth.force_reauth()
+    assert "rate-limiting" in str(exc_info.value)

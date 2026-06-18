@@ -107,3 +107,19 @@ def test_upload_raises_permanent_on_auth_error_when_headless():
     bc = GarminBodyComposition(timestamp="2026-06-10T08:00:00+00:00", weight=80.0)
     with pytest.raises(PermanentSyncError):
         client.upload_body_composition(bc)
+
+
+def test_upload_propagates_rate_limit_without_reauth():
+    # A 429 mid-sync is not an auth error, so upload does not re-auth; it
+    # propagates and sync._is_permanent stops it from being retried.
+    from garminconnect import GarminConnectTooManyRequestsError
+    client = GarminClient(GarminConfig(email="g@example.com", password="pw"))
+    fake = MagicMock()
+    fake.add_body_composition.side_effect = GarminConnectTooManyRequestsError("429")
+    client._garmin = fake
+    client._allow_interactive = True
+    bc = GarminBodyComposition(timestamp="2026-06-10T08:00:00+00:00", weight=80.0)
+    with patch.object(client._auth, "force_reauth") as reauth:
+        with pytest.raises(GarminConnectTooManyRequestsError):
+            client.upload_body_composition(bc)
+    reauth.assert_not_called()  # a 429 must not trigger a re-login

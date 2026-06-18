@@ -73,16 +73,16 @@ class GarminAuth:
         from eufy_sync.sync import PermanentSyncError
         try:
             garmin.login()
-        except GarminConnectTooManyRequestsError:
+        except GarminConnectTooManyRequestsError as e:
             raise PermanentSyncError(
                 "Garmin is rate-limiting login attempts from your IP. "
                 "Wait a while (about an hour) and run: eufy-sync --reauth"
-            )
-        except GarminConnectAuthenticationError:
+            ) from e
+        except GarminConnectAuthenticationError as e:
             raise PermanentSyncError(
                 "Garmin login failed. If you changed your password, "
                 "run: eufy-sync --update-password"
-            )
+            ) from e
 
     def token_status(self) -> dict:
         """Return token health. The library auto-refreshes, so the states

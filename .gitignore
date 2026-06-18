@@ -14,3 +14,4 @@ dist/
 build/
 *.plist
 CLAUDE.md
+.claude/
