@@ -102,37 +102,92 @@ def test_load_token_accepts_new_library_blob(monkeypatch):
     assert auth._load_token() == BLOB
 
 
-def test_login_rate_limited_raises_clear_error(monkeypatch):
+def test_login_curl_cffi_success_skips_browser(monkeypatch):
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: None)
+    monkeypatch.setattr(auth, "_save_token", lambda g: None)
+    fake = MagicMock()  # garmin.login() succeeds (no side_effect)
+    browser_calls = []
+    monkeypatch.setattr("eufy_sync.garmin_auth.browser_login",
+                        lambda e, p: browser_calls.append(1) or "ticket")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        result = auth.login(interactive=True)
+    fake.login.assert_called_once()
+    assert browser_calls == []  # browser never opened
+    assert result is fake
+
+
+def test_login_falls_back_to_browser_when_curl_cffi_fails(monkeypatch):
     from garminconnect import GarminConnectTooManyRequestsError
     auth = _auth()
     monkeypatch.setattr(auth, "_load_token", lambda: None)
+    monkeypatch.setattr(auth, "_save_token", lambda g: None)
     fake = MagicMock()
-    fake.login.side_effect = GarminConnectTooManyRequestsError("rate limited")
+    fake.login.side_effect = GarminConnectTooManyRequestsError("429")
+    monkeypatch.setattr("eufy_sync.garmin_auth._ensure_chromium", lambda: None)
+    monkeypatch.setattr("eufy_sync.garmin_auth.browser_login", lambda e, p: "ticket")
+    monkeypatch.setattr("eufy_sync.garmin_auth._exchange_ticket_for_tokens",
+                        lambda t: ("acc", "ref", "cid"))
     with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
-        with pytest.raises(PermanentSyncError) as exc_info:
-            auth.login(interactive=True)
-    assert "rate-limiting" in str(exc_info.value)
+        result = auth.login(interactive=True)
+    fake.client.loads.assert_called_once()
+    loaded = json.loads(fake.client.loads.call_args.args[0])
+    assert loaded == {"di_token": "acc", "di_refresh_token": "ref", "di_client_id": "cid"}
+    assert result is fake
 
 
-def test_login_bad_credentials_raises_clear_error(monkeypatch):
+def test_login_bad_credentials_fails_both_tiers(monkeypatch):
     from garminconnect import GarminConnectAuthenticationError
     auth = _auth()
     monkeypatch.setattr(auth, "_load_token", lambda: None)
     fake = MagicMock()
-    fake.login.side_effect = GarminConnectAuthenticationError("bad creds")
+    fake.login.side_effect = GarminConnectAuthenticationError("bad")
+    monkeypatch.setattr("eufy_sync.garmin_auth._ensure_chromium", lambda: None)
+
+    def _no_ticket(email, password):
+        raise RuntimeError("no service ticket captured")
+    monkeypatch.setattr("eufy_sync.garmin_auth.browser_login", _no_ticket)
     with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
         with pytest.raises(PermanentSyncError) as exc_info:
             auth.login(interactive=True)
-    assert "--update-password" in str(exc_info.value)
+    assert "update-password" in str(exc_info.value)
 
 
-def test_force_reauth_rate_limited_raises_clear_error(monkeypatch):
+def test_login_headless_never_opens_browser(monkeypatch):
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: None)
+    browser_calls = []
+    monkeypatch.setattr("eufy_sync.garmin_auth.browser_login",
+                        lambda e, p: browser_calls.append(1) or "ticket")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=MagicMock()):
+        with pytest.raises(PermanentSyncError):
+            auth.login(interactive=False)
+    assert browser_calls == []
+
+
+def test_force_reauth_falls_back_to_browser(monkeypatch):
     from garminconnect import GarminConnectTooManyRequestsError
     auth = _auth()
     monkeypatch.setattr(auth, "_clear_token", lambda: None)
+    monkeypatch.setattr(auth, "_save_token", lambda g: None)
     fake = MagicMock()
-    fake.login.side_effect = GarminConnectTooManyRequestsError("rate limited")
+    fake.login.side_effect = GarminConnectTooManyRequestsError("429")
+    monkeypatch.setattr("eufy_sync.garmin_auth._ensure_chromium", lambda: None)
+    monkeypatch.setattr("eufy_sync.garmin_auth.browser_login", lambda e, p: "ticket")
+    monkeypatch.setattr("eufy_sync.garmin_auth._exchange_ticket_for_tokens",
+                        lambda t: ("a", "r", "c"))
     with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
-        with pytest.raises(PermanentSyncError) as exc_info:
-            auth.force_reauth()
-    assert "rate-limiting" in str(exc_info.value)
+        result = auth.force_reauth()
+    fake.client.loads.assert_called_once()
+    assert result is fake
+
+
+def test_exchange_ticket_returns_tokens_and_client_id():
+    from eufy_sync.garmin_auth import _exchange_ticket_for_tokens
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"access_token": "acc", "refresh_token": "ref", "expires_in": 3600}
+    with patch("eufy_sync.garmin_auth.httpx.post", return_value=resp):
+        access, refresh, client_id = _exchange_ticket_for_tokens("ticket123")
+    assert access == "acc"
+    assert refresh == "ref"
+    assert client_id  # the client id the exchange succeeded with
