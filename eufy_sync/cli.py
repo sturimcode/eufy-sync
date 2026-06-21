@@ -210,6 +210,8 @@ def _first_run_setup(config_path: Path) -> None:
     if strava_config:
         targets.append("Strava")
     print(f"Saved. Running first sync to {' and '.join(targets)} (last 7 days)...")
+    if garmin_email:
+        print("Logging in to Garmin (a browser may open if the direct login is rate-limited).")
     print("")
 
     # Run Strava OAuth if configured
