@@ -16,11 +16,7 @@ from pathlib import Path
 
 import httpx
 
-from garminconnect import (
-    Garmin,
-    GarminConnectAuthenticationError,
-    GarminConnectTooManyRequestsError,
-)
+from garminconnect import Garmin
 
 logger = logging.getLogger(__name__)
 
@@ -260,20 +256,35 @@ class GarminAuth:
         return garmin
 
     def _fresh_login(self, garmin: Garmin) -> None:
-        """Run garmin.login(), turning library errors into clear messages."""
-        from eufy_sync.sync import PermanentSyncError
+        """Try the browser-free login; fall back to the browser on any failure."""
         try:
             garmin.login()
-        except GarminConnectTooManyRequestsError as e:
+            return
+        except Exception as e:
+            logger.warning(
+                "Browser-free Garmin login failed (%s); opening browser fallback", e
+            )
+        self._browser_fallback(garmin)
+
+    def _browser_fallback(self, garmin: Garmin) -> None:
+        """Log in via the Playwright browser and inject the tokens into the session."""
+        from eufy_sync.sync import PermanentSyncError
+        _ensure_chromium()
+        try:
+            ticket = browser_login(self.email, self.password)
+        except Exception as e:
             raise PermanentSyncError(
-                "Garmin is rate-limiting login attempts from your IP. "
-                "Wait a while (about an hour) and run: eufy-sync --reauth"
+                "Garmin login failed. If you changed your password, run: "
+                "eufy-sync --update-password. Otherwise re-run: eufy-sync --reauth"
             ) from e
-        except GarminConnectAuthenticationError as e:
+        try:
+            access, refresh, client_id = _exchange_ticket_for_tokens(ticket)
+        except Exception as e:
             raise PermanentSyncError(
-                "Garmin login failed. If you changed your password, "
-                "run: eufy-sync --update-password"
+                "Garmin token exchange failed; try: eufy-sync --reauth"
             ) from e
+        blob = {"di_token": access, "di_refresh_token": refresh, "di_client_id": client_id}
+        garmin.client.loads(json.dumps(blob))
 
     def token_status(self) -> dict:
         """Return token health. The library auto-refreshes, so the states
