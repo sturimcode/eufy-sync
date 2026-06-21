@@ -136,3 +136,14 @@ def test_force_reauth_rate_limited_raises_clear_error(monkeypatch):
         with pytest.raises(PermanentSyncError) as exc_info:
             auth.force_reauth()
     assert "rate-limiting" in str(exc_info.value)
+
+
+def test_exchange_ticket_returns_tokens_and_client_id():
+    from eufy_sync.garmin_auth import _exchange_ticket_for_tokens
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"access_token": "acc", "refresh_token": "ref", "expires_in": 3600}
+    with patch("eufy_sync.garmin_auth.httpx.post", return_value=resp):
+        access, refresh, client_id = _exchange_ticket_for_tokens("ticket123")
+    assert access == "acc"
+    assert refresh == "ref"
+    assert client_id  # the client id the exchange succeeded with

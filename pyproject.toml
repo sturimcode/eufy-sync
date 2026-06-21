@@ -35,6 +35,7 @@ dependencies = [
     "garminconnect>=0.3.6",
     "curl_cffi>=0.7.0",
     "pyyaml>=6.0",
+    "playwright>=1.40.0",
 ]
 
 [project.scripts]
