@@ -719,11 +719,12 @@ def _uninstall(data_dir: Path) -> None:
     from eufy_sync.credentials import delete_password, delete_token, _keyring_available
     if _keyring_available():
         for name in user_names:
-            for suffix in ["eufy", "garmin"]:
+            for suffix in ["eufy", "garmin", "zwift"]:
                 delete_password(f"{name}:{suffix}")
         delete_token("eufy")
         delete_token("garmin")
         delete_token("strava")
+        delete_token("zwift")
 
     # Remove data directory (preserving DB if requested)
     if data_dir.exists():

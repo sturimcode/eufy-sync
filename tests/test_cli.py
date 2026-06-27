@@ -189,6 +189,7 @@ def test_uninstall_clears_keychain_for_configured_user_name(
             "name": "elias",
             "eufy": {"email": "e@example.com"},
             "garmin": {"email": "g@example.com"},
+            "zwift": {"email": "z@example.com"},
         }],
     })
 
@@ -199,6 +200,7 @@ def test_uninstall_clears_keychain_for_configured_user_name(
         f"_uninstall should clear keychain for the configured username, got {deleted_accounts}"
     )
     assert "elias:garmin" in deleted_accounts
+    assert "elias:zwift" in deleted_accounts
 
 
 def test_prompt_profile_choice_returns_selected_customer_id():
