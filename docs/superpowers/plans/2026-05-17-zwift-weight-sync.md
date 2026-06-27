@@ -86,24 +86,46 @@ At the bottom of the function, before the existing `return counts`, add an `erro
 
 - [ ] **Step 4: Update cli.py to unpack the new shape**
 
-In `eufy_sync/cli.py`, find the loop in `main()`:
+In `eufy_sync/cli.py`, the sync loop in `main()` calls `sync_user` in TWO places: the main attempt, and the retry inside the `except AmbiguousProfileError` block (the inline profile picker added the second one). Update BOTH.
+
+Main attempt currently reads:
 
 ```python
-counts = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
-for target_name, count in counts.items():
-    total_counts[target_name] = total_counts.get(target_name, 0) + count
-logger.info("User %s: synced %s", user.name, counts)
+                counts = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                for target_name, count in counts.items():
+                    total_counts[target_name] = total_counts.get(target_name, 0) + count
+                logger.info("User %s: synced %s", user.name, counts)
 ```
 
 Replace with:
 
 ```python
-counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
-for target_name, count in counts.items():
-    total_counts[target_name] = total_counts.get(target_name, 0) + count
-for target_name, err in errors.items():
-    failures.append((f"{user.name}/{target_name}", err))
-logger.info("User %s: synced %s, errors %s", user.name, counts, errors)
+                counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                for target_name, count in counts.items():
+                    total_counts[target_name] = total_counts.get(target_name, 0) + count
+                for target_name, err in errors.items():
+                    failures.append((f"{user.name}/{target_name}", err))
+                logger.info("User %s: synced %s, errors %s", user.name, counts, errors)
+```
+
+The retry inside `except AmbiguousProfileError` currently reads:
+
+```python
+                        counts = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                        for target_name, count in counts.items():
+                            total_counts[target_name] = total_counts.get(target_name, 0) + count
+                        logger.info("User %s: synced %s", user.name, counts)
+```
+
+Replace with:
+
+```python
+                        counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                        for target_name, count in counts.items():
+                            total_counts[target_name] = total_counts.get(target_name, 0) + count
+                        for target_name, err in errors.items():
+                            failures.append((f"{user.name}/{target_name}", err))
+                        logger.info("User %s: synced %s, errors %s", user.name, counts, errors)
 ```
 
 - [ ] **Step 5: Run the full suite**
@@ -319,7 +341,7 @@ Write `eufy_sync/zwift_client.py`:
 
 Zwift does not publish a third-party API. This module talks to the same
 endpoints the Companion app uses:
-- Auth: POST https://secure.zwift.com/auth/realms/zwift/protocol/openid-connect/token
+- Auth: POST https://secure.zwift.com/auth/realms/zwift/tokens/access/codes
 - Profile write: PUT https://us-or-rly101.zwift.com/api/profiles/me
 
 The endpoints are community-reverse-engineered and may break with any
@@ -339,7 +361,7 @@ from eufy_sync.config import ZwiftConfig
 
 logger = logging.getLogger(__name__)
 
-TOKEN_URL = "https://secure.zwift.com/auth/realms/zwift/protocol/openid-connect/token"
+TOKEN_URL = "https://secure.zwift.com/auth/realms/zwift/tokens/access/codes"
 PROFILE_URL = "https://us-or-rly101.zwift.com/api/profiles/me"
 CLIENT_ID = "Zwift_Mobile_Link"
 REFRESH_SAFETY_MARGIN = 300  # seconds before expiry to trigger refresh
@@ -451,7 +473,7 @@ def test_authenticate_fresh_login_when_no_tokens(monkeypatch, tmp_path):
 
     # Called with password grant
     call = mock_post.call_args
-    assert call.args[0] == "https://secure.zwift.com/auth/realms/zwift/protocol/openid-connect/token"
+    assert call.args[0] == "https://secure.zwift.com/auth/realms/zwift/tokens/access/codes"
     assert call.kwargs["data"]["grant_type"] == "password"
     assert call.kwargs["data"]["username"] == "z@example.com"
     assert call.kwargs["data"]["password"] == "pw"

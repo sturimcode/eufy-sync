@@ -47,7 +47,7 @@ Public surface:
   - `close() -> None`
 
 Internal helpers:
-- `_fresh_login()` — `POST https://secure.zwift.com/auth/realms/zwift/protocol/openid-connect/token` with `grant_type=password`, `client_id=Zwift_Mobile_Link`, `username`, `password`.
+- `_fresh_login()` — `POST https://secure.zwift.com/auth/realms/zwift/tokens/access/codes` with `grant_type=password`, `client_id=Zwift_Mobile_Link`, `username`, `password`.
 - `_refresh_access_token()` — same URL, `grant_type=refresh_token`.
 - `_load_tokens()` / `_save_tokens(tokens)` — keychain first, file fallback, same pattern as Strava's helpers.
 
