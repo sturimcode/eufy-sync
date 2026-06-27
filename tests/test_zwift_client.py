@@ -179,3 +179,30 @@ def test_update_weight_5xx_raises_retryable(monkeypatch, tmp_path):
             client.update_weight(80.0)
     assert not isinstance(exc_info.value, PermanentSyncError)
     client.close()
+
+
+def test_token_status_no_session(monkeypatch, tmp_path):
+    monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    client = ZwiftClient(_make_config())
+    assert client.token_status()["state"] == "no_session"
+    client.close()
+
+
+def test_token_status_valid(monkeypatch, tmp_path):
+    monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _save_tokens(_make_tokens())
+    client = ZwiftClient(_make_config())
+    status = client.token_status()
+    assert status["state"] == "valid"
+    client.close()
+
+
+def test_token_status_refresh_needed(monkeypatch, tmp_path):
+    monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _save_tokens(_make_tokens(expired=True))
+    client = ZwiftClient(_make_config())
+    assert client.token_status()["state"] == "refresh_needed"
+    client.close()
