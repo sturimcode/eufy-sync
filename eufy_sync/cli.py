@@ -808,6 +808,18 @@ def _print_summary(total_counts: dict[str, int], failures: list, state, users: l
         else:
             parts.append("Strava connected")
 
+    if user.zwift:
+        from eufy_sync.zwift_client import ZwiftClient
+        zwift_status = ZwiftClient(user.zwift).token_status()
+        if zwift_status["state"] == "no_session":
+            parts.append("Zwift: not authorized")
+        elif zwift_status["state"] == "expired":
+            parts.append("Zwift token EXPIRED")
+        elif zwift_status["state"] == "refresh_needed":
+            parts.append("Zwift token refresh pending")
+        else:
+            parts.append("Zwift connected")
+
     print(" | ".join(parts))
     print(
         "If you weighed in recently and it isn't here, open the Eufy app so it "
@@ -863,6 +875,19 @@ def _show_status(state, users: list) -> None:
                 print("Strava auth: access token expired, will refresh on next sync")
             else:
                 print("Strava auth: valid (refresh token active)")
+
+        # Zwift token health (unofficial)
+        if user.zwift:
+            from eufy_sync.zwift_client import ZwiftClient
+            zwift_status = ZwiftClient(user.zwift).token_status()
+            if zwift_status["state"] == "no_session":
+                print("Zwift auth: not authorized - first sync will log in")
+            elif zwift_status["state"] == "expired":
+                print("Zwift auth: EXPIRED - re-authorize with --reauth zwift")
+            elif zwift_status["state"] == "refresh_needed":
+                print("Zwift auth: access token expired, will refresh on next sync")
+            else:
+                print("Zwift auth: valid (refresh token active)")
 
 
 def _show_history(state, users: list, limit: int = 14) -> None:
