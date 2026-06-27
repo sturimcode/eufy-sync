@@ -105,3 +105,77 @@ def test_authenticate_falls_back_to_password_if_refresh_fails(monkeypatch, tmp_p
         client.authenticate()
     assert "Bearer fresh_after_refresh_fail" in client._client.headers["Authorization"]
     client.close()
+
+
+import httpx
+import pytest
+from eufy_sync.sync import PermanentSyncError
+
+
+def test_update_weight_sends_grams_not_kg(monkeypatch, tmp_path):
+    monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _save_tokens(_make_tokens())
+
+    mock_response = MagicMock(status_code=200)
+    mock_response.json.return_value = {"weight": 80000}
+
+    client = ZwiftClient(_make_config())
+    client.authenticate()
+    with patch.object(client._client, "put", return_value=mock_response) as mock_put:
+        client.update_weight(80.0)
+
+    # Weight must be sent in grams, JSON body
+    payload = mock_put.call_args.kwargs["json"]
+    assert payload["weight"] == 80000
+    assert mock_put.call_args.args[0] == "https://us-or-rly101.zwift.com/api/profiles/me"
+    client.close()
+
+
+def test_update_weight_rounds_to_grams(monkeypatch, tmp_path):
+    monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _save_tokens(_make_tokens())
+
+    mock_response = MagicMock(status_code=200)
+    mock_response.json.return_value = {}
+
+    client = ZwiftClient(_make_config())
+    client.authenticate()
+    with patch.object(client._client, "put", return_value=mock_response) as mock_put:
+        client.update_weight(80.456)
+
+    # 80.456 kg = 80456 g
+    assert mock_put.call_args.kwargs["json"]["weight"] == 80456
+    client.close()
+
+
+def test_update_weight_4xx_raises_permanent(monkeypatch, tmp_path):
+    monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _save_tokens(_make_tokens())
+
+    mock_response = MagicMock(status_code=401, text="unauth")
+
+    client = ZwiftClient(_make_config())
+    client.authenticate()
+    with patch.object(client._client, "put", return_value=mock_response):
+        with pytest.raises(PermanentSyncError):
+            client.update_weight(80.0)
+    client.close()
+
+
+def test_update_weight_5xx_raises_retryable(monkeypatch, tmp_path):
+    monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _save_tokens(_make_tokens())
+
+    mock_response = MagicMock(status_code=503, text="busy")
+
+    client = ZwiftClient(_make_config())
+    client.authenticate()
+    with patch.object(client._client, "put", return_value=mock_response):
+        with pytest.raises(RuntimeError) as exc_info:
+            client.update_weight(80.0)
+    assert not isinstance(exc_info.value, PermanentSyncError)
+    client.close()
