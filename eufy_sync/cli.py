@@ -309,14 +309,21 @@ def _prompt_profile_choice(profiles: list) -> str:
         print("Enter a number from the list.")
 
 
+def _save_customer_id(config_path: Path, customer_id: str) -> None:
+    """Persist the chosen Eufy customer_id into the config file (single user)."""
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    user = config["users"][0]
+    user.setdefault("eufy", {})
+    user["eufy"]["customer_id"] = customer_id
+    _write_config(config_path, config)
+
+
 def _select_profile(config_path: Path) -> None:
     """Choose which Eufy profile to sync, for an existing install."""
     if not config_path.exists():
         print("No config found. Run eufy-sync first to set up.")
         sys.exit(1)
-
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
 
     from eufy_sync.config import load_config
     from eufy_sync.eufy_client import EufyClient
@@ -336,16 +343,12 @@ def _select_profile(config_path: Path) -> None:
         print("No profiles found yet. Weigh in and open the Eufy app, then try again.")
         return
 
-    user = config["users"][0]
-    user.setdefault("eufy", {})
     if len(profiles) == 1:
-        user["eufy"]["customer_id"] = profiles[0].customer_id
-        _write_config(config_path, config)
+        _save_customer_id(config_path, profiles[0].customer_id)
         print("Only one profile found on this account; saved it as yours.")
         return
 
-    user["eufy"]["customer_id"] = _prompt_profile_choice(profiles)
-    _write_config(config_path, config)
+    _save_customer_id(config_path, _prompt_profile_choice(profiles))
     print("Saved. Future syncs will use only your profile.")
 
 

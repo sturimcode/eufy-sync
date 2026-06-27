@@ -272,3 +272,24 @@ def test_configure_logging_keeps_garminconnect_detail_when_verbose():
     logging.getLogger("garminconnect").setLevel(logging.ERROR)
     _configure_logging(verbose=True)
     assert logging.getLogger("garminconnect").level == logging.DEBUG
+
+
+def test_save_customer_id_writes_into_config(tmp_path: Path):
+    from eufy_sync.cli import _save_customer_id, _write_config
+
+    cfg_path = tmp_path / "config.yaml"
+    _write_config(cfg_path, {
+        "users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com", "password": "pw"},
+            "garmin": {"email": "g@example.com", "password": "pw"},
+        }],
+    })
+
+    _save_customer_id(cfg_path, "cid-xyz")
+
+    written = yaml.safe_load(cfg_path.read_text())
+    assert written["users"][0]["eufy"]["customer_id"] == "cid-xyz"
+    # Existing fields are left intact.
+    assert written["users"][0]["eufy"]["email"] == "e@example.com"
+    assert written["users"][0]["name"] == "default"
