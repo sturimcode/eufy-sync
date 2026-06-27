@@ -995,12 +995,12 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="eufy-sync",
-        description="Sync Eufy smart scale data to Garmin Connect and Strava",
+        description="Sync Eufy smart scale data to Garmin Connect, Strava, and Zwift",
     )
     parser.add_argument("--version", "-V", action="version", version=f"eufy-sync {__version__}")
     parser.add_argument("--status", action="store_true", help="Show sync status and token health")
     parser.add_argument("--reauth", nargs="?", const="all", default=None, metavar="TARGET",
-                        help="Re-authenticate (optionally: garmin or strava)")
+                        help="Re-authenticate (optionally: garmin, strava, or zwift)")
     parser.add_argument("--setup-strava", action="store_true", help="Connect Strava to your account")
     parser.add_argument("--setup-zwift", action="store_true", help="Connect Zwift to your account")
     parser.add_argument("--select-profile", action="store_true", help="Choose which Eufy profile to sync")
