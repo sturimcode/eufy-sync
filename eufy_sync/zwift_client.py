@@ -161,7 +161,7 @@ class ZwiftClient:
         weight_g = int(round(weight_kg * 1000))
         resp = self._client.put(PROFILE_URL, json={"weight": weight_g})
 
-        if resp.status_code != 200:
+        if not (200 <= resp.status_code < 300):
             logger.debug("Zwift weight update failed: %d %s", resp.status_code, resp.text)
             if 400 <= resp.status_code < 500 and resp.status_code != 429:
                 from eufy_sync.sync import PermanentSyncError

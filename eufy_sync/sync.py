@@ -90,6 +90,8 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
             new_target = any(
                 not state.has_any_syncs(user.name, name) for name, _ in targets
             )
+            if user.zwift and not state.has_any_syncs(user.name, "zwift"):
+                new_target = True
             if new_target:
                 # New target added - backfill 7 days so existing measurements sync
                 after_timestamp = int(time.time()) - (7 * 86400)

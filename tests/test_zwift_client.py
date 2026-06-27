@@ -212,3 +212,20 @@ def test_token_status_expired_when_no_refresh_token(monkeypatch, tmp_path):
     client = ZwiftClient(_make_config())
     assert client.token_status()["state"] == "expired"
     client.close()
+
+
+def test_update_weight_accepts_204(monkeypatch, tmp_path):
+    """Zwift profile PUTs commonly return 204 No Content - must not raise."""
+    monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _save_tokens(_make_tokens())
+
+    mock_response = MagicMock(status_code=204, text="")
+
+    client = ZwiftClient(_make_config())
+    client.authenticate()
+    with patch.object(client._client, "put", return_value=mock_response):
+        result = client.update_weight(80.0)
+
+    assert isinstance(result, dict)
+    client.close()
