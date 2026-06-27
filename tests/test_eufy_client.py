@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -135,3 +135,50 @@ def test_fetch_configured_profile_forwards_after_timestamp():
     with patch.object(c, "_get_records", mock):
         c.fetch_measurements(after_timestamp=1_500_000_000)
     mock.assert_called_once_with(1_500_000_000)
+
+
+# ---------------------------------------------------------------------------
+# Task 1: _list_device_ids and _get_raw_records
+# ---------------------------------------------------------------------------
+
+def _resp(status_code, json_body):
+    r = MagicMock()
+    r.status_code = status_code
+    r.json.return_value = json_body
+    return r
+
+
+def test_list_device_ids_parses_device_v2():
+    c = _client()
+    c._client = MagicMock()
+    c._client.get.return_value = _resp(
+        200, {"res_code": 1, "devices": [{"id": "dev1"}, {"id": "dev2"}, {"id": ""}]}
+    )
+    assert c._list_device_ids() == ["dev1", "dev2"]
+
+
+def test_list_device_ids_empty_on_error_code():
+    c = _client()
+    c._client = MagicMock()
+    c._client.get.return_value = _resp(200, {"res_code": 0, "devices": []})
+    assert c._list_device_ids() == []
+
+
+def test_get_raw_records_extracts_list():
+    c = _client()
+    c._client = MagicMock()
+    c._client.get.return_value = _resp(200, {"res_code": 1, "list": [_record("a", 800, 100)]})
+    recs = c._get_raw_records("dev1", None)
+    assert len(recs) == 1
+    assert recs[0]["customer_id"] == "a"
+
+
+def test_get_raw_records_handles_null_list_500_and_bad_code():
+    c = _client()
+    c._client = MagicMock()
+    c._client.get.return_value = _resp(200, {"res_code": 1, "list": None})
+    assert c._get_raw_records("d", None) == []
+    c._client.get.return_value = _resp(500, {})
+    assert c._get_raw_records("d", None) == []
+    c._client.get.return_value = _resp(200, {"res_code": 500, "message": "unavailable"})
+    assert c._get_raw_records("d", None) == []

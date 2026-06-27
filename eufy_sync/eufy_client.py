@@ -221,6 +221,38 @@ class EufyClient:
         logger.info("Fetched %d raw measurements from Eufy", len(raw_records))
         return raw_records
 
+    def _list_device_ids(self) -> list[str]:
+        """Return the account's device ids from /device/v2. Empty on any error."""
+        resp = self._client.get(
+            f"{BASE_URL}/device/v2",
+            headers={"Token": self.access_token, "Uid": self.user_id},
+        )
+        if resp.status_code != 200:
+            return []
+        body = resp.json()
+        if body.get("res_code") != 1:
+            return []
+        return [d["id"] for d in body.get("devices", []) if d.get("id")]
+
+    def _get_raw_records(self, device_id: str, after_timestamp: int | None) -> list[dict]:
+        """Fetch a device's raw Wi-Fi weight records. These appear before the
+        phone app processes a weigh-in. Records live under a nullable `list`
+        field. Empty on any error."""
+        params = {}
+        if after_timestamp is not None:
+            params["after"] = str(after_timestamp)
+        resp = self._client.get(
+            f"{BASE_URL}/device/wifi_scale/raw_data/{device_id}",
+            params=params,
+            headers={"Token": self.access_token, "Uid": self.user_id},
+        )
+        if resp.status_code != 200:
+            return []
+        body = resp.json()
+        if body.get("res_code") != 1:
+            return []
+        return body.get("list") or []
+
     def _parse_all(self, records: list[dict]) -> list[EufyMeasurement]:
         out = []
         for record in records:
