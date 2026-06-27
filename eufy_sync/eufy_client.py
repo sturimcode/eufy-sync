@@ -324,14 +324,17 @@ class EufyClient:
             except Exception as e:
                 logger.warning("Raw Wi-Fi fallback: fetch failed for %s: %s", device_id, e)
 
-        measurements = self._parse_all(records)
-        raw_count = len(measurements)
-
-        if self.config.customer_id:
-            measurements = [m for m in measurements if m.customer_id == self.config.customer_id]
-        if after_timestamp is not None:
-            cutoff = datetime.fromtimestamp(after_timestamp, tz=timezone.utc)
-            measurements = [m for m in measurements if m.timestamp >= cutoff]
+        try:
+            measurements = self._parse_all(records)
+            raw_count = len(measurements)
+            if self.config.customer_id:
+                measurements = [m for m in measurements if m.customer_id == self.config.customer_id]
+            if after_timestamp is not None:
+                cutoff = datetime.fromtimestamp(after_timestamp, tz=timezone.utc)
+                measurements = [m for m in measurements if m.timestamp >= cutoff]
+        except Exception as e:
+            logger.warning("Raw Wi-Fi fallback: could not parse raw records: %s", e)
+            return []
 
         if measurements:
             logger.info("Recovered %d weight-only measurement(s) from the raw Wi-Fi endpoint", len(measurements))

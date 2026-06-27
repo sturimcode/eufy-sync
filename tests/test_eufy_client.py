@@ -226,3 +226,13 @@ def test_raw_fallback_degrades_when_device_list_errors():
          patch.object(c, "_list_device_ids", side_effect=RuntimeError("boom")):
         measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
     assert measurements == []
+
+
+def test_raw_fallback_degrades_on_malformed_record():
+    c = _client(customer_id="a")
+    bad = {"customer_id": "a", "update_time": 100, "scale_data": {"weight": "heavy"}}
+    with patch.object(c, "_get_records", return_value=[]), \
+         patch.object(c, "_list_device_ids", return_value=["dev1"]), \
+         patch.object(c, "_get_raw_records", return_value=[bad]):
+        measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert measurements == []

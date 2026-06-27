@@ -70,3 +70,13 @@ def test_accepts_boundary_weights():
     high = _make_measurement(weight_kg=MAX_WEIGHT_KG)
     assert transform(low) is not None
     assert transform(high) is not None
+
+
+def test_transform_drops_implausible_bmr():
+    m = EufyMeasurement(
+        measurement_id="x", customer_id="a", device_id="d",
+        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc), weight_kg=80.0, bmr_kcal=0,
+    )
+    result = transform(m)
+    assert result is not None
+    assert result.basal_met is None

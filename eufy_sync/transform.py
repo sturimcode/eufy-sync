@@ -48,7 +48,7 @@ def transform(measurement: EufyMeasurement) -> GarminBodyComposition | None:
         visceral_fat_rating=_clamp_or_none(measurement.visceral_fat_level, 1.0, 59.0),
         bone_mass=_clamp_or_none(measurement.bone_mass_kg, 0.5, 10.0),
         muscle_mass=_clamp_or_none(measurement.muscle_mass_kg, 10.0, 120.0),
-        basal_met=measurement.bmr_kcal,
+        basal_met=_clamp_or_none(measurement.bmr_kcal, 500, 5000),
         metabolic_age=_clamp_or_none(measurement.metabolic_age, 10, 120),
         bmi=None,  # Let Garmin calculate from weight + height
     )
