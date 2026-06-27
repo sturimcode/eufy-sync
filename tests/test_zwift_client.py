@@ -62,3 +62,46 @@ def test_authenticate_fresh_login_when_no_tokens(monkeypatch, tmp_path):
     assert call.kwargs["data"]["password"] == "pw"
     assert "Bearer fresh_access" in client._client.headers.get("Authorization", "")
     client.close()
+
+
+def test_authenticate_refreshes_expired_token(monkeypatch, tmp_path):
+    monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _save_tokens(_make_tokens(expired=True))
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "access_token": "refreshed",
+        "refresh_token": "new_rtok",
+        "expires_in": 3600,
+    }
+
+    client = ZwiftClient(_make_config())
+    with patch.object(client._client, "post", return_value=mock_response) as mock_post:
+        client.authenticate()
+
+    assert mock_post.call_args.kwargs["data"]["grant_type"] == "refresh_token"
+    assert mock_post.call_args.kwargs["data"]["refresh_token"] == "rtok"
+    assert "Bearer refreshed" in client._client.headers["Authorization"]
+    client.close()
+
+
+def test_authenticate_falls_back_to_password_if_refresh_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _save_tokens(_make_tokens(expired=True))
+
+    refresh_fail = MagicMock(status_code=401, text="refresh dead")
+    fresh_ok = MagicMock(status_code=200)
+    fresh_ok.json.return_value = {
+        "access_token": "fresh_after_refresh_fail",
+        "refresh_token": "fresh_rtok",
+        "expires_in": 3600,
+    }
+
+    client = ZwiftClient(_make_config())
+    with patch.object(client._client, "post", side_effect=[refresh_fail, fresh_ok]):
+        client.authenticate()
+    assert "Bearer fresh_after_refresh_fail" in client._client.headers["Authorization"]
+    client.close()
