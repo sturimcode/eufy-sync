@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -135,3 +135,104 @@ def test_fetch_configured_profile_forwards_after_timestamp():
     with patch.object(c, "_get_records", mock):
         c.fetch_measurements(after_timestamp=1_500_000_000)
     mock.assert_called_once_with(1_500_000_000)
+
+
+# ---------------------------------------------------------------------------
+# Task 1: _list_device_ids and _get_raw_records
+# ---------------------------------------------------------------------------
+
+def _resp(status_code, json_body):
+    r = MagicMock()
+    r.status_code = status_code
+    r.json.return_value = json_body
+    return r
+
+
+def test_list_device_ids_parses_device_v2():
+    c = _client()
+    c._client = MagicMock()
+    c._client.get.return_value = _resp(
+        200, {"res_code": 1, "devices": [{"id": "dev1"}, {"id": "dev2"}, {"id": ""}]}
+    )
+    assert c._list_device_ids() == ["dev1", "dev2"]
+
+
+def test_list_device_ids_empty_on_error_code():
+    c = _client()
+    c._client = MagicMock()
+    c._client.get.return_value = _resp(200, {"res_code": 0, "devices": []})
+    assert c._list_device_ids() == []
+
+
+def test_get_raw_records_extracts_list():
+    c = _client()
+    c._client = MagicMock()
+    c._client.get.return_value = _resp(200, {"res_code": 1, "list": [_record("a", 800, 100)]})
+    recs = c._get_raw_records("dev1", None)
+    assert len(recs) == 1
+    assert recs[0]["customer_id"] == "a"
+
+
+def test_get_raw_records_handles_null_list_500_and_bad_code():
+    c = _client()
+    c._client = MagicMock()
+    c._client.get.return_value = _resp(200, {"res_code": 1, "list": None})
+    assert c._get_raw_records("d", None) == []
+    c._client.get.return_value = _resp(500, {})
+    assert c._get_raw_records("d", None) == []
+    c._client.get.return_value = _resp(200, {"res_code": 500, "message": "unavailable"})
+    assert c._get_raw_records("d", None) == []
+
+
+# ---------------------------------------------------------------------------
+# Task 2: fallback orchestration
+# ---------------------------------------------------------------------------
+
+def test_fetch_falls_back_to_raw_when_normal_empty():
+    c = _client(customer_id="a")
+    raw = _record("a", 800, 2_000_000_000)  # year 2033, passes the window
+    with patch.object(c, "_get_records", return_value=[]), \
+         patch.object(c, "_list_device_ids", return_value=["dev1"]), \
+         patch.object(c, "_get_raw_records", return_value=[raw]):
+        measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert len(measurements) == 1
+    assert measurements[0].weight_kg == 80.0
+    assert measurements[0].customer_id == "a"
+
+
+def test_fetch_does_not_use_raw_when_normal_has_data():
+    c = _client(customer_id="a")
+    fallback_probe = MagicMock()
+    with patch.object(c, "_get_records", return_value=[_record("a", 800, 2_000_000_000)]), \
+         patch.object(c, "_fetch_raw_measurements", fallback_probe):
+        measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert len(measurements) == 1
+    fallback_probe.assert_not_called()
+
+
+def test_raw_fallback_drops_other_profiles():
+    c = _client(customer_id="a")
+    raws = [_record("a", 800, 2_000_000_000), _record("b", 600, 2_000_000_000)]
+    with patch.object(c, "_get_records", return_value=[]), \
+         patch.object(c, "_list_device_ids", return_value=["dev1"]), \
+         patch.object(c, "_get_raw_records", return_value=raws):
+        measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert {m.customer_id for m in measurements} == {"a"}
+
+
+def test_raw_fallback_degrades_when_device_list_errors():
+    c = _client(customer_id="a")
+    with patch.object(c, "_get_records", return_value=[]), \
+         patch.object(c, "_list_device_ids", side_effect=RuntimeError("boom")):
+        measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert measurements == []
+
+
+def test_raw_fallback_degrades_on_malformed_record():
+    c = _client(customer_id="a")
+    bad = {"customer_id": "a", "update_time": 100, "scale_data": {"weight": "heavy"}}
+    with patch.object(c, "_get_records", return_value=[]), \
+         patch.object(c, "_list_device_ids", return_value=["dev1"]), \
+         patch.object(c, "_get_raw_records", return_value=[bad]):
+        measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert measurements == []
