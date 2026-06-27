@@ -202,12 +202,12 @@ def test_fetch_falls_back_to_raw_when_normal_empty():
 
 def test_fetch_does_not_use_raw_when_normal_has_data():
     c = _client(customer_id="a")
-    raw_probe = MagicMock()
+    fallback_probe = MagicMock()
     with patch.object(c, "_get_records", return_value=[_record("a", 800, 2_000_000_000)]), \
-         patch.object(c, "_list_device_ids", raw_probe):
+         patch.object(c, "_fetch_raw_measurements", fallback_probe):
         measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
     assert len(measurements) == 1
-    raw_probe.assert_not_called()
+    fallback_probe.assert_not_called()
 
 
 def test_raw_fallback_drops_other_profiles():
