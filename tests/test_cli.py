@@ -254,3 +254,21 @@ def test_prompt_profile_choice_retries_on_invalid_input():
     ]
     with patch("builtins.input", side_effect=["abc", "9", "1"]):
         assert _prompt_profile_choice(profiles) == "cid-a"
+
+
+def test_configure_logging_quiets_garminconnect_when_not_verbose():
+    import logging
+    from eufy_sync.cli import _configure_logging
+
+    logging.getLogger("garminconnect").setLevel(logging.NOTSET)
+    _configure_logging(verbose=False)
+    assert logging.getLogger("garminconnect").level == logging.ERROR
+
+
+def test_configure_logging_keeps_garminconnect_detail_when_verbose():
+    import logging
+    from eufy_sync.cli import _configure_logging
+
+    logging.getLogger("garminconnect").setLevel(logging.ERROR)
+    _configure_logging(verbose=True)
+    assert logging.getLogger("garminconnect").level == logging.DEBUG

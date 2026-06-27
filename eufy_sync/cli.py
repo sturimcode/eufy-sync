@@ -272,6 +272,22 @@ def _setup_strava(config_path: Path) -> None:
     print("Strava connected! Future syncs will update both targets.")
 
 
+def _configure_logging(verbose: bool) -> None:
+    """Set up logging. On normal runs, quiet chatty library loggers; under
+    --verbose, show full detail. The garminconnect library logs a warning for
+    each login strategy that hits a 429 before a later strategy succeeds, which
+    looks alarming on an otherwise successful login."""
+    import logging
+    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    if verbose:
+        logging.basicConfig(level=logging.DEBUG, format=fmt)
+        logging.getLogger("garminconnect").setLevel(logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.WARNING, format=fmt)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("garminconnect").setLevel(logging.ERROR)
+
+
 def _format_profile(profile: "EufyProfile", index: int) -> str:
     lb = profile.last_weight_kg * 2.20462
     when = profile.last_measured.strftime("%Y-%m-%d")
@@ -906,6 +922,7 @@ def main() -> None:
 
     # Handle reauth
     if args.reauth is not None:
+        _configure_logging(args.verbose)
         target = None if args.reauth == "all" else args.reauth
         _reauth(config_path, force=True, target=target)
         return
@@ -948,13 +965,7 @@ def main() -> None:
     from eufy_sync.state import SyncState
     from eufy_sync.eufy_client import AmbiguousProfileError
 
-    log_level = "DEBUG" if args.verbose else "WARNING"
-    logging.basicConfig(
-        level=getattr(logging, log_level),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    if not args.verbose:
-        logging.getLogger("httpx").setLevel(logging.WARNING)
+    _configure_logging(args.verbose)
     logger = logging.getLogger("eufy_sync")
 
     _check_for_updates()
