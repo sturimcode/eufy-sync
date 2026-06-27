@@ -106,7 +106,12 @@ def _write_config(path: Path, config: dict) -> None:
         yaml.dump(config, f, default_flow_style=False)
 
 
-def _store_passwords_in_keychain(user_name: str, eufy_password: str, garmin_password: str | None = None) -> bool:
+def _store_passwords_in_keychain(
+    user_name: str,
+    eufy_password: str,
+    garmin_password: str | None = None,
+    zwift_password: str | None = None,
+) -> bool:
     """Store passwords in keychain. Returns True if successful."""
     from eufy_sync.credentials import store_password, _keyring_available
     if not _keyring_available():
@@ -114,6 +119,8 @@ def _store_passwords_in_keychain(user_name: str, eufy_password: str, garmin_pass
     store_password(f"{user_name}:eufy", eufy_password)
     if garmin_password:
         store_password(f"{user_name}:garmin", garmin_password)
+    if zwift_password:
+        store_password(f"{user_name}:zwift", zwift_password)
     return True
 
 
@@ -157,14 +164,32 @@ def _first_run_setup(config_path: Path) -> None:
     if strava_answer.lower().startswith("y"):
         strava_config = _prompt_strava_credentials()
 
-    if not garmin_email and not strava_config:
-        print("Error: You must configure at least one sync target (Garmin or Strava).")
+    # Zwift setup (optional, unofficial)
+    print("")
+    zwift_answer = input("Connect Zwift? [y/N] ").strip()
+    zwift_email = None
+    zwift_password = None
+    if zwift_answer.lower().startswith("y"):
+        print("")
+        print("  Note: Zwift has no official API. eufy-sync uses a")
+        print("  community-reverse-engineered endpoint and may break with any Zwift update.")
+        print("")
+        zwift_email = input("Zwift email (Enter if same as Eufy): ").strip()
+        if not zwift_email:
+            zwift_email = eufy_email
+        zwift_password = getpass.getpass("Zwift password: ")
+        if not zwift_password:
+            print("Error: Zwift password is required.")
+            sys.exit(1)
+
+    if not garmin_email and not strava_config and not zwift_email:
+        print("Error: You must configure at least one sync target (Garmin, Strava, or Zwift).")
         sys.exit(1)
 
     user_name = "default"
 
     # Store passwords in keychain
-    keychain_ok = _store_passwords_in_keychain(user_name, eufy_password, garmin_password)
+    keychain_ok = _store_passwords_in_keychain(user_name, eufy_password, garmin_password, zwift_password)
 
     # Config YAML stores only emails (no passwords) when keychain is available
     user_config: dict = {
@@ -175,11 +200,15 @@ def _first_run_setup(config_path: Path) -> None:
         user_config["garmin"] = {"email": garmin_email}
     if strava_config:
         user_config["strava"] = strava_config
+    if zwift_email:
+        user_config["zwift"] = {"email": zwift_email}
     if not keychain_ok:
         # Fallback: store passwords in config file (with 0o600 permissions)
         user_config["eufy"]["password"] = eufy_password
         if garmin_password:
             user_config["garmin"]["password"] = garmin_password
+        if zwift_password:
+            user_config["zwift"]["password"] = zwift_password
         print("Warning: keychain not available, passwords stored in config file.")
     else:
         print("Passwords saved to system keychain.")
@@ -209,6 +238,8 @@ def _first_run_setup(config_path: Path) -> None:
         targets.append("Garmin")
     if strava_config:
         targets.append("Strava")
+    if zwift_email:
+        targets.append("Zwift")
     print(f"Saved. Running first sync to {' and '.join(targets)} (last 7 days)...")
     if garmin_email:
         print("Logging in to Garmin (a browser may open if the direct login is rate-limited).")
