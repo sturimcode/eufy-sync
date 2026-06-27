@@ -107,6 +107,8 @@ class ZwiftClient:
                 "password": self.config.password,
             },
         )
+        if resp.status_code == 429:
+            raise RuntimeError("Zwift login rate-limited (HTTP 429); try again later")
         if resp.status_code != 200:
             logger.debug("Zwift login failed: %d %s", resp.status_code, resp.text)
             from eufy_sync.sync import PermanentSyncError
@@ -180,7 +182,8 @@ class ZwiftClient:
             return {"state": "no_session", "days_remaining": None}
         if "refresh_token" not in tokens or not tokens["refresh_token"]:
             return {"state": "expired", "days_remaining": 0}
-        if time.time() >= (tokens["expires_at"] - REFRESH_SAFETY_MARGIN):
+        now = time.time()
+        if now >= (tokens["expires_at"] - REFRESH_SAFETY_MARGIN):
             return {"state": "refresh_needed", "days_remaining": None}
-        hours = int((tokens["expires_at"] - time.time()) / 3600)
+        hours = int((tokens["expires_at"] - now) / 3600)
         return {"state": "valid", "days_remaining": None, "hours_remaining": hours}

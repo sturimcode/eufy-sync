@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from eufy_sync.config import ZwiftConfig
+from eufy_sync.sync import PermanentSyncError
 from eufy_sync.zwift_client import ZwiftClient, _load_tokens, _save_tokens
 
 
@@ -33,9 +36,6 @@ def test_load_tokens_returns_none_when_missing(tmp_path, monkeypatch):
     monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
     monkeypatch.setenv("HOME", str(tmp_path))
     assert _load_tokens() is None
-
-
-from unittest.mock import MagicMock
 
 
 def test_authenticate_fresh_login_when_no_tokens(monkeypatch, tmp_path):
@@ -105,11 +105,6 @@ def test_authenticate_falls_back_to_password_if_refresh_fails(monkeypatch, tmp_p
         client.authenticate()
     assert "Bearer fresh_after_refresh_fail" in client._client.headers["Authorization"]
     client.close()
-
-
-import httpx
-import pytest
-from eufy_sync.sync import PermanentSyncError
 
 
 def test_update_weight_sends_grams_not_kg(monkeypatch, tmp_path):
@@ -205,4 +200,15 @@ def test_token_status_refresh_needed(monkeypatch, tmp_path):
     _save_tokens(_make_tokens(expired=True))
     client = ZwiftClient(_make_config())
     assert client.token_status()["state"] == "refresh_needed"
+    client.close()
+
+
+def test_token_status_expired_when_no_refresh_token(monkeypatch, tmp_path):
+    monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    tokens = _make_tokens()
+    tokens.pop("refresh_token")
+    _save_tokens(tokens)
+    client = ZwiftClient(_make_config())
+    assert client.token_status()["state"] == "expired"
     client.close()
