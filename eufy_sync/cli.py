@@ -989,13 +989,29 @@ def main() -> None:
                     total_counts[target_name] = total_counts.get(target_name, 0) + count
                 logger.info("User %s: synced %s", user.name, counts)
             except AmbiguousProfileError as e:
-                print("")
-                print("Multiple profiles were found on this Eufy account:")
-                for i, p in enumerate(e.profiles, 1):
-                    print(_format_profile(p, i))
-                print("")
-                print("Nothing was synced. Choose your profile with: eufy-sync --select-profile")
-                failures.append((user.name, "multiple Eufy profiles; run eufy-sync --select-profile"))
+                interactive = not args.headless and sys.stdin.isatty()
+                if interactive:
+                    # _prompt_profile_choice prints the list and asks for a pick.
+                    customer_id = _prompt_profile_choice(e.profiles)
+                    _save_customer_id(config_path, customer_id)
+                    user.eufy.customer_id = customer_id
+                    print("Saved. Syncing your profile now...")
+                    try:
+                        counts = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                        for target_name, count in counts.items():
+                            total_counts[target_name] = total_counts.get(target_name, 0) + count
+                        logger.info("User %s: synced %s", user.name, counts)
+                    except Exception as retry_error:
+                        logger.exception("Failed to sync user %s after profile selection", user.name)
+                        failures.append((user.name, str(retry_error)))
+                else:
+                    print("")
+                    print("Multiple profiles were found on this Eufy account:")
+                    for i, p in enumerate(e.profiles, 1):
+                        print(_format_profile(p, i))
+                    print("")
+                    print("Nothing was synced. Choose your profile with: eufy-sync --select-profile")
+                    failures.append((user.name, "multiple Eufy profiles; run eufy-sync --select-profile"))
             except Exception as e:
                 logger.exception("Failed to sync user %s", user.name)
                 failures.append((user.name, str(e)))
@@ -1005,10 +1021,13 @@ def main() -> None:
         if failures:
             reauth_needed = any("re-authenticate" in err for _, err in failures)
             eufy_password = any("changed your Eufy password" in err for _, err in failures)
+            multiple_profiles = any("multiple Eufy profiles" in err for _, err in failures)
             if reauth_needed:
                 _notify("eufy-sync: re-login needed", "Run: eufy-sync --reauth")
             elif eufy_password:
                 _notify("eufy-sync: Eufy login failed", "Run: eufy-sync --update-password")
+            elif multiple_profiles:
+                _notify("eufy-sync: choose your profile", "Run: eufy-sync --select-profile")
             else:
                 fail_msg = "; ".join(f"{name}: {err[:80]}" for name, err in failures)
                 _notify("eufy-sync failed", fail_msg)

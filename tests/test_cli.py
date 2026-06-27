@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import pytest
 import yaml
 
 from eufy_sync.cli import (
@@ -293,3 +294,105 @@ def test_save_customer_id_writes_into_config(tmp_path: Path):
     # Existing fields are left intact.
     assert written["users"][0]["eufy"]["email"] == "e@example.com"
     assert written["users"][0]["name"] == "default"
+
+
+def _ambiguous_profiles():
+    from datetime import datetime, timezone
+    from eufy_sync.eufy_client import EufyProfile
+    return [
+        EufyProfile("cid-human", datetime(2026, 6, 27, tzinfo=timezone.utc), 88.0),
+        EufyProfile("cid-pet", datetime(2026, 4, 4, tzinfo=timezone.utc), 4.5),
+    ]
+
+
+def _write_synced_config(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {
+        "users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com", "password": "pw"},
+            "garmin": {"email": "g@example.com", "password": "pw"},
+        }],
+    })
+    return config_path
+
+
+@patch("eufy_sync.cli._print_summary")
+@patch("eufy_sync.cli._notify")
+@patch("eufy_sync.cli._check_for_updates")
+@patch("eufy_sync.cli._show_upgrade_notice")
+@patch("eufy_sync.cli._migrate_config_passwords")
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+@patch("eufy_sync.cli.sys.stdin")
+def test_interactive_ambiguous_profile_resolves_and_syncs(
+    mock_stdin, _keyring, _migrate, _notice, _updates, _notify, _summary, tmp_path
+):
+    from eufy_sync.cli import main
+    from eufy_sync.eufy_client import AmbiguousProfileError
+
+    mock_stdin.isatty.return_value = True
+    config_path = _write_synced_config(tmp_path)
+    db_path = tmp_path / "state.db"
+
+    profiles = _ambiguous_profiles()
+    seen_customer_ids = []
+
+    def fake_sync_user(user, state, **kwargs):
+        seen_customer_ids.append(user.eufy.customer_id)
+        if len(seen_customer_ids) == 1:
+            raise AmbiguousProfileError(profiles)
+        return {"garmin": 1}
+
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path)]
+    with patch("eufy_sync.sync.sync_user", side_effect=fake_sync_user), \
+         patch("sys.argv", argv), \
+         patch("builtins.input", return_value="1"), \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 0
+    # The chosen (human) profile was persisted to config.
+    written = yaml.safe_load(config_path.read_text())
+    assert written["users"][0]["eufy"]["customer_id"] == "cid-human"
+    # The sync was retried in-process with that customer_id set in memory.
+    assert seen_customer_ids == [None, "cid-human"]
+
+
+@patch("eufy_sync.cli._print_summary")
+@patch("eufy_sync.cli._notify")
+@patch("eufy_sync.cli._check_for_updates")
+@patch("eufy_sync.cli._show_upgrade_notice")
+@patch("eufy_sync.cli._migrate_config_passwords")
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+@patch("eufy_sync.cli.sys.stdin")
+def test_noninteractive_ambiguous_profile_bails(
+    mock_stdin, _keyring, _migrate, _notice, _updates, _notify, _summary, tmp_path, capsys
+):
+    from eufy_sync.cli import main
+    from eufy_sync.eufy_client import AmbiguousProfileError
+
+    mock_stdin.isatty.return_value = False  # no human present
+    config_path = _write_synced_config(tmp_path)
+    db_path = tmp_path / "state.db"
+
+    profiles = _ambiguous_profiles()
+
+    def fake_sync_user(user, state, **kwargs):
+        raise AmbiguousProfileError(profiles)
+
+    def boom_input(*a, **k):
+        raise AssertionError("input() must not be called with no TTY present")
+
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path)]
+    with patch("eufy_sync.sync.sync_user", side_effect=fake_sync_user), \
+         patch("sys.argv", argv), \
+         patch("builtins.input", side_effect=boom_input), \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "eufy-sync --select-profile" in out
+    _notify.assert_any_call(
+        "eufy-sync: choose your profile", "Run: eufy-sync --select-profile"
+    )
