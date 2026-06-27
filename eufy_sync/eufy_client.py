@@ -285,19 +285,61 @@ class EufyClient:
 
     def fetch_measurements(self, after_timestamp: int | None = None) -> list[EufyMeasurement]:
         if self.config.customer_id:
-            measurements = self._parse_all(self._get_records(after_timestamp))
-            return [m for m in measurements if m.customer_id == self.config.customer_id]
+            parsed = self._parse_all(self._get_records(after_timestamp))
+            measurements = [m for m in parsed if m.customer_id == self.config.customer_id]
+        else:
+            # No profile selected: read full history so the profile count is
+            # reliable even when only one person has weighed in recently.
+            parsed = self._parse_all(self._get_records(None))
+            distinct = {m.customer_id for m in parsed}
+            if len(distinct) > 1:
+                raise AmbiguousProfileError(self._profiles_from(parsed))
+            if after_timestamp is not None:
+                cutoff = datetime.fromtimestamp(after_timestamp, tz=timezone.utc)
+                measurements = [m for m in parsed if m.timestamp >= cutoff]
+            else:
+                measurements = parsed
 
-        # No profile selected: read full history so the profile count is reliable
-        # even when only one person has weighed in recently.
-        measurements = self._parse_all(self._get_records(None))
-        distinct = {m.customer_id for m in measurements}
-        if len(distinct) > 1:
-            raise AmbiguousProfileError(self._profiles_from(measurements))
+        if measurements:
+            return measurements
+        # The normal endpoints had nothing in the window. This is the headless
+        # case: a weigh-in that the phone app has not processed yet. Fall back to
+        # the per-device raw Wi-Fi endpoint, which exposes the weight earlier.
+        return self._fetch_raw_measurements(after_timestamp)
 
+    def _fetch_raw_measurements(self, after_timestamp: int | None) -> list[EufyMeasurement]:
+        """Recover weight-only measurements from the raw Wi-Fi endpoint, applying
+        the same profile and window filters as the normal path. Degrades to an
+        empty list on any error so the run is never worse than today."""
+        try:
+            device_ids = self._list_device_ids()
+        except Exception as e:
+            logger.warning("Raw Wi-Fi fallback: could not list devices: %s", e)
+            return []
+
+        records: list[dict] = []
+        for device_id in device_ids:
+            try:
+                records.extend(self._get_raw_records(device_id, after_timestamp))
+            except Exception as e:
+                logger.warning("Raw Wi-Fi fallback: fetch failed for %s: %s", device_id, e)
+
+        measurements = self._parse_all(records)
+        raw_count = len(measurements)
+
+        if self.config.customer_id:
+            measurements = [m for m in measurements if m.customer_id == self.config.customer_id]
         if after_timestamp is not None:
             cutoff = datetime.fromtimestamp(after_timestamp, tz=timezone.utc)
             measurements = [m for m in measurements if m.timestamp >= cutoff]
+
+        if measurements:
+            logger.info("Recovered %d weight-only measurement(s) from the raw Wi-Fi endpoint", len(measurements))
+        elif raw_count:
+            logger.info(
+                "Raw Wi-Fi endpoint returned %d record(s) but none passed the profile or window filter "
+                "(raw records may not carry a profile id)", raw_count,
+            )
         return measurements
 
     def _parse_record(self, record: dict) -> EufyMeasurement | None:

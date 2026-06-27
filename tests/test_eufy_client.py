@@ -182,3 +182,47 @@ def test_get_raw_records_handles_null_list_500_and_bad_code():
     assert c._get_raw_records("d", None) == []
     c._client.get.return_value = _resp(200, {"res_code": 500, "message": "unavailable"})
     assert c._get_raw_records("d", None) == []
+
+
+# ---------------------------------------------------------------------------
+# Task 2: fallback orchestration
+# ---------------------------------------------------------------------------
+
+def test_fetch_falls_back_to_raw_when_normal_empty():
+    c = _client(customer_id="a")
+    raw = _record("a", 800, 2_000_000_000)  # year 2033, passes the window
+    with patch.object(c, "_get_records", return_value=[]), \
+         patch.object(c, "_list_device_ids", return_value=["dev1"]), \
+         patch.object(c, "_get_raw_records", return_value=[raw]):
+        measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert len(measurements) == 1
+    assert measurements[0].weight_kg == 80.0
+    assert measurements[0].customer_id == "a"
+
+
+def test_fetch_does_not_use_raw_when_normal_has_data():
+    c = _client(customer_id="a")
+    raw_probe = MagicMock()
+    with patch.object(c, "_get_records", return_value=[_record("a", 800, 2_000_000_000)]), \
+         patch.object(c, "_list_device_ids", raw_probe):
+        measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert len(measurements) == 1
+    raw_probe.assert_not_called()
+
+
+def test_raw_fallback_drops_other_profiles():
+    c = _client(customer_id="a")
+    raws = [_record("a", 800, 2_000_000_000), _record("b", 600, 2_000_000_000)]
+    with patch.object(c, "_get_records", return_value=[]), \
+         patch.object(c, "_list_device_ids", return_value=["dev1"]), \
+         patch.object(c, "_get_raw_records", return_value=raws):
+        measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert {m.customer_id for m in measurements} == {"a"}
+
+
+def test_raw_fallback_degrades_when_device_list_errors():
+    c = _client(customer_id="a")
+    with patch.object(c, "_get_records", return_value=[]), \
+         patch.object(c, "_list_device_ids", side_effect=RuntimeError("boom")):
+        measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert measurements == []
