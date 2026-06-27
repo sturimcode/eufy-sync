@@ -15,18 +15,18 @@
 ## File Structure
 
 **Create:**
-- `eufy_sync/zwift_client.py` — `ZwiftClient` + token I/O helpers (parallel to `strava_client.py`)
-- `tests/test_zwift_client.py` — unit tests for the new module
+- `eufy_sync/zwift_client.py` - `ZwiftClient` + token I/O helpers (parallel to `strava_client.py`)
+- `tests/test_zwift_client.py` - unit tests for the new module
 
 **Modify:**
-- `eufy_sync/config.py` — add `ZwiftConfig`, `UserConfig.zwift`, extend `load_config` and the "no sync targets" guard
-- `eufy_sync/sync.py` — change `sync_user` return type from `dict[str, int]` to `tuple[dict[str, int], dict[str, str]]`, add Zwift block with per-target try/except
-- `eufy_sync/cli.py` — handle new return shape, add wizard prompt, add `--setup-zwift`, extend `--reauth`, `--update-password`, `--status`, `_uninstall`
-- `tests/test_sync.py` — three-target ordering test, Zwift isolation test, one-PUT-per-sync test
-- `tests/test_config.py` — Zwift parsing test
-- `tests/test_summary.py` — update for new return-shape consumers if needed
-- `tests/test_cli.py` — `--setup-zwift` interactive test
-- `README.md` — short "Sync targets" section noting Zwift is unofficial
+- `eufy_sync/config.py` - add `ZwiftConfig`, `UserConfig.zwift`, extend `load_config` and the "no sync targets" guard
+- `eufy_sync/sync.py` - change `sync_user` return type from `dict[str, int]` to `tuple[dict[str, int], dict[str, str]]`, add Zwift block with per-target try/except
+- `eufy_sync/cli.py` - handle new return shape, add wizard prompt, add `--setup-zwift`, extend `--reauth`, `--update-password`, `--status`, `_uninstall`
+- `tests/test_sync.py` - three-target ordering test, Zwift isolation test, one-PUT-per-sync test
+- `tests/test_config.py` - Zwift parsing test
+- `tests/test_summary.py` - update for new return-shape consumers if needed
+- `tests/test_cli.py` - `--setup-zwift` interactive test
+- `README.md` - short "Sync targets" section noting Zwift is unofficial
 
 ---
 
@@ -1604,7 +1604,7 @@ In the success-notification block of `main()`, find:
             _notify("eufy-sync", f"Synced {total} measurement{'s' if total != 1 else ''} to {target_label}")
 ```
 
-No change needed here — it already iterates whatever is in `total_counts`. Zwift entries appear automatically.
+No change needed here - it already iterates whatever is in `total_counts`. Zwift entries appear automatically.
 
 - [ ] **Step 2: Run the suite**
 
