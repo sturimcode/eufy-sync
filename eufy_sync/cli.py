@@ -499,8 +499,9 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
 
     do_garmin = (target is None or target == "garmin") and "garmin" in user
     do_strava = (target is None or target == "strava") and "strava" in user
+    do_zwift = (target is None or target == "zwift") and "zwift" in user
 
-    if target and not do_garmin and not do_strava:
+    if target and not do_garmin and not do_strava and not do_zwift:
         print(f"Target '{target}' is not configured. Check your config.")
         return
 
@@ -540,6 +541,23 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
         )
         authorize_strava(strava_cfg)
         print("Done - Strava tokens saved.")
+
+    if do_zwift:
+        from eufy_sync.config import ZwiftConfig, _get_password
+        from eufy_sync.credentials import _keyring_available, delete_token
+        from eufy_sync.zwift_client import ZwiftClient
+        zwift_email = user["zwift"]["email"]
+        zwift_pw = _get_password(user_name, "zwift", zwift_email, user["zwift"].get("password"))
+        # Force fresh password-grant login by clearing cached tokens
+        if _keyring_available():
+            delete_token("zwift")
+        token_file = DATA_DIR / "zwift_token.json"
+        if token_file.exists():
+            token_file.unlink()
+        client = ZwiftClient(ZwiftConfig(email=zwift_email, password=zwift_pw))
+        client.authenticate()
+        client.close()
+        print("Done - Zwift tokens saved.")
 
 
 def _generate_plist(binary_path: str) -> str:
