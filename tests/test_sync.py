@@ -220,3 +220,77 @@ def test_rate_limit_error_is_permanent():
     from eufy_sync.sync import _is_permanent
     from garminconnect import GarminConnectTooManyRequestsError
     assert _is_permanent(GarminConnectTooManyRequestsError("429")) is True
+
+
+from eufy_sync.config import ZwiftConfig
+
+
+def test_zwift_gets_exactly_one_put_per_sync(tmp_path: Path):
+    """Zwift's profile endpoint is heavy - we update once per sync, not once per measurement."""
+    state = SyncState(tmp_path / "test.db")
+
+    measurements = [
+        _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc)),
+        _measurement(85.5, datetime(2026, 5, 11, 8, 0, tzinfo=timezone.utc)),
+        _measurement(86.0, datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)),
+    ]
+
+    user = UserConfig(
+        name="default",
+        eufy=EufyConfig(email="e@example.com", password="pw"),
+        zwift=ZwiftConfig(email="z@example.com", password="zpw"),
+    )
+
+    fake_eufy = MagicMock()
+    fake_eufy.fetch_measurements.return_value = list(measurements)
+
+    fake_zwift = MagicMock()
+    fake_zwift.update_weight.return_value = {"weight": 86000}
+
+    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
+         patch("eufy_sync.zwift_client.ZwiftClient", return_value=fake_zwift), \
+         patch("eufy_sync.sync.time.sleep"):
+        counts, errors = sync_user(user, state, backfill_days=7)
+
+    assert fake_zwift.update_weight.call_count == 1, "Zwift should be PUT exactly once per sync"
+    assert fake_zwift.update_weight.call_args.args[0] == 86.0, "Should send the newest weight"
+    assert counts["zwift"] == 1
+    assert errors == {}
+    # All three measurements must be marked synced for Zwift
+    for m in measurements:
+        assert state.is_synced("default", m.measurement_id, "zwift")
+    state.close()
+
+
+def test_zwift_failure_does_not_block_strava(tmp_path: Path):
+    """A Zwift exception must not prevent Strava sync from completing."""
+    state = SyncState(tmp_path / "test.db")
+
+    measurement = _measurement(86.0, datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc))
+
+    user = UserConfig(
+        name="default",
+        eufy=EufyConfig(email="e@example.com", password="pw"),
+        strava=StravaConfig(client_id="cid", client_secret="csec"),
+        zwift=ZwiftConfig(email="z@example.com", password="zpw"),
+    )
+
+    fake_eufy = MagicMock()
+    fake_eufy.fetch_measurements.return_value = [measurement]
+
+    fake_strava = MagicMock()
+    fake_strava.update_weight.return_value = {"weight": 86}
+
+    fake_zwift = MagicMock()
+    fake_zwift.authenticate.side_effect = RuntimeError("Zwift exploded")
+
+    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
+         patch("eufy_sync.strava_client.StravaClient", return_value=fake_strava), \
+         patch("eufy_sync.zwift_client.ZwiftClient", return_value=fake_zwift), \
+         patch("eufy_sync.sync.time.sleep"):
+        counts, errors = sync_user(user, state, backfill_days=7)
+
+    assert counts.get("strava") == 1, "Strava must have succeeded"
+    assert "zwift" in errors, f"Zwift error must be reported; got {errors}"
+    assert "Zwift exploded" in errors["zwift"]
+    state.close()
