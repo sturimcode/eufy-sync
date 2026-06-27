@@ -303,6 +303,41 @@ def _setup_strava(config_path: Path) -> None:
     print("Strava connected! Future syncs will update both targets.")
 
 
+def _setup_zwift(config_path: Path) -> None:
+    """Add or update Zwift configuration."""
+    if not config_path.exists():
+        print("No config found. Run eufy-sync first to set up.")
+        sys.exit(1)
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    print("")
+    print("  Note: Zwift has no official API. eufy-sync uses a")
+    print("  community-reverse-engineered endpoint and may break with any Zwift update.")
+    print("")
+
+    user = config["users"][0]
+    user_name = user.get("name", "default")
+    eufy_email = user["eufy"]["email"]
+
+    zwift_email = input("Zwift email (Enter if same as Eufy): ").strip() or eufy_email
+    zwift_password = getpass.getpass("Zwift password: ")
+    if not zwift_password:
+        print("Error: Zwift password is required.")
+        sys.exit(1)
+
+    from eufy_sync.credentials import store_password, _keyring_available
+    if _keyring_available():
+        store_password(f"{user_name}:zwift", zwift_password)
+        user["zwift"] = {"email": zwift_email}
+    else:
+        user["zwift"] = {"email": zwift_email, "password": zwift_password}
+
+    _write_config(config_path, config)
+    print("Zwift connected. Future syncs will update your Zwift profile weight.")
+
+
 def _configure_logging(verbose: bool) -> None:
     """Set up logging. On normal runs, quiet chatty library loggers; under
     --verbose, show full detail. The garminconnect library logs a warning for
@@ -907,6 +942,7 @@ def main() -> None:
     parser.add_argument("--reauth", nargs="?", const="all", default=None, metavar="TARGET",
                         help="Re-authenticate (optionally: garmin or strava)")
     parser.add_argument("--setup-strava", action="store_true", help="Connect Strava to your account")
+    parser.add_argument("--setup-zwift", action="store_true", help="Connect Zwift to your account")
     parser.add_argument("--select-profile", action="store_true", help="Choose which Eufy profile to sync")
     parser.add_argument("--update-password", action="store_true", help="Change stored passwords")
     parser.add_argument("--history", nargs="?", const=14, type=int, default=None, metavar="N",
@@ -942,6 +978,11 @@ def main() -> None:
     # Handle Strava setup
     if args.setup_strava:
         _setup_strava(config_path)
+        return
+
+    # Handle Zwift setup
+    if args.setup_zwift:
+        _setup_zwift(config_path)
         return
 
     # Handle profile selection
