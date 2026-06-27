@@ -434,9 +434,10 @@ def _update_password(config_path: Path) -> None:
     print("")
 
     eufy_pw = getpass.getpass("New Eufy password: ")
-    garmin_pw = getpass.getpass("New Garmin password: ")
+    garmin_pw = getpass.getpass("New Garmin password: ") if "garmin" in user else ""
+    zwift_pw = getpass.getpass("New Zwift password: ") if "zwift" in user else ""
 
-    if not eufy_pw and not garmin_pw:
+    if not eufy_pw and not garmin_pw and not zwift_pw:
         print("No changes made.")
         return
 
@@ -454,6 +455,12 @@ def _update_password(config_path: Path) -> None:
             store_password(f"{user_name}:garmin", garmin_pw)
         else:
             user["garmin"]["password"] = garmin_pw
+
+    if zwift_pw:
+        if keychain_ok:
+            store_password(f"{user_name}:zwift", zwift_pw)
+        else:
+            user["zwift"]["password"] = zwift_pw
 
     if not keychain_ok:
         _write_config(config_path, config)
@@ -473,11 +480,20 @@ def _update_password(config_path: Path) -> None:
         if garmin_session.exists():
             garmin_session.unlink()
 
+    if zwift_pw:
+        if keychain_ok:
+            delete_token("zwift")
+        zwift_token = DATA_DIR / "zwift_token.json"
+        if zwift_token.exists():
+            zwift_token.unlink()
+
     changed = []
     if eufy_pw:
         changed.append("Eufy")
     if garmin_pw:
         changed.append("Garmin")
+    if zwift_pw:
+        changed.append("Zwift")
     print(f"{' and '.join(changed)} password{'s' if len(changed) > 1 else ''} updated.")
 
     if garmin_pw:
