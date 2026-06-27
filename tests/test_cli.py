@@ -341,7 +341,7 @@ def test_interactive_ambiguous_profile_resolves_and_syncs(
         seen_customer_ids.append(user.eufy.customer_id)
         if len(seen_customer_ids) == 1:
             raise AmbiguousProfileError(profiles)
-        return {"garmin": 1}
+        return {"garmin": 1}, {}
 
     argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path)]
     with patch("eufy_sync.sync.sync_user", side_effect=fake_sync_user), \

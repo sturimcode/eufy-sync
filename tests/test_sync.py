@@ -182,7 +182,9 @@ def test_strava_receives_measurements_in_chronological_order(tmp_path: Path):
     with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
          patch("eufy_sync.strava_client.StravaClient", return_value=fake_strava), \
          patch("eufy_sync.sync.time.sleep"):
-        sync_user(user, state, backfill_days=7)
+        counts, errors = sync_user(user, state, backfill_days=7)
+
+    assert errors == {}, f"expected no errors, got {errors}"
 
     weights_uploaded = [call.args[0] for call in fake_strava.update_weight.call_args_list]
     assert weights_uploaded == [85.0, 85.5, 86.0], (

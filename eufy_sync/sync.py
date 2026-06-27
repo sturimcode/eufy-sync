@@ -54,8 +54,14 @@ def _retry(fn, description: str):
             time.sleep(delay)
 
 
-def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False) -> dict[str, int]:
-    """Sync one user's Eufy data to configured targets. Returns count per target."""
+def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False) -> tuple[dict[str, int], dict[str, str]]:
+    """Sync one user's Eufy data to configured targets.
+
+    Returns (counts, errors) where counts maps target name to # of synced
+    measurements, and errors maps target name to a failure message for
+    targets that failed. The dicts are disjoint - a successful target
+    appears only in counts, a failed target only in errors.
+    """
     eufy = EufyClient(user.eufy)
 
     targets: list[tuple[str, object]] = []
@@ -165,7 +171,8 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 # Small delay between uploads to avoid rate limiting
                 time.sleep(1 if target_name == "garmin" else 0.5)
 
-        return counts
+        errors: dict[str, str] = {}
+        return counts, errors
 
     finally:
         eufy.close()

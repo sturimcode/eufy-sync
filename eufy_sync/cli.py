@@ -984,10 +984,12 @@ def main() -> None:
         failures = []
         for user in config.users:
             try:
-                counts = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
                 for target_name, count in counts.items():
                     total_counts[target_name] = total_counts.get(target_name, 0) + count
-                logger.info("User %s: synced %s", user.name, counts)
+                for target_name, err in errors.items():
+                    failures.append((f"{user.name}/{target_name}", err))
+                logger.info("User %s: synced %s, errors %s", user.name, counts, errors)
             except AmbiguousProfileError as e:
                 interactive = not args.headless and sys.stdin.isatty()
                 if interactive:
@@ -997,10 +999,12 @@ def main() -> None:
                     user.eufy.customer_id = customer_id
                     print("Saved. Syncing your profile now...")
                     try:
-                        counts = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                        counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
                         for target_name, count in counts.items():
                             total_counts[target_name] = total_counts.get(target_name, 0) + count
-                        logger.info("User %s: synced %s", user.name, counts)
+                        for target_name, err in errors.items():
+                            failures.append((f"{user.name}/{target_name}", err))
+                        logger.info("User %s: synced %s, errors %s", user.name, counts, errors)
                     except Exception as retry_error:
                         logger.exception("Failed to sync user %s after profile selection", user.name)
                         failures.append((user.name, str(retry_error)))
