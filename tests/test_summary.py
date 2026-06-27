@@ -12,7 +12,7 @@ def _mock_state(last_sync_ts: int | None = None):
     return state
 
 
-def _mock_user(name: str = "default", has_garmin: bool = True, has_strava: bool = False):
+def _mock_user(name: str = "default", has_garmin: bool = True, has_strava: bool = False, has_zwift: bool = False):
     user = MagicMock()
     user.name = name
     if has_garmin:
@@ -25,6 +25,11 @@ def _mock_user(name: str = "default", has_garmin: bool = True, has_strava: bool 
         user.strava.client_secret = "secret"
     else:
         user.strava = None
+    if has_zwift:
+        user.zwift.email = "z@example.com"
+        user.zwift.password = "zpw"
+    else:
+        user.zwift = None
     return user
 
 

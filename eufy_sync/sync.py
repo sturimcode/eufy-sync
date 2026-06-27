@@ -54,8 +54,14 @@ def _retry(fn, description: str):
             time.sleep(delay)
 
 
-def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False) -> dict[str, int]:
-    """Sync one user's Eufy data to configured targets. Returns count per target."""
+def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False) -> tuple[dict[str, int], dict[str, str]]:
+    """Sync one user's Eufy data to configured targets.
+
+    Returns (counts, errors) where counts maps target name to # of synced
+    measurements, and errors maps target name to a failure message for
+    targets that failed. The dicts are disjoint - a successful target
+    appears only in counts, a failed target only in errors.
+    """
     eufy = EufyClient(user.eufy)
 
     targets: list[tuple[str, object]] = []
@@ -84,6 +90,8 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
             new_target = any(
                 not state.has_any_syncs(user.name, name) for name, _ in targets
             )
+            if user.zwift and not state.has_any_syncs(user.name, "zwift"):
+                new_target = True
             if new_target:
                 # New target added - backfill 7 days so existing measurements sync
                 after_timestamp = int(time.time()) - (7 * 86400)
@@ -165,7 +173,52 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 # Small delay between uploads to avoid rate limiting
                 time.sleep(1 if target_name == "garmin" else 0.5)
 
-        return counts
+        errors: dict[str, str] = {}
+
+        if user.zwift:
+            try:
+                from eufy_sync.zwift_client import ZwiftClient
+                zwift = ZwiftClient(user.zwift)
+                try:
+                    zwift.authenticate()
+                    unsynced = [
+                        m for m in measurements
+                        if transform(m) is not None
+                        and not state.is_synced(user.name, m.measurement_id, "zwift")
+                    ]
+                    if unsynced:
+                        newest = unsynced[-1]  # measurements sorted ascending earlier
+                        if dry_run:
+                            logger.info("[DRY RUN] Would sync to zwift: %.1f kg", newest.weight_kg)
+                            counts["zwift"] = 1
+                        else:
+                            result = _retry(
+                                lambda: zwift.update_weight(newest.weight_kg),
+                                f"Zwift update ({newest.measurement_id})",
+                            )
+                            for m in unsynced:
+                                state.record_sync(
+                                    user_name=user.name,
+                                    measurement_id=m.measurement_id,
+                                    measurement_timestamp=m.timestamp.isoformat(),
+                                    weight_kg=m.weight_kg,
+                                    synced_at=datetime.now(timezone.utc).isoformat(),
+                                    target="zwift",
+                                    response=json.dumps(result) if m is newest else None,
+                                )
+                            counts["zwift"] = 1
+                            lb = newest.weight_kg * 2.20462
+                            logger.info(
+                                "Synced %.2f kg (%.1f lb) -> Zwift (weight only)",
+                                newest.weight_kg, lb,
+                            )
+                finally:
+                    zwift.close()
+            except Exception as e:
+                logger.exception("Zwift sync failed; continuing")
+                errors["zwift"] = str(e)
+
+        return counts, errors
 
     finally:
         eufy.close()

@@ -5,9 +5,19 @@
 ![Python](https://img.shields.io/pypi/pyversions/eufy-sync)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Syncs body composition data from a Eufy smart scale to Garmin Connect and/or Strava. Weight, body fat %, muscle mass, bone mass, hydration, BMR, visceral fat, and metabolic age all come through to Garmin. Strava gets weight updates.
+Syncs body composition data from a Eufy smart scale to Garmin Connect, Strava, and Zwift. Weight, body fat %, muscle mass, bone mass, hydration, BMR, visceral fat, and metabolic age all come through to Garmin. Strava and Zwift get weight updates.
 
 > macOS only. Requires Python 3.12+ and a terminal. Setup is guided - you just answer a few prompts.
+
+## Sync targets
+
+| Target | What gets synced | API stability |
+|--------|------------------|---------------|
+| Garmin Connect | Full body composition (FIT upload) | Stable |
+| Strava | Current weight (`PUT /athlete`) | Stable |
+| Zwift | Current weight (`PUT /api/profiles/me`) | Unofficial, may break |
+
+Zwift has no public API for third-party tools. eufy-sync uses a community-reverse-engineered endpoint that could change with any Zwift release. If Zwift breaks, the other two targets keep working.
 
 ## The problem
 
@@ -48,6 +58,7 @@ eufy-sync                      # sync new measurements to all configured targets
 eufy-sync --status           # check last sync + token health
 eufy-sync --dry-run          # preview without uploading
 eufy-sync --setup-strava     # connect Strava (add to existing setup)
+eufy-sync --setup-zwift      # connect Zwift (add to existing setup)
 eufy-sync --select-profile   # choose which Eufy profile to sync (shared scale)
 eufy-sync --reauth           # re-login to all targets
 eufy-sync --reauth garmin    # re-login to Garmin only

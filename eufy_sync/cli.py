@@ -106,7 +106,12 @@ def _write_config(path: Path, config: dict) -> None:
         yaml.dump(config, f, default_flow_style=False)
 
 
-def _store_passwords_in_keychain(user_name: str, eufy_password: str, garmin_password: str | None = None) -> bool:
+def _store_passwords_in_keychain(
+    user_name: str,
+    eufy_password: str,
+    garmin_password: str | None = None,
+    zwift_password: str | None = None,
+) -> bool:
     """Store passwords in keychain. Returns True if successful."""
     from eufy_sync.credentials import store_password, _keyring_available
     if not _keyring_available():
@@ -114,6 +119,8 @@ def _store_passwords_in_keychain(user_name: str, eufy_password: str, garmin_pass
     store_password(f"{user_name}:eufy", eufy_password)
     if garmin_password:
         store_password(f"{user_name}:garmin", garmin_password)
+    if zwift_password:
+        store_password(f"{user_name}:zwift", zwift_password)
     return True
 
 
@@ -157,14 +164,32 @@ def _first_run_setup(config_path: Path) -> None:
     if strava_answer.lower().startswith("y"):
         strava_config = _prompt_strava_credentials()
 
-    if not garmin_email and not strava_config:
-        print("Error: You must configure at least one sync target (Garmin or Strava).")
+    # Zwift setup (optional, unofficial)
+    print("")
+    zwift_answer = input("Connect Zwift? [y/N] ").strip()
+    zwift_email = None
+    zwift_password = None
+    if zwift_answer.lower().startswith("y"):
+        print("")
+        print("  Note: Zwift has no official API. eufy-sync uses a")
+        print("  community-reverse-engineered endpoint and may break with any Zwift update.")
+        print("")
+        zwift_email = input("Zwift email (Enter if same as Eufy): ").strip()
+        if not zwift_email:
+            zwift_email = eufy_email
+        zwift_password = getpass.getpass("Zwift password: ")
+        if not zwift_password:
+            print("Error: Zwift password is required.")
+            sys.exit(1)
+
+    if not garmin_email and not strava_config and not zwift_email:
+        print("Error: You must configure at least one sync target (Garmin, Strava, or Zwift).")
         sys.exit(1)
 
     user_name = "default"
 
     # Store passwords in keychain
-    keychain_ok = _store_passwords_in_keychain(user_name, eufy_password, garmin_password)
+    keychain_ok = _store_passwords_in_keychain(user_name, eufy_password, garmin_password, zwift_password)
 
     # Config YAML stores only emails (no passwords) when keychain is available
     user_config: dict = {
@@ -175,11 +200,15 @@ def _first_run_setup(config_path: Path) -> None:
         user_config["garmin"] = {"email": garmin_email}
     if strava_config:
         user_config["strava"] = strava_config
+    if zwift_email:
+        user_config["zwift"] = {"email": zwift_email}
     if not keychain_ok:
         # Fallback: store passwords in config file (with 0o600 permissions)
         user_config["eufy"]["password"] = eufy_password
         if garmin_password:
             user_config["garmin"]["password"] = garmin_password
+        if zwift_password:
+            user_config["zwift"]["password"] = zwift_password
         print("Warning: keychain not available, passwords stored in config file.")
     else:
         print("Passwords saved to system keychain.")
@@ -209,6 +238,8 @@ def _first_run_setup(config_path: Path) -> None:
         targets.append("Garmin")
     if strava_config:
         targets.append("Strava")
+    if zwift_email:
+        targets.append("Zwift")
     print(f"Saved. Running first sync to {' and '.join(targets)} (last 7 days)...")
     if garmin_email:
         print("Logging in to Garmin (a browser may open if the direct login is rate-limited).")
@@ -270,6 +301,41 @@ def _setup_strava(config_path: Path) -> None:
         client_secret=strava_config["client_secret"],
     ))
     print("Strava connected! Future syncs will update both targets.")
+
+
+def _setup_zwift(config_path: Path) -> None:
+    """Add or update Zwift configuration."""
+    if not config_path.exists():
+        print("No config found. Run eufy-sync first to set up.")
+        sys.exit(1)
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    print("")
+    print("  Note: Zwift has no official API. eufy-sync uses a")
+    print("  community-reverse-engineered endpoint and may break with any Zwift update.")
+    print("")
+
+    user = config["users"][0]
+    user_name = user.get("name", "default")
+    eufy_email = user["eufy"]["email"]
+
+    zwift_email = input("Zwift email (Enter if same as Eufy): ").strip() or eufy_email
+    zwift_password = getpass.getpass("Zwift password: ")
+    if not zwift_password:
+        print("Error: Zwift password is required.")
+        sys.exit(1)
+
+    from eufy_sync.credentials import store_password, _keyring_available
+    if _keyring_available():
+        store_password(f"{user_name}:zwift", zwift_password)
+        user["zwift"] = {"email": zwift_email}
+    else:
+        user["zwift"] = {"email": zwift_email, "password": zwift_password}
+
+    _write_config(config_path, config)
+    print("Zwift connected. Future syncs will update your Zwift profile weight.")
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -368,9 +434,10 @@ def _update_password(config_path: Path) -> None:
     print("")
 
     eufy_pw = getpass.getpass("New Eufy password: ")
-    garmin_pw = getpass.getpass("New Garmin password: ")
+    garmin_pw = getpass.getpass("New Garmin password: ") if "garmin" in user else ""
+    zwift_pw = getpass.getpass("New Zwift password: ") if "zwift" in user else ""
 
-    if not eufy_pw and not garmin_pw:
+    if not eufy_pw and not garmin_pw and not zwift_pw:
         print("No changes made.")
         return
 
@@ -388,6 +455,12 @@ def _update_password(config_path: Path) -> None:
             store_password(f"{user_name}:garmin", garmin_pw)
         else:
             user["garmin"]["password"] = garmin_pw
+
+    if zwift_pw:
+        if keychain_ok:
+            store_password(f"{user_name}:zwift", zwift_pw)
+        else:
+            user["zwift"]["password"] = zwift_pw
 
     if not keychain_ok:
         _write_config(config_path, config)
@@ -407,11 +480,20 @@ def _update_password(config_path: Path) -> None:
         if garmin_session.exists():
             garmin_session.unlink()
 
+    if zwift_pw:
+        if keychain_ok:
+            delete_token("zwift")
+        zwift_token = DATA_DIR / "zwift_token.json"
+        if zwift_token.exists():
+            zwift_token.unlink()
+
     changed = []
     if eufy_pw:
         changed.append("Eufy")
     if garmin_pw:
         changed.append("Garmin")
+    if zwift_pw:
+        changed.append("Zwift")
     print(f"{' and '.join(changed)} password{'s' if len(changed) > 1 else ''} updated.")
 
     if garmin_pw:
@@ -433,8 +515,9 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
 
     do_garmin = (target is None or target == "garmin") and "garmin" in user
     do_strava = (target is None or target == "strava") and "strava" in user
+    do_zwift = (target is None or target == "zwift") and "zwift" in user
 
-    if target and not do_garmin and not do_strava:
+    if target and not do_garmin and not do_strava and not do_zwift:
         print(f"Target '{target}' is not configured. Check your config.")
         return
 
@@ -474,6 +557,23 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
         )
         authorize_strava(strava_cfg)
         print("Done - Strava tokens saved.")
+
+    if do_zwift:
+        from eufy_sync.config import ZwiftConfig, _get_password
+        from eufy_sync.credentials import _keyring_available, delete_token
+        from eufy_sync.zwift_client import ZwiftClient
+        zwift_email = user["zwift"]["email"]
+        zwift_pw = _get_password(user_name, "zwift", zwift_email, user["zwift"].get("password"))
+        # Force fresh password-grant login by clearing cached tokens
+        if _keyring_available():
+            delete_token("zwift")
+        token_file = DATA_DIR / "zwift_token.json"
+        if token_file.exists():
+            token_file.unlink()
+        client = ZwiftClient(ZwiftConfig(email=zwift_email, password=zwift_pw))
+        client.authenticate()
+        client.close()
+        print("Done - Zwift tokens saved.")
 
 
 def _generate_plist(binary_path: str) -> str:
@@ -619,11 +719,12 @@ def _uninstall(data_dir: Path) -> None:
     from eufy_sync.credentials import delete_password, delete_token, _keyring_available
     if _keyring_available():
         for name in user_names:
-            for suffix in ["eufy", "garmin"]:
+            for suffix in ["eufy", "garmin", "zwift"]:
                 delete_password(f"{name}:{suffix}")
         delete_token("eufy")
         delete_token("garmin")
         delete_token("strava")
+        delete_token("zwift")
 
     # Remove data directory (preserving DB if requested)
     if data_dir.exists():
@@ -708,6 +809,18 @@ def _print_summary(total_counts: dict[str, int], failures: list, state, users: l
         else:
             parts.append("Strava connected")
 
+    if user.zwift:
+        from eufy_sync.zwift_client import ZwiftClient
+        zwift_status = ZwiftClient(user.zwift).token_status()
+        if zwift_status["state"] == "no_session":
+            parts.append("Zwift: not authorized")
+        elif zwift_status["state"] == "expired":
+            parts.append("Zwift token EXPIRED")
+        elif zwift_status["state"] == "refresh_needed":
+            parts.append("Zwift token refresh pending")
+        else:
+            parts.append("Zwift connected")
+
     print(" | ".join(parts))
     print(
         "If you weighed in recently and it isn't here, open the Eufy app so it "
@@ -763,6 +876,19 @@ def _show_status(state, users: list) -> None:
                 print("Strava auth: access token expired, will refresh on next sync")
             else:
                 print("Strava auth: valid (refresh token active)")
+
+        # Zwift token health (unofficial)
+        if user.zwift:
+            from eufy_sync.zwift_client import ZwiftClient
+            zwift_status = ZwiftClient(user.zwift).token_status()
+            if zwift_status["state"] == "no_session":
+                print("Zwift auth: not authorized - first sync will log in")
+            elif zwift_status["state"] == "expired":
+                print("Zwift auth: EXPIRED - re-authorize with --reauth zwift")
+            elif zwift_status["state"] == "refresh_needed":
+                print("Zwift auth: access token expired, will refresh on next sync")
+            else:
+                print("Zwift auth: valid (refresh token active)")
 
 
 def _show_history(state, users: list, limit: int = 14) -> None:
@@ -869,13 +995,14 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="eufy-sync",
-        description="Sync Eufy smart scale data to Garmin Connect and Strava",
+        description="Sync Eufy smart scale data to Garmin Connect, Strava, and Zwift",
     )
     parser.add_argument("--version", "-V", action="version", version=f"eufy-sync {__version__}")
     parser.add_argument("--status", action="store_true", help="Show sync status and token health")
     parser.add_argument("--reauth", nargs="?", const="all", default=None, metavar="TARGET",
-                        help="Re-authenticate (optionally: garmin or strava)")
+                        help="Re-authenticate (optionally: garmin, strava, or zwift)")
     parser.add_argument("--setup-strava", action="store_true", help="Connect Strava to your account")
+    parser.add_argument("--setup-zwift", action="store_true", help="Connect Zwift to your account")
     parser.add_argument("--select-profile", action="store_true", help="Choose which Eufy profile to sync")
     parser.add_argument("--update-password", action="store_true", help="Change stored passwords")
     parser.add_argument("--history", nargs="?", const=14, type=int, default=None, metavar="N",
@@ -911,6 +1038,11 @@ def main() -> None:
     # Handle Strava setup
     if args.setup_strava:
         _setup_strava(config_path)
+        return
+
+    # Handle Zwift setup
+    if args.setup_zwift:
+        _setup_zwift(config_path)
         return
 
     # Handle profile selection
@@ -984,10 +1116,12 @@ def main() -> None:
         failures = []
         for user in config.users:
             try:
-                counts = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
                 for target_name, count in counts.items():
                     total_counts[target_name] = total_counts.get(target_name, 0) + count
-                logger.info("User %s: synced %s", user.name, counts)
+                for target_name, err in errors.items():
+                    failures.append((f"{user.name}/{target_name}", err))
+                logger.info("User %s: synced %s, errors %s", user.name, counts, errors)
             except AmbiguousProfileError as e:
                 interactive = not args.headless and sys.stdin.isatty()
                 if interactive:
@@ -997,10 +1131,12 @@ def main() -> None:
                     user.eufy.customer_id = customer_id
                     print("Saved. Syncing your profile now...")
                     try:
-                        counts = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                        counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
                         for target_name, count in counts.items():
                             total_counts[target_name] = total_counts.get(target_name, 0) + count
-                        logger.info("User %s: synced %s", user.name, counts)
+                        for target_name, err in errors.items():
+                            failures.append((f"{user.name}/{target_name}", err))
+                        logger.info("User %s: synced %s, errors %s", user.name, counts, errors)
                     except Exception as retry_error:
                         logger.exception("Failed to sync user %s after profile selection", user.name)
                         failures.append((user.name, str(retry_error)))

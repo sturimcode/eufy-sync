@@ -15,18 +15,18 @@
 ## File Structure
 
 **Create:**
-- `eufy_sync/zwift_client.py` — `ZwiftClient` + token I/O helpers (parallel to `strava_client.py`)
-- `tests/test_zwift_client.py` — unit tests for the new module
+- `eufy_sync/zwift_client.py` - `ZwiftClient` + token I/O helpers (parallel to `strava_client.py`)
+- `tests/test_zwift_client.py` - unit tests for the new module
 
 **Modify:**
-- `eufy_sync/config.py` — add `ZwiftConfig`, `UserConfig.zwift`, extend `load_config` and the "no sync targets" guard
-- `eufy_sync/sync.py` — change `sync_user` return type from `dict[str, int]` to `tuple[dict[str, int], dict[str, str]]`, add Zwift block with per-target try/except
-- `eufy_sync/cli.py` — handle new return shape, add wizard prompt, add `--setup-zwift`, extend `--reauth`, `--update-password`, `--status`, `_uninstall`
-- `tests/test_sync.py` — three-target ordering test, Zwift isolation test, one-PUT-per-sync test
-- `tests/test_config.py` — Zwift parsing test
-- `tests/test_summary.py` — update for new return-shape consumers if needed
-- `tests/test_cli.py` — `--setup-zwift` interactive test
-- `README.md` — short "Sync targets" section noting Zwift is unofficial
+- `eufy_sync/config.py` - add `ZwiftConfig`, `UserConfig.zwift`, extend `load_config` and the "no sync targets" guard
+- `eufy_sync/sync.py` - change `sync_user` return type from `dict[str, int]` to `tuple[dict[str, int], dict[str, str]]`, add Zwift block with per-target try/except
+- `eufy_sync/cli.py` - handle new return shape, add wizard prompt, add `--setup-zwift`, extend `--reauth`, `--update-password`, `--status`, `_uninstall`
+- `tests/test_sync.py` - three-target ordering test, Zwift isolation test, one-PUT-per-sync test
+- `tests/test_config.py` - Zwift parsing test
+- `tests/test_summary.py` - update for new return-shape consumers if needed
+- `tests/test_cli.py` - `--setup-zwift` interactive test
+- `README.md` - short "Sync targets" section noting Zwift is unofficial
 
 ---
 
@@ -86,24 +86,46 @@ At the bottom of the function, before the existing `return counts`, add an `erro
 
 - [ ] **Step 4: Update cli.py to unpack the new shape**
 
-In `eufy_sync/cli.py`, find the loop in `main()`:
+In `eufy_sync/cli.py`, the sync loop in `main()` calls `sync_user` in TWO places: the main attempt, and the retry inside the `except AmbiguousProfileError` block (the inline profile picker added the second one). Update BOTH.
+
+Main attempt currently reads:
 
 ```python
-counts = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
-for target_name, count in counts.items():
-    total_counts[target_name] = total_counts.get(target_name, 0) + count
-logger.info("User %s: synced %s", user.name, counts)
+                counts = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                for target_name, count in counts.items():
+                    total_counts[target_name] = total_counts.get(target_name, 0) + count
+                logger.info("User %s: synced %s", user.name, counts)
 ```
 
 Replace with:
 
 ```python
-counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
-for target_name, count in counts.items():
-    total_counts[target_name] = total_counts.get(target_name, 0) + count
-for target_name, err in errors.items():
-    failures.append((f"{user.name}/{target_name}", err))
-logger.info("User %s: synced %s, errors %s", user.name, counts, errors)
+                counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                for target_name, count in counts.items():
+                    total_counts[target_name] = total_counts.get(target_name, 0) + count
+                for target_name, err in errors.items():
+                    failures.append((f"{user.name}/{target_name}", err))
+                logger.info("User %s: synced %s, errors %s", user.name, counts, errors)
+```
+
+The retry inside `except AmbiguousProfileError` currently reads:
+
+```python
+                        counts = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                        for target_name, count in counts.items():
+                            total_counts[target_name] = total_counts.get(target_name, 0) + count
+                        logger.info("User %s: synced %s", user.name, counts)
+```
+
+Replace with:
+
+```python
+                        counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                        for target_name, count in counts.items():
+                            total_counts[target_name] = total_counts.get(target_name, 0) + count
+                        for target_name, err in errors.items():
+                            failures.append((f"{user.name}/{target_name}", err))
+                        logger.info("User %s: synced %s, errors %s", user.name, counts, errors)
 ```
 
 - [ ] **Step 5: Run the full suite**
@@ -319,7 +341,7 @@ Write `eufy_sync/zwift_client.py`:
 
 Zwift does not publish a third-party API. This module talks to the same
 endpoints the Companion app uses:
-- Auth: POST https://secure.zwift.com/auth/realms/zwift/protocol/openid-connect/token
+- Auth: POST https://secure.zwift.com/auth/realms/zwift/tokens/access/codes
 - Profile write: PUT https://us-or-rly101.zwift.com/api/profiles/me
 
 The endpoints are community-reverse-engineered and may break with any
@@ -339,7 +361,7 @@ from eufy_sync.config import ZwiftConfig
 
 logger = logging.getLogger(__name__)
 
-TOKEN_URL = "https://secure.zwift.com/auth/realms/zwift/protocol/openid-connect/token"
+TOKEN_URL = "https://secure.zwift.com/auth/realms/zwift/tokens/access/codes"
 PROFILE_URL = "https://us-or-rly101.zwift.com/api/profiles/me"
 CLIENT_ID = "Zwift_Mobile_Link"
 REFRESH_SAFETY_MARGIN = 300  # seconds before expiry to trigger refresh
@@ -451,7 +473,7 @@ def test_authenticate_fresh_login_when_no_tokens(monkeypatch, tmp_path):
 
     # Called with password grant
     call = mock_post.call_args
-    assert call.args[0] == "https://secure.zwift.com/auth/realms/zwift/protocol/openid-connect/token"
+    assert call.args[0] == "https://secure.zwift.com/auth/realms/zwift/tokens/access/codes"
     assert call.kwargs["data"]["grant_type"] == "password"
     assert call.kwargs["data"]["username"] == "z@example.com"
     assert call.kwargs["data"]["password"] == "pw"
@@ -1582,7 +1604,7 @@ In the success-notification block of `main()`, find:
             _notify("eufy-sync", f"Synced {total} measurement{'s' if total != 1 else ''} to {target_label}")
 ```
 
-No change needed here — it already iterates whatever is in `total_counts`. Zwift entries appear automatically.
+No change needed here - it already iterates whatever is in `total_counts`. Zwift entries appear automatically.
 
 - [ ] **Step 2: Run the suite**
 

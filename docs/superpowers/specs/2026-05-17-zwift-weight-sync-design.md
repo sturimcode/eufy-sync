@@ -1,4 +1,4 @@
-# Zwift Weight Sync — Design
+# Zwift Weight Sync - Design
 
 **Date:** 2026-05-17
 **Status:** approved, pending implementation plan
@@ -41,15 +41,15 @@ Public surface:
 
 - `class ZwiftClient`
   - `__init__(config: ZwiftConfig)`
-  - `authenticate() -> None` — loads cached tokens from keychain, refreshes if expired, falls back to fresh password-grant login if no refresh token.
-  - `update_weight(weight_kg: float) -> dict` — `PUT /api/profiles/me` with `{"weight": int(round(weight_kg * 1000))}` (grams). Returns the Zwift response JSON. 4xx -> `PermanentSyncError`; 5xx -> retried by `_retry`.
-  - `token_status() -> dict` — same shape as `StravaClient.token_status` and `GarminAuth.token_status` so the existing summary/status formatters work without special-casing.
+  - `authenticate() -> None` - loads cached tokens from keychain, refreshes if expired, falls back to fresh password-grant login if no refresh token.
+  - `update_weight(weight_kg: float) -> dict` - `PUT /api/profiles/me` with `{"weight": int(round(weight_kg * 1000))}` (grams). Returns the Zwift response JSON. 4xx -> `PermanentSyncError`; 5xx -> retried by `_retry`.
+  - `token_status() -> dict` - same shape as `StravaClient.token_status` and `GarminAuth.token_status` so the existing summary/status formatters work without special-casing.
   - `close() -> None`
 
 Internal helpers:
-- `_fresh_login()` — `POST https://secure.zwift.com/auth/realms/zwift/protocol/openid-connect/token` with `grant_type=password`, `client_id=Zwift_Mobile_Link`, `username`, `password`.
-- `_refresh_access_token()` — same URL, `grant_type=refresh_token`.
-- `_load_tokens()` / `_save_tokens(tokens)` — keychain first, file fallback, same pattern as Strava's helpers.
+- `_fresh_login()` - `POST https://secure.zwift.com/auth/realms/zwift/tokens/access/codes` with `grant_type=password`, `client_id=Zwift_Mobile_Link`, `username`, `password`.
+- `_refresh_access_token()` - same URL, `grant_type=refresh_token`.
+- `_load_tokens()` / `_save_tokens(tokens)` - keychain first, file fallback, same pattern as Strava's helpers.
 
 Token shape:
 ```json
