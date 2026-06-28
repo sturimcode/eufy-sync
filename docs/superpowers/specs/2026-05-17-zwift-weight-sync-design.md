@@ -42,7 +42,7 @@ Public surface:
 - `class ZwiftClient`
   - `__init__(config: ZwiftConfig)`
   - `authenticate() -> None` - loads cached tokens from keychain, refreshes if expired, falls back to fresh password-grant login if no refresh token.
-  - `update_weight(weight_kg: float) -> dict` - `PUT /api/profiles/me` with `{"weight": int(round(weight_kg * 1000))}` (grams). Returns the Zwift response JSON. 4xx -> `PermanentSyncError`; 5xx -> retried by `_retry`.
+  - `update_weight(weight_kg: float) -> dict` - Zwift rejects JSON profile writes (HTTP 415); profiles are mutated via protobuf using the media type `application/x-protobuf-lite`. So we GET `/api/profiles/me` as protobuf, append `weight_in_grams` (PlayerProfile field 9, a varint; protobuf scalar fields are last-wins so this overrides the value while preserving the rest of the blob), and PUT it back. 4xx (except 429) -> `PermanentSyncError`; 5xx and 429 -> retried by `_retry`. Confirmed live: a 3.2 KB protobuf round-trip returns HTTP 204.
   - `token_status() -> dict` - same shape as `StravaClient.token_status` and `GarminAuth.token_status` so the existing summary/status formatters work without special-casing.
   - `close() -> None`
 

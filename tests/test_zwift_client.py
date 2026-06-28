@@ -107,69 +107,105 @@ def test_authenticate_falls_back_to_password_if_refresh_fails(monkeypatch, tmp_p
     client.close()
 
 
-def test_update_weight_sends_grams_not_kg(monkeypatch, tmp_path):
+def test_encode_varint():
+    from eufy_sync.zwift_client import _encode_varint
+    assert _encode_varint(0) == b"\x00"
+    assert _encode_varint(1) == b"\x01"
+    assert _encode_varint(300) == b"\xac\x02"
+    assert _encode_varint(80000) == b"\x80\xf1\x04"
+
+
+def test_update_weight_appends_weight_field_in_protobuf(monkeypatch, tmp_path):
+    from eufy_sync.zwift_client import _encode_varint
     monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
     monkeypatch.setenv("HOME", str(tmp_path))
     _save_tokens(_make_tokens())
 
-    mock_response = MagicMock(status_code=200)
-    mock_response.json.return_value = {"weight": 80000}
+    existing = b"\x0a\x05Elias"  # opaque profile blob (some other fields)
+    get_resp = MagicMock(status_code=200, content=existing)
+    put_resp = MagicMock(status_code=200, text="")
 
     client = ZwiftClient(_make_config())
     client.authenticate()
-    with patch.object(client._client, "put", return_value=mock_response) as mock_put:
+    with patch.object(client._client, "get", return_value=get_resp) as mock_get, \
+         patch.object(client._client, "put", return_value=put_resp) as mock_put:
         client.update_weight(80.0)
 
-    # Weight must be sent in grams, JSON body
-    payload = mock_put.call_args.kwargs["json"]
-    assert payload["weight"] == 80000
+    # GET asks for the protobuf representation
+    assert mock_get.call_args.kwargs["headers"]["Accept"] == "application/x-protobuf-lite"
+    # PUT preserves the fetched blob and appends weight field 9 (tag 0x48) = 80000 g
+    sent = mock_put.call_args.kwargs["content"]
+    assert sent.startswith(existing)
+    assert sent.endswith(b"\x48" + _encode_varint(80000))
+    assert mock_put.call_args.kwargs["headers"]["Content-Type"] == "application/x-protobuf-lite"
     assert mock_put.call_args.args[0] == "https://us-or-rly101.zwift.com/api/profiles/me"
     client.close()
 
 
 def test_update_weight_rounds_to_grams(monkeypatch, tmp_path):
+    from eufy_sync.zwift_client import _encode_varint
     monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
     monkeypatch.setenv("HOME", str(tmp_path))
     _save_tokens(_make_tokens())
 
-    mock_response = MagicMock(status_code=200)
-    mock_response.json.return_value = {}
+    get_resp = MagicMock(status_code=200, content=b"")
+    put_resp = MagicMock(status_code=200, text="")
 
     client = ZwiftClient(_make_config())
     client.authenticate()
-    with patch.object(client._client, "put", return_value=mock_response) as mock_put:
+    with patch.object(client._client, "get", return_value=get_resp), \
+         patch.object(client._client, "put", return_value=put_resp) as mock_put:
         client.update_weight(80.456)
 
     # 80.456 kg = 80456 g
-    assert mock_put.call_args.kwargs["json"]["weight"] == 80456
+    assert mock_put.call_args.kwargs["content"].endswith(b"\x48" + _encode_varint(80456))
     client.close()
 
 
-def test_update_weight_4xx_raises_permanent(monkeypatch, tmp_path):
+def test_update_weight_get_4xx_raises_permanent(monkeypatch, tmp_path):
     monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
     monkeypatch.setenv("HOME", str(tmp_path))
     _save_tokens(_make_tokens())
 
-    mock_response = MagicMock(status_code=401, text="unauth")
+    get_resp = MagicMock(status_code=403, content=b"")
 
     client = ZwiftClient(_make_config())
     client.authenticate()
-    with patch.object(client._client, "put", return_value=mock_response):
+    with patch.object(client._client, "get", return_value=get_resp):
         with pytest.raises(PermanentSyncError):
             client.update_weight(80.0)
     client.close()
 
 
-def test_update_weight_5xx_raises_retryable(monkeypatch, tmp_path):
+def test_update_weight_put_4xx_raises_permanent(monkeypatch, tmp_path):
     monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
     monkeypatch.setenv("HOME", str(tmp_path))
     _save_tokens(_make_tokens())
 
-    mock_response = MagicMock(status_code=503, text="busy")
+    get_resp = MagicMock(status_code=200, content=b"")
+    put_resp = MagicMock(status_code=401, text="unauth")
 
     client = ZwiftClient(_make_config())
     client.authenticate()
-    with patch.object(client._client, "put", return_value=mock_response):
+    with patch.object(client._client, "get", return_value=get_resp), \
+         patch.object(client._client, "put", return_value=put_resp):
+        with pytest.raises(PermanentSyncError):
+            client.update_weight(80.0)
+    client.close()
+
+
+def test_update_weight_put_5xx_raises_retryable(monkeypatch, tmp_path):
+    monkeypatch.setattr("eufy_sync.zwift_client._keyring_available", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _save_tokens(_make_tokens())
+
+    get_resp = MagicMock(status_code=200, content=b"")
+    put_resp = MagicMock(status_code=503, text="busy")
+
+    client = ZwiftClient(_make_config())
+    client.authenticate()
+    with patch.object(client._client, "get", return_value=get_resp), \
+         patch.object(client._client, "put", return_value=put_resp):
         with pytest.raises(RuntimeError) as exc_info:
             client.update_weight(80.0)
     assert not isinstance(exc_info.value, PermanentSyncError)
@@ -220,11 +256,13 @@ def test_update_weight_accepts_204(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     _save_tokens(_make_tokens())
 
-    mock_response = MagicMock(status_code=204, text="")
+    get_resp = MagicMock(status_code=200, content=b"")
+    put_resp = MagicMock(status_code=204, text="")
 
     client = ZwiftClient(_make_config())
     client.authenticate()
-    with patch.object(client._client, "put", return_value=mock_response):
+    with patch.object(client._client, "get", return_value=get_resp), \
+         patch.object(client._client, "put", return_value=put_resp):
         result = client.update_weight(80.0)
 
     assert isinstance(result, dict)

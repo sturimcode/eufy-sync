@@ -3,7 +3,7 @@
 Zwift does not publish a third-party API. This module talks to the same
 endpoints the Companion app uses:
 - Auth: POST https://secure.zwift.com/auth/realms/zwift/tokens/access/codes
-- Profile write: PUT https://us-or-rly101.zwift.com/api/profiles/me
+- Profile write: PUT https://us-or-rly101.zwift.com/api/profiles/me (protobuf body)
 
 The endpoints are community-reverse-engineered and may break with any
 Zwift release. Failures here should not stop Garmin/Strava sync.
@@ -26,6 +26,33 @@ TOKEN_URL = "https://secure.zwift.com/auth/realms/zwift/tokens/access/codes"
 PROFILE_URL = "https://us-or-rly101.zwift.com/api/profiles/me"
 CLIENT_ID = "Zwift_Mobile_Link"
 REFRESH_SAFETY_MARGIN = 300  # seconds before expiry to trigger refresh
+
+# Zwift mutates profiles through its protobuf API; a JSON write returns HTTP 415.
+# We avoid vendoring the whole PlayerProfile schema by editing one field on the
+# wire: weight_in_grams is field 9 (a uint32, varint). Protobuf scalar fields are
+# last-wins, so appending field 9 to the fetched profile blob overrides the weight
+# while leaving every other field untouched.
+PROTOBUF_CONTENT_TYPE = "application/x-protobuf-lite"
+WEIGHT_FIELD_NUMBER = 9
+
+
+def _encode_varint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        b = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+
+def _set_weight_in_profile(blob: bytes, weight_g: int) -> bytes:
+    """Append PlayerProfile.weight_in_grams (field 9, varint) so it overrides any
+    existing value on parse, leaving the rest of the profile blob intact."""
+    tag = (WEIGHT_FIELD_NUMBER << 3) | 0  # wire type 0 = varint
+    return blob + bytes([tag]) + _encode_varint(weight_g)
 
 
 def _keyring_available() -> bool:
@@ -153,27 +180,41 @@ class ZwiftClient:
         logger.info("Refreshed Zwift access token")
 
     def update_weight(self, weight_kg: float) -> dict:
-        """Update Zwift profile weight. Sends grams.
+        """Update Zwift profile weight (in grams).
 
-        Returns the response JSON. 4xx raises PermanentSyncError so _retry
-        skips it; 5xx and network errors raise RuntimeError so _retry retries.
+        Zwift rejects JSON profile writes (HTTP 415); the profile is mutated via
+        protobuf. We fetch the current profile blob, override weight_in_grams,
+        and PUT it back so no other field is disturbed. 4xx (except 429) raises
+        PermanentSyncError so _retry skips it; 5xx, 429, and network errors raise
+        RuntimeError so _retry retries.
         """
         weight_g = int(round(weight_kg * 1000))
-        resp = self._client.put(PROFILE_URL, json={"weight": weight_g})
 
+        get_resp = self._client.get(PROFILE_URL, headers={"Accept": PROTOBUF_CONTENT_TYPE})
+        if not (200 <= get_resp.status_code < 300):
+            self._raise_for_profile(get_resp.status_code, "fetch")
+        new_blob = _set_weight_in_profile(get_resp.content, weight_g)
+
+        resp = self._client.put(
+            PROFILE_URL,
+            content=new_blob,
+            headers={"Content-Type": PROTOBUF_CONTENT_TYPE},
+        )
         if not (200 <= resp.status_code < 300):
-            logger.debug("Zwift weight update failed: %d %s", resp.status_code, resp.text)
-            if 400 <= resp.status_code < 500 and resp.status_code != 429:
-                from eufy_sync.sync import PermanentSyncError
-                raise PermanentSyncError(
-                    f"Failed to update Zwift weight (HTTP {resp.status_code})"
-                )
-            raise RuntimeError(
-                f"Failed to update Zwift weight (HTTP {resp.status_code})"
-            )
+            self._raise_for_profile(resp.status_code, "update")
 
         logger.info("Updated Zwift weight to %.2f kg (%d g)", weight_kg, weight_g)
-        return resp.json() if resp.text else {"status": resp.status_code}
+        return {"status": resp.status_code}
+
+    @staticmethod
+    def _raise_for_profile(status_code: int, action: str) -> None:
+        """Classify a failed Zwift profile request and raise. 4xx (non-429) is
+        permanent; 5xx and 429 are retryable."""
+        logger.debug("Zwift profile %s failed: HTTP %d", action, status_code)
+        if 400 <= status_code < 500 and status_code != 429:
+            from eufy_sync.sync import PermanentSyncError
+            raise PermanentSyncError(f"Failed to {action} Zwift profile (HTTP {status_code})")
+        raise RuntimeError(f"Failed to {action} Zwift profile (HTTP {status_code})")
 
     def token_status(self) -> dict:
         """Return token health matching the shape of StravaClient.token_status."""
