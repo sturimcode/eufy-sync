@@ -5,130 +5,108 @@
 ![Python](https://img.shields.io/pypi/pyversions/eufy-sync)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Syncs body composition data from a Eufy smart scale to Garmin Connect, Strava, and Zwift. Weight, body fat %, muscle mass, bone mass, hydration, BMR, visceral fat, and metabolic age all come through to Garmin. Strava and Zwift get weight updates.
+Syncs body composition from a Eufy smart scale to Garmin Connect, Strava, and Zwift.
 
-> macOS only. Requires Python 3.12+ and a terminal. Setup is guided - you just answer a few prompts.
+> macOS only. Needs Python 3.12+ and a terminal.
 
 ## Sync targets
 
-| Target | What gets synced | API stability |
-|--------|------------------|---------------|
-| Garmin Connect | Full body composition (FIT upload) | Stable |
-| Strava | Current weight (`PUT /athlete`) | Stable |
-| Zwift | Current weight (`PUT /api/profiles/me`) | Unofficial, may break |
+| Target | What syncs | Stability |
+|--------|------------|-----------|
+| Garmin Connect | Full body composition: weight, body fat, muscle mass, bone mass, hydration, BMR, visceral fat, metabolic age | Stable |
+| Strava | Weight | Stable |
+| Zwift | Weight | Unofficial, may break |
 
-Zwift has no public API for third-party tools. eufy-sync uses a community-reverse-engineered endpoint that could change with any Zwift release. If Zwift breaks, the other two targets keep working.
+Zwift has no public API. eufy-sync uses a reverse-engineered endpoint that can change with any Zwift release. If it breaks, Garmin and Strava keep syncing.
 
-## The problem
+## Why
 
-Eufy scales sync to Apple Health, Fitbit, and Google Fit - but not Garmin or Strava. If you use either for training, your body comp data is stuck in a separate app. This fixes that.
+Eufy scales sync to Apple Health, Fitbit, and Google Fit, but not Garmin, Strava, or Zwift. If you train on any of those, your body comp is stuck in a separate app. This fixes that.
 
 ## How Garmin login works
 
 Garmin has no official API for writing body composition into Connect. In March 2026 it put Cloudflare in front of its login, which broke the Python libraries that talked to it; [garth](https://github.com/matin/garth) was [deprecated](https://github.com/matin/garth/discussions/222) and stays that way.
 
-eufy-sync logs in through [python-garminconnect](https://github.com/cyberjunky/python-garminconnect), which gets past Cloudflare without a browser. On first run you enter your Garmin email and password in the terminal, and a code if your account uses two-factor. If that direct login is rate-limited or temporarily blocked, eufy-sync falls back to a one-time browser login: a Chromium window opens, you sign in, and it continues. Either way the tokens are saved to your system keychain and refresh on their own, so later runs need no login. Headless setups (a server or scheduled job) use the direct login only, since there is no screen for a browser.
+eufy-sync logs in through [python-garminconnect](https://github.com/cyberjunky/python-garminconnect), which gets past Cloudflare without a browser. On first run you enter your Garmin email and password, plus a code if you use two-factor. The tokens save to your keychain and refresh on their own, so later runs need no login. If that direct login gets rate-limited, a Chromium window opens once for you to sign in, then it continues. Headless setups use the direct login only, since there is no screen for a browser.
 
 ## Install
 
-You need Python 3.12+, a Eufy scale with cloud sync, and a Garmin Connect and/or Strava account.
+You need Python 3.12+, a Eufy scale with cloud sync, and a Garmin and/or Strava account.
 
-First, install pipx if you don't have it:
 ```bash
-brew install pipx
-```
-Or if you don't use Homebrew: `pip3 install pipx`
-
-Then install and run:
-```bash
+brew install pipx        # or: pip3 install pipx
 pipx install eufy-sync
 eufy-sync
 ```
 
-> **Python older than 3.12?** eufy-sync needs Python 3.12+. The simplest path is [uv](https://docs.astral.sh/uv/): `uv tool install eufy-sync` fetches a compatible Python for you, with no changes to your system Python. Or install 3.12 with `brew install python@3.12` and run `pipx install --python python3.12 eufy-sync`.
+First run walks you through choosing targets and entering credentials, then runs the first sync.
 
-Setup is guided on first run - choose your sync targets (Garmin, Strava, or both), enter your credentials, and your data syncs automatically.
+> **Python older than 3.12?** The simplest path is [uv](https://docs.astral.sh/uv/): `uv tool install eufy-sync` fetches a compatible Python for you, without touching your system Python. Or `brew install python@3.12` then `pipx install --python python3.12 eufy-sync`.
 
-> **Note:** If you've cloned this repo, run pipx commands from outside the repo directory to avoid path conflicts (e.g., `cd /tmp && pipx install eufy-sync`).
+> **Cloned the repo?** Run pipx commands from outside the repo directory to avoid path conflicts, e.g. `cd /tmp && pipx install eufy-sync`.
 
 ## Usage
 
 ```bash
 eufy-sync                      # sync new measurements to all configured targets
-eufy-sync --status           # check last sync + token health
-eufy-sync --dry-run          # preview without uploading
-eufy-sync --setup-strava     # connect Strava (add to existing setup)
-eufy-sync --setup-zwift      # connect Zwift (add to existing setup)
-eufy-sync --select-profile   # choose which Eufy profile to sync (shared scale)
-eufy-sync --reauth           # re-login to all targets
-eufy-sync --reauth garmin    # re-login to Garmin only
-eufy-sync --reauth strava    # re-authorize Strava only
-eufy-sync --update-password  # change stored passwords
-eufy-sync --backfill-days 30 # sync last 30 days
-eufy-sync --verbose          # show detailed sync logs
-eufy-sync --install-agent   # set up automatic sync
-eufy-sync --uninstall-agent # remove automatic sync
-eufy-sync --uninstall       # remove all data and clean up
+eufy-sync --status             # last sync + token health
+eufy-sync --dry-run            # preview without uploading
+eufy-sync --update             # update to the latest version
+eufy-sync --setup-strava       # add Strava
+eufy-sync --setup-zwift        # add Zwift
+eufy-sync --select-profile     # pick your profile on a shared scale
+eufy-sync --reauth [target]    # re-login (all, or garmin / strava / zwift)
+eufy-sync --update-password    # change stored passwords
+eufy-sync --backfill-days 30   # sync the last 30 days
+eufy-sync --verbose            # detailed logs
+eufy-sync --install-agent      # turn automatic sync on
+eufy-sync --uninstall-agent    # turn automatic sync off
+eufy-sync --uninstall          # remove all data and clean up
 ```
 
 ## Updating
 
-The tool checks for updates weekly and will let you know when a new version is available. To update:
+eufy-sync checks weekly and tells you when a new version is out. To update:
 
 ```bash
-pipx install --force eufy-sync
+eufy-sync --update
 ```
 
 ## Automatic sync (macOS)
 
-On first run, you'll be asked if you want to sync automatically every 4 hours. If you say yes, a macOS Launch Agent is installed that runs in the background - weigh yourself, open your laptop later, and it syncs on its own.
-
-Logs go to `~/.garmin-sync/sync.log`. You get a macOS notification if something fails.
-
-To disable: `eufy-sync --uninstall-agent`
+On first run you can opt into syncing every 4 hours. If you do, a macOS Launch Agent runs it in the background: weigh yourself, open your laptop later, and it syncs on its own. Logs go to `~/.garmin-sync/sync.log`, and you get a notification if something fails. Turn it off with `eufy-sync --uninstall-agent`.
 
 ## Adding Strava
 
-If you already have Garmin set up and want to add Strava:
+If Garmin is already set up and you want Strava:
 
-1. Create a Strava API application at https://www.strava.com/settings/api
-2. Set 'Authorization Callback Domain' to `localhost`
+1. Create a Strava API app at https://www.strava.com/settings/api
+2. Set "Authorization Callback Domain" to `localhost`
 3. Run `eufy-sync --setup-strava` and enter your Client ID and Secret
 4. Authorize in the browser when it opens
-
-Future syncs will update both Garmin and Strava automatically. Strava receives weight only (no body composition - Strava's API limitation).
 
 ## How it works
 
 ```
-                                                  /--> garmin_client.py --> Garmin Connect
-Eufy Cloud API --> eufy_client.py --> transform.py     (FIT file + upload)
-(fetch history)    (auth + pull)     (filter, dedup) \
-                                          |           \--> strava_client.py --> Strava
-                                      state.db              (weight update)
-                                   (sync watermark)
+Eufy Cloud  ->  eufy_client.py  ->  transform  ->  garmin_client.py  ->  Garmin (FIT)
+(pull)          (auth)              (filter,    ->  strava_client.py  ->  Strava (weight)
+                                    dedup,      ->  zwift_client.py   ->  Zwift  (weight)
+                                    state.db)
 ```
 
-1. Authenticate to Eufy cloud API, pull measurement history
-2. Check local SQLite DB for what's already been synced (per target)
-3. For Garmin: check for existing entries on the same date (multi-machine dedup)
-4. Generate a FIT binary file and upload to Garmin Connect
-5. Update athlete weight on Strava
-6. Record syncs in DB
+On each run it pulls your Eufy history and checks a local SQLite DB for what each target already has, then uploads only what is new: a FIT file to Garmin (skipping dates Garmin already holds, so two machines do not double up), and the latest weight to Strava and Zwift. Every sync is recorded in the DB.
 
 ## Security
 
-Your passwords and OAuth tokens are stored in your system keychain (macOS Keychain) - not in plaintext files. Config files in `~/.garmin-sync/` only contain email addresses and Strava API app credentials, with `600` permissions. Credentials are only sent to Eufy, Garmin, and Strava's own servers over HTTPS. They are never logged, uploaded, or transmitted anywhere else. The only other outbound call is a weekly version check to `pypi.org` (no credentials sent). You can verify this yourself - the codebase is small and the outbound calls are in `eufy_client.py`, `garmin_auth.py`, `strava_client.py`, and the update checker in `cli.py`.
-
-On systems without keychain support (headless Linux), credentials fall back to file-based storage with `600` permissions.
+Passwords and OAuth tokens live in your macOS Keychain, not plaintext files. The config in `~/.garmin-sync/` holds only email addresses and Strava app credentials, at `600` permissions. Credentials go over HTTPS to Eufy, Garmin, Strava, and Zwift only, and are never logged or sent anywhere else. The one other outbound call is a weekly version check to pypi.org, with no credentials. On a host without a keychain (headless Linux), credentials fall back to a `600` file.
 
 ## Known quirks
 
-The Eufy cloud API returns weight at ~0.05 kg resolution, which can differ from what the Eufy app shows (the app may read from Bluetooth with higher precision). Most days match within 0.1 lbs, but some readings can be off by up to ~0.5 lbs. Displaying in lbs on Garmin adds a bit more rounding from the kg conversion.
+The Eufy cloud reports weight at about 0.05 kg resolution, so it can differ from the Eufy app, which may read Bluetooth at higher precision. Most days match within 0.1 lb; some can be off by up to ~0.5 lb, and the kg-to-lb conversion on Garmin adds a little rounding.
 
-If more than one person uses the same Eufy account, the tool asks which profile is yours during setup, so only your weigh-ins sync. If you set it up before this was added, run `eufy-sync --select-profile` once. Until you choose, a sync that sees several profiles stops and shows them rather than guessing whose weight to upload. If you are setting your profile after an earlier version already synced someone else's weight, run `eufy-sync --backfill-days 30` once afterward to pull any of your own weigh-ins that were skipped.
+If more than one person uses the same Eufy account, setup asks which profile is yours, so only your weigh-ins sync. Until you choose, a sync that sees several profiles stops and lists them rather than guessing. Set it up before this existed? Run `eufy-sync --select-profile` once, then `eufy-sync --backfill-days 30` to pull any of your weigh-ins an earlier version skipped.
 
-The Eufy cloud only returns a weigh-in after the Eufy phone app has processed it. If you step on the scale but a sync finds nothing, open the Eufy app once so it uploads to the cloud, then run `eufy-sync` again. The tool cannot trigger that upload on its own, so this shows up most on headless or scheduled setups where the app is rarely opened.
+The Eufy cloud only returns a weigh-in after the Eufy app has processed it. If you step on the scale and a sync finds nothing, open the app once so it uploads, then run `eufy-sync` again. The tool cannot trigger that upload itself, so it shows up most on headless or scheduled setups.
 
 ## Tests
 
@@ -138,5 +116,4 @@ pytest tests/ -v
 
 ## Disclaimer
 
-Uses unofficial APIs for Eufy and Garmin, and the official Strava API. Could break if any of these companies change things. Use at your own risk.
-
+Uses unofficial APIs for Eufy, Garmin, and Zwift, and the official Strava API. Could break if any of them change things. Use at your own risk.
