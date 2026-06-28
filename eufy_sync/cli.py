@@ -44,8 +44,22 @@ def _notify(title: str, message: str) -> None:
         pass
 
 
+def _latest_pypi_version() -> str | None:
+    """Return the latest eufy-sync version on PyPI, or None if unreachable."""
+    try:
+        req = urllib.request.Request(
+            "https://pypi.org/pypi/eufy-sync/json",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read(1_000_000))
+        return data["info"]["version"]
+    except Exception:
+        return None
+
+
 def _check_for_updates() -> None:
-    """Check PyPI for a newer version and notify the user."""
+    """Check PyPI for a newer version and point the user at eufy-sync --update."""
     try:
         cache_file = DATA_DIR / "update_check"
         now = time.time()
@@ -55,14 +69,9 @@ def _check_for_updates() -> None:
             if now - last_check < UPDATE_CHECK_INTERVAL:
                 return
 
-        req = urllib.request.Request(
-            "https://pypi.org/pypi/eufy-sync/json",
-            headers={"Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read(1_000_000))
-
-        latest = data["info"]["version"]
+        latest = _latest_pypi_version()
+        if latest is None:
+            return
 
         from eufy_sync import __version__
 
@@ -85,17 +94,42 @@ def _check_for_updates() -> None:
         if latest_parsed <= current_parsed:
             return
 
-        upgrade_cmd = ("pipx install --force eufy-sync"
-                       if shutil.which("pipx")
-                       else "pip install --upgrade eufy-sync")
-
         if sys.stdin.isatty():
-            print(f"Update available: v{latest} (you have v{__version__}). Run: {upgrade_cmd}")
+            print(f"Update available: v{latest} (you have v{__version__}). Run: eufy-sync --update")
         else:
-            _notify("eufy-sync", f"Update available: v{latest}. Run: {upgrade_cmd}")
+            _notify("eufy-sync", f"Update available: v{latest}. Run: eufy-sync --update")
 
     except Exception:
         pass  # never let update check break a sync
+
+
+def _self_update() -> None:
+    """Upgrade eufy-sync in place to the latest PyPI release.
+
+    Pins the exact version so a stale package-index cache cannot report
+    "already up to date" against a release that just landed.
+    """
+    from eufy_sync import __version__
+
+    latest = _latest_pypi_version()
+    if latest is None:
+        print("Could not reach PyPI. Check your connection and try again.")
+        return
+    if latest == __version__:
+        print(f"Already on the latest version (v{__version__}).")
+        return
+
+    if shutil.which("pipx"):
+        cmd = ["pipx", "install", "--force", f"eufy-sync=={latest}"]
+    else:
+        cmd = [sys.executable, "-m", "pip", "install", "--upgrade", f"eufy-sync=={latest}"]
+
+    print(f"Updating eufy-sync from v{__version__} to v{latest}...")
+    result = subprocess.run(cmd)
+    if result.returncode == 0:
+        print(f"Updated to v{latest}.")
+    else:
+        print("Update failed. Run manually: " + " ".join(cmd))
 
 
 def _write_config(path: Path, config: dict) -> None:
@@ -1005,6 +1039,7 @@ def main() -> None:
     parser.add_argument("--setup-zwift", action="store_true", help="Connect Zwift to your account")
     parser.add_argument("--select-profile", action="store_true", help="Choose which Eufy profile to sync")
     parser.add_argument("--update-password", action="store_true", help="Change stored passwords")
+    parser.add_argument("--update", action="store_true", help="Update eufy-sync to the latest version")
     parser.add_argument("--history", nargs="?", const=14, type=int, default=None, metavar="N",
                         help="Show recent sync history, last N entries (default: 14)")
     parser.add_argument("--backfill-days", type=int, default=None, help="Sync last N days")
@@ -1033,6 +1068,11 @@ def main() -> None:
 
     if args.uninstall_agent:
         _uninstall_launch_agent()
+        return
+
+    # Handle self-update
+    if args.update:
+        _self_update()
         return
 
     # Handle Strava setup

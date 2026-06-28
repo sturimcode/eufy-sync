@@ -44,6 +44,7 @@ def test_checks_pypi_when_cache_stale(tmp_path: Path, capsys):
     output = capsys.readouterr().out
     assert "Update available" in output
     assert "99.0.0" in output
+    assert "eufy-sync --update" in output
 
 
 def test_no_message_when_up_to_date(tmp_path: Path, capsys):
@@ -109,19 +110,27 @@ def test_cache_not_written_on_network_error(tmp_path: Path):
     assert not cache_file.exists()
 
 
-def test_suggests_pipx_when_available(tmp_path: Path, capsys):
-    cache_file = tmp_path / "update_check"
-    cache_file.write_text(str(time.time() - UPDATE_CHECK_INTERVAL - 1))
-
-    with patch("eufy_sync.cli.DATA_DIR", tmp_path), \
-         patch("eufy_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response("99.0.0")), \
+def test_self_update_uses_pinned_pipx_when_available():
+    from eufy_sync.cli import _self_update
+    with patch("eufy_sync.cli._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
          patch("eufy_sync.cli.shutil.which", return_value="/usr/local/bin/pipx"), \
-         patch("eufy_sync.cli.sys.stdin") as mock_stdin:
-        mock_stdin.isatty.return_value = True
+         patch("eufy_sync.cli.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        _self_update()
 
-        _check_for_updates()
+    # Installs the exact latest version so a stale index cannot no-op the update.
+    assert mock_run.call_args.args[0] == ["pipx", "install", "--force", "eufy-sync==9.9.9"]
 
-    assert "pipx install --force" in capsys.readouterr().out
+
+def test_self_update_noop_when_already_latest(capsys):
+    from eufy_sync import __version__
+    from eufy_sync.cli import _self_update
+    with patch("eufy_sync.cli._latest_pypi_version", return_value=__version__), \
+         patch("eufy_sync.cli.subprocess.run") as mock_run:
+        _self_update()
+
+    assert "Already on the latest" in capsys.readouterr().out
+    mock_run.assert_not_called()
 
 
 def test_handles_pypi_prerelease_version(tmp_path: Path, capsys):
@@ -144,16 +153,25 @@ def test_handles_pypi_prerelease_version(tmp_path: Path, capsys):
     assert cache_file.exists()
 
 
-def test_suggests_pip_when_no_pipx(tmp_path: Path, capsys):
-    cache_file = tmp_path / "update_check"
-    cache_file.write_text(str(time.time() - UPDATE_CHECK_INTERVAL - 1))
-
-    with patch("eufy_sync.cli.DATA_DIR", tmp_path), \
-         patch("eufy_sync.cli.urllib.request.urlopen", return_value=_mock_pypi_response("99.0.0")), \
+def test_self_update_uses_pip_when_no_pipx():
+    import sys as _sys
+    from eufy_sync.cli import _self_update
+    with patch("eufy_sync.cli._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
          patch("eufy_sync.cli.shutil.which", return_value=None), \
-         patch("eufy_sync.cli.sys.stdin") as mock_stdin:
-        mock_stdin.isatty.return_value = True
+         patch("eufy_sync.cli.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        _self_update()
 
-        _check_for_updates()
+    cmd = mock_run.call_args.args[0]
+    assert cmd[:3] == [_sys.executable, "-m", "pip"]
+    assert "eufy-sync==9.9.9" in cmd
 
-    assert "pip install --upgrade" in capsys.readouterr().out
+
+def test_self_update_silent_when_pypi_unreachable(capsys):
+    from eufy_sync.cli import _self_update
+    with patch("eufy_sync.cli._latest_pypi_version", return_value=None), \
+         patch("eufy_sync.cli.subprocess.run") as mock_run:
+        _self_update()
+
+    assert "Could not reach PyPI" in capsys.readouterr().out
+    mock_run.assert_not_called()
