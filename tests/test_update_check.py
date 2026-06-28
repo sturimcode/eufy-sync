@@ -175,3 +175,14 @@ def test_self_update_silent_when_pypi_unreachable(capsys):
 
     assert "Could not reach PyPI" in capsys.readouterr().out
     mock_run.assert_not_called()
+
+
+def test_self_update_reports_failed_install(capsys):
+    from eufy_sync.cli import _self_update
+    with patch("eufy_sync.cli._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.shutil.which", return_value="/usr/local/bin/pipx"), \
+         patch("eufy_sync.cli.subprocess.run", return_value=MagicMock(returncode=1)):
+        _self_update()
+
+    assert "Update failed" in capsys.readouterr().out

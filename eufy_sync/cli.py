@@ -118,6 +118,9 @@ def _self_update() -> None:
     if latest == __version__:
         print(f"Already on the latest version (v{__version__}).")
         return
+    if not re.match(r"^\d+(?:\.\d+)*", latest):
+        print(f"Unexpected version from PyPI ({latest!r}); update manually with pipx.")
+        return
 
     if shutil.which("pipx"):
         cmd = ["pipx", "install", "--force", f"eufy-sync=={latest}"]
