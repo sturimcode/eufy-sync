@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from eufy_sync.config import EufyConfig, StravaConfig, UserConfig
+from eufy_sync.config import EufyConfig, GarminConfig, StravaConfig, UserConfig
 from eufy_sync.eufy_client import EufyMeasurement
 from eufy_sync.state import SyncState
 from eufy_sync.sync import sync_user
@@ -182,9 +182,7 @@ def test_strava_receives_measurements_in_chronological_order(tmp_path: Path):
     with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
          patch("eufy_sync.strava_client.StravaClient", return_value=fake_strava), \
          patch("eufy_sync.sync.time.sleep"):
-        counts, errors = sync_user(user, state, backfill_days=7)
-
-    assert errors == {}, f"expected no errors, got {errors}"
+        counts = sync_user(user, state, backfill_days=7)
 
     weights_uploaded = [call.args[0] for call in fake_strava.update_weight.call_args_list]
     assert weights_uploaded == [85.0, 85.5, 86.0], (
@@ -222,143 +220,3 @@ def test_rate_limit_error_is_permanent():
     assert _is_permanent(GarminConnectTooManyRequestsError("429")) is True
 
 
-from eufy_sync.config import ZwiftConfig
-
-
-def test_zwift_gets_exactly_one_put_per_sync(tmp_path: Path):
-    """Zwift's profile endpoint is heavy - we update once per sync, not once per measurement."""
-    state = SyncState(tmp_path / "test.db")
-
-    measurements = [
-        _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc)),
-        _measurement(85.5, datetime(2026, 5, 11, 8, 0, tzinfo=timezone.utc)),
-        _measurement(86.0, datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)),
-    ]
-
-    user = UserConfig(
-        name="default",
-        eufy=EufyConfig(email="e@example.com", password="pw"),
-        zwift=ZwiftConfig(email="z@example.com", password="zpw"),
-    )
-
-    fake_eufy = MagicMock()
-    fake_eufy.fetch_measurements.return_value = list(measurements)
-
-    fake_zwift = MagicMock()
-    fake_zwift.update_weight.return_value = {"weight": 86000}
-
-    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
-         patch("eufy_sync.zwift_client.ZwiftClient", return_value=fake_zwift), \
-         patch("eufy_sync.sync.time.sleep"):
-        counts, errors = sync_user(user, state, backfill_days=7)
-
-    assert fake_zwift.update_weight.call_count == 1, "Zwift should be PUT exactly once per sync"
-    assert fake_zwift.update_weight.call_args.args[0] == 86.0, "Should send the newest weight"
-    assert counts["zwift"] == 1
-    assert errors == {}
-    # All three measurements must be marked synced for Zwift
-    for m in measurements:
-        assert state.is_synced("default", m.measurement_id, "zwift")
-    state.close()
-
-
-def test_zwift_new_install_triggers_backfill(tmp_path: Path):
-    """Adding Zwift to an existing install must trigger the 7-day backfill window."""
-    from eufy_sync.config import GarminConfig
-
-    state = SyncState(tmp_path / "test.db")
-
-    # Seed a recent Garmin sync (yesterday) so the user is not brand-new.
-    # Without the fix, sync_user would use this recent timestamp as after_ts,
-    # NOT the 7-day backfill window.
-    import time as _time
-    yesterday_iso = datetime.fromtimestamp(_time.time() - 86400, tz=timezone.utc).isoformat()
-    state.record_sync(
-        user_name="default",
-        measurement_id="m_old",
-        measurement_timestamp=yesterday_iso,
-        weight_kg=86.0,
-        synced_at=yesterday_iso,
-        target="garmin",
-        response='{"ok": true}',
-    )
-
-    user = UserConfig(
-        name="default",
-        eufy=EufyConfig(email="e@example.com", password="pw"),
-        garmin=GarminConfig(email="g@example.com", password="gpw"),
-        zwift=ZwiftConfig(email="z@example.com", password="zpw"),
-    )
-
-    fake_eufy = MagicMock()
-    fake_eufy.authenticate.return_value = None
-    fake_eufy.fetch_measurements.return_value = []
-    fake_eufy.close.return_value = None
-
-    fake_garmin = MagicMock()
-    fake_garmin.authenticate.return_value = None
-    fake_garmin.has_weight_on_date.return_value = False
-    fake_garmin.close.return_value = None
-
-    fake_zwift = MagicMock()
-    fake_zwift.authenticate.return_value = None
-    fake_zwift.update_weight.return_value = {}
-    fake_zwift.close.return_value = None
-
-    before = _time.time()
-
-    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
-         patch("eufy_sync.garmin_client.GarminClient", return_value=fake_garmin), \
-         patch("eufy_sync.zwift_client.ZwiftClient", return_value=fake_zwift), \
-         patch("eufy_sync.sync.time.sleep"):
-        sync_user(user, state, backfill_days=None)
-
-    after_ts = fake_eufy.fetch_measurements.call_args.kwargs.get(
-        "after_timestamp",
-        fake_eufy.fetch_measurements.call_args.args[0] if fake_eufy.fetch_measurements.call_args.args else None,
-    )
-    # With no backfill, a recent-only pull would use the last Garmin sync timestamp
-    # (around 2026-06-20, which is ~7 days ago). But new_target must force a
-    # 7-day lookback from *now*, so after_ts must be within the last 7 days AND
-    # be earlier than (before - 6*86400), i.e. at least 6 days back from now.
-    six_days_ago = before - (6 * 86400)
-    assert after_ts is not None, "fetch_measurements must receive an after_timestamp"
-    assert after_ts <= six_days_ago, (
-        f"Expected a 7-day backfill (after_ts <= {six_days_ago:.0f}), got {after_ts}"
-    )
-
-    state.close()
-
-
-def test_zwift_failure_does_not_block_strava(tmp_path: Path):
-    """A Zwift exception must not prevent Strava sync from completing."""
-    state = SyncState(tmp_path / "test.db")
-
-    measurement = _measurement(86.0, datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc))
-
-    user = UserConfig(
-        name="default",
-        eufy=EufyConfig(email="e@example.com", password="pw"),
-        strava=StravaConfig(client_id="cid", client_secret="csec"),
-        zwift=ZwiftConfig(email="z@example.com", password="zpw"),
-    )
-
-    fake_eufy = MagicMock()
-    fake_eufy.fetch_measurements.return_value = [measurement]
-
-    fake_strava = MagicMock()
-    fake_strava.update_weight.return_value = {"weight": 86}
-
-    fake_zwift = MagicMock()
-    fake_zwift.authenticate.side_effect = RuntimeError("Zwift exploded")
-
-    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
-         patch("eufy_sync.strava_client.StravaClient", return_value=fake_strava), \
-         patch("eufy_sync.zwift_client.ZwiftClient", return_value=fake_zwift), \
-         patch("eufy_sync.sync.time.sleep"):
-        counts, errors = sync_user(user, state, backfill_days=7)
-
-    assert counts.get("strava") == 1, "Strava must have succeeded"
-    assert "zwift" in errors, f"Zwift error must be reported; got {errors}"
-    assert "Zwift exploded" in errors["zwift"]
-    state.close()

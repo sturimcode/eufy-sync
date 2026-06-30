@@ -28,18 +28,11 @@ class StravaConfig:
 
 
 @dataclass
-class ZwiftConfig:
-    email: str
-    password: str
-
-
-@dataclass
 class UserConfig:
     name: str
     eufy: EufyConfig
     garmin: GarminConfig | None = None
     strava: StravaConfig | None = None
-    zwift: ZwiftConfig | None = None
 
 
 @dataclass
@@ -122,17 +115,10 @@ def load_config(path: Path) -> AppConfig:
                 client_secret=u["strava"]["client_secret"],
             )
 
-        zwift = None
-        if "zwift" in u:
-            zwift = ZwiftConfig(
-                email=u["zwift"]["email"],
-                password=_get_password(name, "zwift", u["zwift"]["email"], u["zwift"].get("password")),
-            )
-
-        if not garmin and not strava and not zwift:
+        if not garmin and not strava:
             raise ValueError(
                 f"User '{name}' has no sync targets configured. "
-                f"Add a 'garmin', 'strava', and/or 'zwift' section to your config."
+                f"Add a 'garmin' and/or 'strava' section to your config."
             )
 
         users.append(UserConfig(
@@ -144,7 +130,6 @@ def load_config(path: Path) -> AppConfig:
             ),
             garmin=garmin,
             strava=strava,
-            zwift=zwift,
         ))
 
     return AppConfig(

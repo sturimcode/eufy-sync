@@ -189,7 +189,6 @@ def test_uninstall_clears_keychain_for_configured_user_name(
             "name": "elias",
             "eufy": {"email": "e@example.com"},
             "garmin": {"email": "g@example.com"},
-            "zwift": {"email": "z@example.com"},
         }],
     })
 
@@ -200,7 +199,6 @@ def test_uninstall_clears_keychain_for_configured_user_name(
         f"_uninstall should clear keychain for the configured username, got {deleted_accounts}"
     )
     assert "elias:garmin" in deleted_accounts
-    assert "elias:zwift" in deleted_accounts
 
 
 def test_prompt_profile_choice_returns_selected_customer_id():
@@ -343,7 +341,7 @@ def test_interactive_ambiguous_profile_resolves_and_syncs(
         seen_customer_ids.append(user.eufy.customer_id)
         if len(seen_customer_ids) == 1:
             raise AmbiguousProfileError(profiles)
-        return {"garmin": 1}, {}
+        return {"garmin": 1}
 
     argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path)]
     with patch("eufy_sync.sync.sync_user", side_effect=fake_sync_user), \

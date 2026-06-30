@@ -91,37 +91,3 @@ def test_load_config_customer_id_coerced_to_str(_keyring, tmp_path: Path):
     assert cfg.users[0].eufy.customer_id == "12345"
 
 
-@patch("eufy_sync.credentials._keyring_available", return_value=False)
-def test_load_config_with_zwift_only(_keyring, tmp_path: Path):
-    path = tmp_path / "config.yaml"
-    _write(path, {
-        "users": [{
-            "name": "default",
-            "eufy": {"email": "e@example.com", "password": "pw"},
-            "zwift": {"email": "z@example.com", "password": "zwiftpw"},
-        }],
-    })
-    cfg = load_config(path)
-    assert cfg.users[0].zwift is not None
-    assert cfg.users[0].zwift.email == "z@example.com"
-    assert cfg.users[0].zwift.password == "zwiftpw"
-    assert cfg.users[0].garmin is None
-    assert cfg.users[0].strava is None
-
-
-@patch("eufy_sync.credentials._keyring_available", return_value=False)
-def test_load_config_with_all_three_targets(_keyring, tmp_path: Path):
-    path = tmp_path / "config.yaml"
-    _write(path, {
-        "users": [{
-            "name": "default",
-            "eufy": {"email": "e@example.com", "password": "pw"},
-            "garmin": {"email": "g@example.com", "password": "pw"},
-            "strava": {"client_id": "12345", "client_secret": "ssec"},
-            "zwift": {"email": "z@example.com", "password": "zwiftpw"},
-        }],
-    })
-    cfg = load_config(path)
-    assert cfg.users[0].garmin is not None
-    assert cfg.users[0].strava is not None
-    assert cfg.users[0].zwift is not None
