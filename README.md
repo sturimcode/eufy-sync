@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/pypi/pyversions/eufy-sync)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Syncs body composition from a Eufy smart scale to Garmin Connect, Strava, and Zwift.
+Syncs body composition from a Eufy smart scale to Garmin Connect and Strava.
 
 > macOS only. Needs Python 3.12+ and a terminal.
 
@@ -15,13 +15,10 @@ Syncs body composition from a Eufy smart scale to Garmin Connect, Strava, and Zw
 |--------|------------|-----------|
 | Garmin Connect | Full body composition: weight, body fat, muscle mass, bone mass, hydration, BMR, visceral fat, metabolic age | Stable |
 | Strava | Weight | Stable |
-| Zwift | Weight | Unofficial, may break |
-
-Zwift has no public API. eufy-sync uses a reverse-engineered endpoint that can change with any Zwift release. If it breaks, Garmin and Strava keep syncing.
 
 ## Why
 
-Eufy scales sync to Apple Health, Fitbit, and Google Fit, but not Garmin, Strava, or Zwift. If you train on any of those, your body comp is stuck in a separate app. This fixes that.
+Eufy scales sync to Apple Health, Fitbit, and Google Fit, but not Garmin or Strava. If you train on either, your body comp is stuck in a separate app. This fixes that.
 
 ## How Garmin login works
 
@@ -31,7 +28,7 @@ eufy-sync logs in through [python-garminconnect](https://github.com/cyberjunky/p
 
 ## Install
 
-You need Python 3.12+, a Eufy scale with cloud sync, and a Garmin and/or Strava account.
+You need Python 3.12+, a Eufy scale with cloud sync, and a Garmin Connect and/or Strava account.
 
 ```bash
 brew install pipx        # or: pip3 install pipx
@@ -53,9 +50,8 @@ eufy-sync --status             # last sync + token health
 eufy-sync --dry-run            # preview without uploading
 eufy-sync --update             # update to the latest version
 eufy-sync --setup-strava       # add Strava
-eufy-sync --setup-zwift        # add Zwift
 eufy-sync --select-profile     # pick your profile on a shared scale
-eufy-sync --reauth [target]    # re-login (all, or garmin / strava / zwift)
+eufy-sync --reauth [target]    # re-login (all, or garmin / strava)
 eufy-sync --update-password    # change stored passwords
 eufy-sync --backfill-days 30   # sync the last 30 days
 eufy-sync --verbose            # detailed logs
@@ -90,15 +86,15 @@ If Garmin is already set up and you want Strava:
 ```
 Eufy Cloud  ->  eufy_client.py  ->  transform  ->  garmin_client.py  ->  Garmin (FIT)
 (pull)          (auth)              (filter,    ->  strava_client.py  ->  Strava (weight)
-                                    dedup,      ->  zwift_client.py   ->  Zwift  (weight)
+                                    dedup,
                                     state.db)
 ```
 
-On each run it pulls your Eufy history and checks a local SQLite DB for what each target already has, then uploads only what is new: a FIT file to Garmin (skipping dates Garmin already holds, so two machines do not double up), and the latest weight to Strava and Zwift. Every sync is recorded in the DB.
+On each run it pulls your Eufy history and checks a local SQLite DB for what each target already has, then uploads only what is new: a FIT file to Garmin (skipping dates Garmin already holds, so two machines do not double up), and the latest weight to Strava. Every sync is recorded in the DB.
 
 ## Security
 
-Passwords and OAuth tokens live in your macOS Keychain, not plaintext files. The config in `~/.garmin-sync/` holds only email addresses and Strava app credentials, at `600` permissions. Credentials go over HTTPS to Eufy, Garmin, Strava, and Zwift only, and are never logged or sent anywhere else. The one other outbound call is a weekly version check to pypi.org, with no credentials. On a host without a keychain (headless Linux), credentials fall back to a `600` file.
+Passwords and OAuth tokens live in your macOS Keychain, not plaintext files. The config in `~/.garmin-sync/` holds only email addresses and Strava app credentials, at `600` permissions. Credentials go over HTTPS to Eufy, Garmin, and Strava only, and are never logged or sent anywhere else. The one other outbound call is a weekly version check to pypi.org, with no credentials. On a host without a keychain (headless Linux), credentials fall back to a `600` file.
 
 ## Known quirks
 
@@ -116,4 +112,4 @@ pytest tests/ -v
 
 ## Disclaimer
 
-Uses unofficial APIs for Eufy, Garmin, and Zwift, and the official Strava API. Could break if any of them change things. Use at your own risk.
+Uses unofficial APIs for Eufy and Garmin, and the official Strava API. Could break if any of them change things. Use at your own risk.
