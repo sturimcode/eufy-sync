@@ -188,9 +188,15 @@ class StravaClient:
 
         if resp.status_code != 200:
             logger.debug("Strava token refresh failed: %d %s", resp.status_code, resp.text)
+            if resp.status_code in (400, 401):
+                # The grant itself is dead - only re-authorizing will fix it.
+                raise RuntimeError(
+                    f"Failed to refresh Strava token (HTTP {resp.status_code}). "
+                    f"Re-authorize with: eufy-sync --setup-strava"
+                )
             raise RuntimeError(
-                f"Failed to refresh Strava token (HTTP {resp.status_code}). "
-                f"Re-authorize with: eufy-sync --setup-strava"
+                f"Temporary Strava failure refreshing the access token "
+                f"(HTTP {resp.status_code}). This is not a revoked grant; retrying later should work."
             )
 
         data = resp.json()

@@ -17,10 +17,15 @@ SERVICE_NAME = "eufy-garmin-sync"
 def _keyring_available() -> bool:
     try:
         import keyring
-        # Test that the backend works (not the null/fail backend)
+        # Test that the backend works (not the null/fail backend). The
+        # no-backend class is keyring.backends.fail.Keyring, whose __name__
+        # is just "Keyring" - checking the name alone misses it, so the
+        # module is checked too (that's where "fail"/"null" actually shows).
         backend = keyring.get_keyring()
-        name = type(backend).__name__
-        if "fail" in name.lower() or "null" in name.lower():
+        backend_cls = type(backend)
+        name = backend_cls.__name__.lower()
+        module = (backend_cls.__module__ or "").lower()
+        if "fail" in name or "null" in name or "fail" in module or "null" in module:
             return False
         return True
     except Exception:

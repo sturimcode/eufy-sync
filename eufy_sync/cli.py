@@ -494,8 +494,14 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
         if force:
             status = auth.token_status()
             if status["state"] == "valid":
-                print("Garmin is already connected. Re-authenticate anyway? [y/N] ", end="")
-                if sys.stdin.isatty():
+                if not sys.stdin.isatty():
+                    # Honor the documented default (No) when there's no one
+                    # to answer the prompt, instead of silently proceeding
+                    # as "yes" and destroying a valid token.
+                    print("Garmin re-auth skipped (already connected; run interactively to force).")
+                    do_garmin = False
+                else:
+                    print("Garmin is already connected. Re-authenticate anyway? [y/N] ", end="")
                     answer = input().strip()
                     if not answer.lower().startswith("y"):
                         print("Garmin re-auth skipped.")
@@ -853,7 +859,7 @@ def _show_history(state, users: list, limit: int = 14) -> None:
 
 def _migrate_config_passwords(config_path: Path) -> None:
     """One-time migration: move passwords from config.yaml to keychain."""
-    from eufy_sync.credentials import store_password, get_password, _keyring_available
+    from eufy_sync.credentials import store_password, _keyring_available
 
     if not _keyring_available():
         return
@@ -870,8 +876,10 @@ def _migrate_config_passwords(config_path: Path) -> None:
             pw = user.get(service, {}).get("password")
             if pw:
                 key = f"{name}:{service}"
-                if not get_password(key):
-                    store_password(key, pw)
+                # Always store the YAML value, even over a stale keychain
+                # entry - the file edit is the newer intent. Otherwise a
+                # corrected password in the file is silently discarded.
+                store_password(key, pw)
                 del user[service]["password"]
                 changed = True
 
@@ -983,17 +991,31 @@ def main() -> None:
 
     # First-run setup if no config exists
     first_run = not config_path.exists()
-    if first_run:
-        _first_run_setup(config_path)
-    else:
-        # Migrate existing plaintext passwords to keychain (one-time)
-        _migrate_config_passwords(config_path)
-        # One-time upgrade notice for users coming from eufy-garmin-sync
-        _show_upgrade_notice()
+    if first_run and args.headless:
+        msg = "No config found. Run eufy-sync in a terminal to set up."
+        print(msg)
+        _notify("eufy-sync", msg)
+        sys.exit(1)
 
-    # Load config (passwords resolved from keychain or YAML fallback)
-    from eufy_sync.config import AppConfig, load_config
-    config = load_config(config_path)
+    try:
+        if first_run:
+            _first_run_setup(config_path)
+        else:
+            # Migrate existing plaintext passwords to keychain (one-time)
+            _migrate_config_passwords(config_path)
+            # One-time upgrade notice for users coming from eufy-garmin-sync
+            _show_upgrade_notice()
+
+        # Load config (passwords resolved from keychain or YAML fallback)
+        from eufy_sync.config import AppConfig, load_config
+        config = load_config(config_path)
+    except SystemExit:
+        raise
+    except Exception as e:
+        msg = f"eufy-sync could not start: {e}"
+        print(msg)
+        _notify("eufy-sync failed", str(e)[:200])
+        sys.exit(1)
 
     has_garmin = any(u.garmin for u in config.users)
 
@@ -1028,16 +1050,24 @@ def main() -> None:
     if first_run and backfill is None:
         backfill = 7
 
-    state = SyncState(db_path)
+    try:
+        state = SyncState(db_path)
+    except Exception as e:
+        msg = f"eufy-sync could not start: {e}"
+        print(msg)
+        _notify("eufy-sync failed", str(e)[:200])
+        sys.exit(1)
 
     try:
         total_counts: dict[str, int] = {}
         failures = []
         for user in config.users:
             try:
-                counts = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
                 for target_name, count in counts.items():
                     total_counts[target_name] = total_counts.get(target_name, 0) + count
+                for target_name, err in errors.items():
+                    failures.append((f"{user.name}/{target_name}", err))
                 logger.info("User %s: synced %s", user.name, counts)
             except AmbiguousProfileError as e:
                 interactive = not args.headless and sys.stdin.isatty()
@@ -1048,9 +1078,11 @@ def main() -> None:
                     user.eufy.customer_id = customer_id
                     print("Saved. Syncing your profile now...")
                     try:
-                        counts = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                        counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
                         for target_name, count in counts.items():
                             total_counts[target_name] = total_counts.get(target_name, 0) + count
+                        for target_name, err in errors.items():
+                            failures.append((f"{user.name}/{target_name}", err))
                         logger.info("User %s: synced %s", user.name, counts)
                     except Exception as retry_error:
                         logger.exception("Failed to sync user %s after profile selection", user.name)

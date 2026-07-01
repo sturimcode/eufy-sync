@@ -54,29 +54,52 @@ def _retry(fn, description: str):
             time.sleep(delay)
 
 
-def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False) -> dict[str, int]:
+def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False) -> tuple[dict[str, int], dict[str, str]]:
     """Sync one user's Eufy data to configured targets.
 
-    Returns a dict mapping target name to the number of measurements synced.
+    Returns (counts, errors): counts maps target name to the number of
+    measurements synced; errors maps target name to a failure message for
+    any target whose authenticate() call failed. The two dicts are disjoint
+    over target names - a target with an error was dropped from the run and
+    has no count.
     """
     eufy = EufyClient(user.eufy)
 
-    targets: list[tuple[str, object]] = []
+    all_targets: list[tuple[str, object]] = []
     if user.garmin:
         from eufy_sync.garmin_client import GarminClient
-        targets.append(("garmin", GarminClient(user.garmin)))
+        all_targets.append(("garmin", GarminClient(user.garmin)))
     if user.strava:
         from eufy_sync.strava_client import StravaClient
-        targets.append(("strava", StravaClient(user.strava)))
+        all_targets.append(("strava", StravaClient(user.strava)))
+
+    targets: list[tuple[str, object]] = []
 
     try:
         logger.info("Syncing user: %s", user.name)
         eufy.authenticate()
-        for target_name, client in targets:
-            if target_name == "garmin":
-                client.authenticate(allow_interactive=not headless)
-            else:
-                client.authenticate()
+
+        errors: dict[str, str] = {}
+        first_exception: BaseException | None = None
+        for target_name, client in all_targets:
+            try:
+                if target_name == "garmin":
+                    client.authenticate(allow_interactive=not headless)
+                else:
+                    client.authenticate()
+                targets.append((target_name, client))
+            except Exception as e:
+                logger.error("Authentication failed for %s/%s: %s", user.name, target_name, e)
+                errors[target_name] = str(e)
+                if first_exception is None:
+                    first_exception = e
+
+        if not targets:
+            # Every target failed auth - whole-user failure. Re-raise the
+            # first exception as-is (not wrapped) so callers that check the
+            # original type (AmbiguousProfileError, PermanentSyncError,
+            # GarminConnectTooManyRequestsError) still work.
+            raise first_exception
 
         # Determine how far back to fetch
         after_timestamp: int | None = None
@@ -179,9 +202,9 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 # Small delay between uploads to avoid rate limiting
                 time.sleep(1 if target_name == "garmin" else 0.5)
 
-        return counts
+        return counts, errors
 
     finally:
         eufy.close()
-        for _, client in targets:
+        for _, client in all_targets:
             client.close()

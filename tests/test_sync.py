@@ -206,7 +206,9 @@ def test_strava_receives_measurements_in_chronological_order(tmp_path: Path):
     with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
          patch("eufy_sync.strava_client.StravaClient", return_value=fake_strava), \
          patch("eufy_sync.sync.time.sleep"):
-        counts = sync_user(user, state, backfill_days=7)
+        counts, errors = sync_user(user, state, backfill_days=7)
+
+    assert errors == {}
 
     weights_uploaded = [call.args[0] for call in fake_strava.update_weight.call_args_list]
     assert weights_uploaded == [85.0, 85.5, 86.0], (
@@ -267,7 +269,7 @@ def _run_garmin_sync(user, state, measurements, has_weight_on_date_return):
     with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
          patch("eufy_sync.garmin_client.GarminClient", return_value=fake_garmin), \
          patch("eufy_sync.sync.time.sleep"):
-        sync_user(user, state, backfill_days=7)
+        sync_user(user, state, backfill_days=7)  # returns (counts, errors); not needed here
 
     return fake_garmin
 
@@ -303,6 +305,84 @@ def test_corrected_same_day_reweigh_still_uploads_to_garmin(tmp_path: Path):
     )
     response = cursor.fetchone()[0]
     assert response != '{"skipped": "already_in_garmin"}'
+
+    state.close()
+
+
+def _garmin_and_strava_user() -> UserConfig:
+    return UserConfig(
+        name="default",
+        eufy=EufyConfig(email="e@example.com", password="pw"),
+        garmin=GarminConfig(email="g@example.com", password="pw"),
+        strava=StravaConfig(client_id="cid", client_secret="csec"),
+    )
+
+
+def test_one_target_auth_failure_does_not_block_the_other(tmp_path: Path):
+    """A dead Strava token must not prevent Garmin from syncing. sync_user
+    returns (counts, errors); the surviving target still uploads."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_and_strava_user()
+
+    measurement = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+
+    fake_eufy = MagicMock()
+    fake_eufy.authenticate.return_value = None
+    fake_eufy.fetch_measurements.return_value = [measurement]
+    fake_eufy.close.return_value = None
+
+    fake_garmin = MagicMock()
+    fake_garmin.authenticate.return_value = None
+    fake_garmin.has_weight_on_date.return_value = False
+    fake_garmin.upload_body_composition.return_value = {"ok": True}
+    fake_garmin.close.return_value = None
+
+    fake_strava = MagicMock()
+    fake_strava.authenticate.side_effect = RuntimeError("Strava token revoked")
+    fake_strava.close.return_value = None
+
+    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=fake_garmin), \
+         patch("eufy_sync.strava_client.StravaClient", return_value=fake_strava), \
+         patch("eufy_sync.sync.time.sleep"):
+        counts, errors = sync_user(user, state, backfill_days=7)
+
+    assert counts["garmin"] == 1
+    assert "strava" not in counts
+    assert "Strava token revoked" in errors["strava"]
+    fake_garmin.upload_body_composition.assert_called_once()
+    fake_strava.update_weight.assert_not_called()
+
+    state.close()
+
+
+def test_all_targets_auth_failure_raises(tmp_path: Path):
+    """If every target fails to authenticate, sync_user raises (whole-user
+    failure) rather than silently doing nothing."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_and_strava_user()
+
+    fake_eufy = MagicMock()
+    fake_eufy.authenticate.return_value = None
+    fake_eufy.close.return_value = None
+
+    fake_garmin = MagicMock()
+    fake_garmin.authenticate.side_effect = RuntimeError("Garmin dead token")
+    fake_garmin.close.return_value = None
+
+    fake_strava = MagicMock()
+    fake_strava.authenticate.side_effect = RuntimeError("Strava dead token")
+    fake_strava.close.return_value = None
+
+    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=fake_garmin), \
+         patch("eufy_sync.strava_client.StravaClient", return_value=fake_strava), \
+         patch("eufy_sync.sync.time.sleep"):
+        try:
+            sync_user(user, state, backfill_days=7)
+            assert False, "Should have raised"
+        except RuntimeError as e:
+            assert "Garmin dead token" in str(e)
 
     state.close()
 

@@ -317,6 +317,104 @@ def _write_synced_config(tmp_path: Path):
     return config_path
 
 
+@patch("eufy_sync.credentials._keyring_available", return_value=True)
+def test_migration_overwrites_stale_keychain_entry_with_yaml_value(_keyring, tmp_path):
+    """A user who corrects a password in the YAML file must have that new
+    value win, even if the keychain already has a (now-stale) entry for the
+    same account. The old behavior only stored to the keychain when nothing
+    was there yet, then deleted the YAML key regardless - silently keeping
+    the stale keychain value."""
+    from eufy_sync.cli import _migrate_config_passwords
+
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {
+        "users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com", "password": "new-corrected-password"},
+        }],
+    })
+
+    with patch("eufy_sync.credentials.get_password", return_value="stale-old-password"), \
+         patch("eufy_sync.credentials.store_password") as mock_store:
+        _migrate_config_passwords(config_path)
+
+    mock_store.assert_called_once_with("default:eufy", "new-corrected-password")
+
+    written = yaml.safe_load(config_path.read_text())
+    assert "password" not in written["users"][0]["eufy"]
+
+
+def test_reauth_confirmation_on_non_tty_defaults_to_no():
+    """The prompt's documented default is No ([y/N]). On a non-tty run there
+    is no human to answer, so it must skip re-auth rather than proceeding as
+    if 'yes' had been typed - that would destroy a valid token unattended."""
+    from eufy_sync.cli import _reauth
+
+    config = {
+        "users": [{
+            "name": "default",
+            "garmin": {"email": "g@example.com"},
+        }],
+    }
+
+    mock_auth = MagicMock()
+    mock_auth.token_status.return_value = {"state": "valid"}
+
+    with patch("eufy_sync.garmin_auth.GarminAuth", return_value=mock_auth), \
+         patch("eufy_sync.config._get_password", return_value="pw"), \
+         patch("eufy_sync.cli.sys.stdin") as mock_stdin:
+        mock_stdin.isatty.return_value = False
+        _reauth(Path("/nonexistent"), config=config, force=True)
+
+    mock_auth.force_reauth.assert_not_called()
+
+
+@patch("eufy_sync.cli._notify")
+def test_headless_first_run_refuses_wizard(mock_notify, tmp_path):
+    """A headless run with no config must never call input() - it should
+    print guidance, notify, and exit 1 instead of hanging in the wizard."""
+    from eufy_sync.cli import main
+
+    config_path = tmp_path / "config.yaml"
+    db_path = tmp_path / "state.db"
+
+    def boom_input(*a, **k):
+        raise AssertionError("input() must not be called in headless first-run")
+
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path), "--headless"]
+    with patch("sys.argv", argv), \
+         patch("builtins.input", side_effect=boom_input), \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    assert not config_path.exists()
+    mock_notify.assert_called()
+
+
+@patch("eufy_sync.cli._notify")
+def test_startup_failure_before_harness_notifies_and_exits(mock_notify, tmp_path):
+    """A load_config failure (e.g. missing keychain entry -> ValueError) that
+    happens before the sync try/except harness must still notify and exit 1,
+    not escape as a raw traceback."""
+    from eufy_sync.cli import main
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("users:\n  - name: default\n    eufy:\n      email: e@example.com\n")
+    db_path = tmp_path / "state.db"
+
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path)]
+    with patch("sys.argv", argv), \
+         patch("eufy_sync.cli._migrate_config_passwords"), \
+         patch("eufy_sync.cli._show_upgrade_notice"), \
+         patch("eufy_sync.config.load_config", side_effect=ValueError("no password found")), \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    mock_notify.assert_called()
+
+
 @patch("eufy_sync.cli._print_summary")
 @patch("eufy_sync.cli._notify")
 @patch("eufy_sync.cli._check_for_updates")
@@ -341,7 +439,7 @@ def test_interactive_ambiguous_profile_resolves_and_syncs(
         seen_customer_ids.append(user.eufy.customer_id)
         if len(seen_customer_ids) == 1:
             raise AmbiguousProfileError(profiles)
-        return {"garmin": 1}
+        return {"garmin": 1}, {}
 
     argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path)]
     with patch("eufy_sync.sync.sync_user", side_effect=fake_sync_user), \
