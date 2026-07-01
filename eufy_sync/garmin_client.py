@@ -40,7 +40,9 @@ class GarminClient:
 
     def has_weight_on_date(self, dt: datetime) -> bool:
         """Whether Garmin already has a weight entry for the date."""
-        date_str = dt.strftime("%Y-%m-%d")
+        # Query by LOCAL calendar date: uploads are now filed under the local
+        # date (see transform.py), so the duplicate check must match that.
+        date_str = dt.astimezone().strftime("%Y-%m-%d")
         try:
             data = self._garmin.get_body_composition(date_str, date_str)
             entries = data.get("dateWeightList", data.get("dailyWeightSummaries", []))

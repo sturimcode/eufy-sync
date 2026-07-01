@@ -124,8 +124,19 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     counts[target_name] += 1
                     continue
 
-                # Garmin-specific: check for existing entry on this date
-                if target_name == "garmin" and client.has_weight_on_date(m.timestamp):
+                # Garmin-specific: check for existing entry on this date, but
+                # only when WE have not already synced something for that
+                # local date ourselves. Otherwise this guard cannot tell "our
+                # own earlier upload today" from "another source has this
+                # date", and a corrected same-day re-weigh would be
+                # permanently skipped. Garmin accepts multiple same-day
+                # entries and de-dupes by timestamp, so it is safe to upload
+                # again here.
+                if (
+                    target_name == "garmin"
+                    and not state.has_synced_on_date(user.name, "garmin", m.timestamp.astimezone().date())
+                    and client.has_weight_on_date(m.timestamp)
+                ):
                     logger.debug("Garmin already has data for %s, skipping", m.timestamp.date())
                     state.record_sync(
                         user_name=user.name,

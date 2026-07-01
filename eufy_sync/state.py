@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import date, datetime
 from pathlib import Path
 
 
@@ -77,6 +78,23 @@ class SyncState:
             (user_name, measurement_id, target),
         )
         return cursor.fetchone() is not None
+
+    def has_synced_on_date(self, user_name: str, target: str, local_date: date) -> bool:
+        """Whether WE have already synced something to target for this local
+        calendar date. Used to tell "our own earlier upload today" apart from
+        "another source already has this date in Garmin" (see the same-date
+        guard in sync.py). The table is small, so the date comparison is done
+        in Python rather than as date math against mixed-tz ISO strings in
+        SQL.
+        """
+        cursor = self._conn.execute(
+            "SELECT measurement_timestamp FROM sync_log WHERE user_name = ? AND target = ?",
+            (user_name, target),
+        )
+        for (ts,) in cursor.fetchall():
+            if datetime.fromisoformat(ts).astimezone().date() == local_date:
+                return True
+        return False
 
     def record_sync(
         self,

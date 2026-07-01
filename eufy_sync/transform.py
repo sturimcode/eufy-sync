@@ -41,7 +41,12 @@ def transform(measurement: EufyMeasurement) -> GarminBodyComposition | None:
         return None
 
     return GarminBodyComposition(
-        timestamp=measurement.timestamp.isoformat(),
+        # garminconnect's add_body_composition encodes the FIT timestamp with
+        # mktime(timetuple()), which reads the wall-clock fields as LOCAL
+        # time. measurement.timestamp is UTC-aware, so convert to local time
+        # first (same instant, local wall-clock fields) or the upload lands
+        # shifted by the machine's UTC offset.
+        timestamp=measurement.timestamp.astimezone().isoformat(),
         weight=measurement.weight_kg,
         percent_fat=_clamp_or_none(measurement.body_fat_pct, 3.0, 60.0),
         percent_hydration=_clamp_or_none(measurement.water_pct, 20.0, 80.0),

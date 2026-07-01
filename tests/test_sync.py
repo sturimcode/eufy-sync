@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -142,6 +142,30 @@ def test_get_history_empty(tmp_path: Path):
     state.close()
 
 
+def test_has_synced_on_date(tmp_path: Path):
+    """has_synced_on_date is true only for the local calendar date of a
+    recorded garmin sync, and only for the matching target."""
+    state = SyncState(tmp_path / "test.db")
+
+    recorded_dt = datetime(2024, 4, 1, 12, 0, 0, tzinfo=timezone.utc)
+    local_date = recorded_dt.astimezone().date()
+    other_date = (recorded_dt + timedelta(days=5)).astimezone().date()
+
+    assert state.has_synced_on_date("user1", "garmin", local_date) is False
+
+    state.record_sync(
+        "user1", "m1", recorded_dt.isoformat(), 86.2,
+        "2024-04-01T12:01:00+00:00", target="garmin",
+    )
+
+    assert state.has_synced_on_date("user1", "garmin", local_date) is True
+    assert state.has_synced_on_date("user1", "garmin", other_date) is False
+    # Different target, same date: no garmin record exists for it.
+    assert state.has_synced_on_date("user1", "strava", local_date) is False
+
+    state.close()
+
+
 def _measurement(weight_kg: float, dt: datetime) -> EufyMeasurement:
     return EufyMeasurement(
         measurement_id=f"cust_{int(dt.timestamp())}",
@@ -218,5 +242,92 @@ def test_rate_limit_error_is_permanent():
     from eufy_sync.sync import _is_permanent
     from garminconnect import GarminConnectTooManyRequestsError
     assert _is_permanent(GarminConnectTooManyRequestsError("429")) is True
+
+
+def _garmin_user() -> UserConfig:
+    return UserConfig(
+        name="default",
+        eufy=EufyConfig(email="e@example.com", password="pw"),
+        garmin=GarminConfig(email="g@example.com", password="pw"),
+    )
+
+
+def _run_garmin_sync(user, state, measurements, has_weight_on_date_return):
+    fake_eufy = MagicMock()
+    fake_eufy.authenticate.return_value = None
+    fake_eufy.fetch_measurements.return_value = measurements
+    fake_eufy.close.return_value = None
+
+    fake_garmin = MagicMock()
+    fake_garmin.authenticate.return_value = None
+    fake_garmin.has_weight_on_date.return_value = has_weight_on_date_return
+    fake_garmin.upload_body_composition.return_value = {"ok": True}
+    fake_garmin.close.return_value = None
+
+    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=fake_garmin), \
+         patch("eufy_sync.sync.time.sleep"):
+        sync_user(user, state, backfill_days=7)
+
+    return fake_garmin
+
+
+def test_corrected_same_day_reweigh_still_uploads_to_garmin(tmp_path: Path):
+    """A re-weigh later the same local day must still upload to Garmin even
+    though Garmin (per has_weight_on_date) already has an entry for that
+    date, as long as WE were the one who put it there (our sync_log has a
+    garmin record for that local date). This is the corrected-re-weigh case:
+    without the fix, the guard cannot tell our own earlier upload from
+    another source's and permanently skips the correction."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+
+    morning = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+    corrected = _measurement(84.7, datetime(2026, 5, 10, 8, 30, tzinfo=timezone.utc))
+
+    # Run 1: Garmin has nothing yet for the date, measurement A syncs normally.
+    fake_garmin_1 = _run_garmin_sync(user, state, [morning], has_weight_on_date_return=False)
+    fake_garmin_1.upload_body_composition.assert_called_once()
+    assert state.is_synced(user.name, morning.measurement_id, "garmin")
+
+    # Run 2: Garmin now reports an entry for the date (our own upload from
+    # run 1), but our sync_log also has a garmin record for that local date,
+    # so measurement B (the correction) must still be uploaded.
+    fake_garmin_2 = _run_garmin_sync(user, state, [corrected], has_weight_on_date_return=True)
+    fake_garmin_2.upload_body_composition.assert_called_once()
+
+    assert state.is_synced(user.name, corrected.measurement_id, "garmin")
+    cursor = state._conn.execute(
+        "SELECT response FROM sync_log WHERE eufy_measurement_id = ?",
+        (corrected.measurement_id,),
+    )
+    response = cursor.fetchone()[0]
+    assert response != '{"skipped": "already_in_garmin"}'
+
+    state.close()
+
+
+def test_other_source_same_day_entry_is_still_skipped(tmp_path: Path):
+    """When Garmin already has an entry for the date but WE never synced
+    anything for that local date ourselves (e.g. another source/device
+    uploaded it), the guard still applies and the measurement is recorded as
+    skipped."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+
+    measurement = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+
+    fake_garmin = _run_garmin_sync(user, state, [measurement], has_weight_on_date_return=True)
+    fake_garmin.upload_body_composition.assert_not_called()
+
+    assert state.is_synced(user.name, measurement.measurement_id, "garmin")
+    cursor = state._conn.execute(
+        "SELECT response FROM sync_log WHERE eufy_measurement_id = ?",
+        (measurement.measurement_id,),
+    )
+    response = cursor.fetchone()[0]
+    assert response == '{"skipped": "already_in_garmin"}'
+
+    state.close()
 
 
