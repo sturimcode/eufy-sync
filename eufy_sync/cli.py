@@ -122,7 +122,11 @@ def _self_update() -> None:
         print(f"Unexpected version from PyPI ({latest!r}); update manually with pipx.")
         return
 
-    if shutil.which("pipx"):
+    if "/uv/tools/" in sys.executable and shutil.which("uv"):
+        # Installed with `uv tool install`. Its venvs carry no pip, and pipx
+        # would create a second copy, so update through uv itself.
+        cmd = ["uv", "tool", "install", "--force", f"eufy-sync=={latest}"]
+    elif shutil.which("pipx"):
         cmd = ["pipx", "install", "--force", f"eufy-sync=={latest}"]
     else:
         cmd = [sys.executable, "-m", "pip", "install", "--upgrade", f"eufy-sync=={latest}"]

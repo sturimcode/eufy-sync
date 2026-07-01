@@ -153,6 +153,20 @@ def test_handles_pypi_prerelease_version(tmp_path: Path, capsys):
     assert cache_file.exists()
 
 
+def test_self_update_uses_uv_when_installed_via_uv_tool():
+    # A uv tool venv has no pip, and pipx would create a second copy; the
+    # updater must recognize its own install method and use uv.
+    from eufy_sync.cli import _self_update
+    with patch("eufy_sync.cli._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.sys.executable", "/Users/x/.local/share/uv/tools/eufy-sync/bin/python"), \
+         patch("eufy_sync.cli.shutil.which", return_value="/usr/local/bin/uv"), \
+         patch("eufy_sync.cli.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        _self_update()
+
+    assert mock_run.call_args.args[0] == ["uv", "tool", "install", "--force", "eufy-sync==9.9.9"]
+
+
 def test_self_update_uses_pip_when_no_pipx():
     import sys as _sys
     from eufy_sync.cli import _self_update
