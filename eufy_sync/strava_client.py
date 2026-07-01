@@ -82,7 +82,13 @@ def authorize_strava(config: StravaConfig) -> dict:
         def log_message(self, format, *args):
             pass  # Suppress HTTP server logging
 
-    server = HTTPServer(("localhost", CALLBACK_PORT), CallbackHandler)
+    try:
+        server = HTTPServer(("localhost", CALLBACK_PORT), CallbackHandler)
+    except OSError as e:
+        raise RuntimeError(
+            f"Could not start the local OAuth callback server on port {CALLBACK_PORT} "
+            f"({e}). Something else may already be using that port - close it and try again."
+        ) from e
 
     def _serve_until_done():
         while not captured_code and not captured_error:

@@ -310,10 +310,15 @@ def _setup_strava(config_path: Path) -> None:
 
     from eufy_sync.config import StravaConfig
     from eufy_sync.strava_client import authorize_strava
-    authorize_strava(StravaConfig(
-        client_id=strava_config["client_id"],
-        client_secret=strava_config["client_secret"],
-    ))
+    try:
+        authorize_strava(StravaConfig(
+            client_id=strava_config["client_id"],
+            client_secret=strava_config["client_secret"],
+        ))
+    except (RuntimeError, OSError) as e:
+        print(str(e))
+        print("Retry with: eufy-sync --setup-strava")
+        sys.exit(1)
     print("Strava connected! Future syncs will update both targets.")
 
 
@@ -523,7 +528,12 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
             client_id=str(user["strava"]["client_id"]),
             client_secret=user["strava"]["client_secret"],
         )
-        authorize_strava(strava_cfg)
+        try:
+            authorize_strava(strava_cfg)
+        except (RuntimeError, OSError) as e:
+            print(str(e))
+            print("Retry with: eufy-sync --reauth strava")
+            sys.exit(1)
         print("Done - Strava tokens saved.")
 
 
@@ -622,8 +632,13 @@ def _uninstall_launch_agent() -> None:
     print("Launch Agent removed. Auto-sync disabled.")
 
 
-def _uninstall(data_dir: Path) -> None:
-    """Remove all eufy-sync data: Launch Agent, config, tokens, state DB."""
+def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | None = None) -> None:
+    """Remove all eufy-sync data: Launch Agent, config, tokens, state DB.
+
+    config_path/db_path default to the standard files under data_dir, but a
+    custom --config/--db location (outside data_dir) is also deleted so
+    --uninstall does not leave those files behind.
+    """
     if not sys.stdin.isatty():
         print("Error: --uninstall requires an interactive terminal.")
         sys.exit(1)
@@ -641,9 +656,13 @@ def _uninstall(data_dir: Path) -> None:
         print("Cancelled.")
         return
 
+    default_config_path = data_dir / "config.yaml"
+    default_db_path = data_dir / "state.db"
+    config_path = config_path or default_config_path
+    db_path = db_path or default_db_path
+
     # Offer to keep state DB so reinstalls don't duplicate measurements
     keep_db = False
-    db_path = data_dir / "state.db"
     if db_path.exists():
         print("")
         keep_answer = input("Keep sync history? Prevents duplicates if you reinstall later. [Y/n] ").strip()
@@ -656,7 +675,6 @@ def _uninstall(data_dir: Path) -> None:
 
     # Clear keychain entries for every user named in the config
     user_names = ["default"]
-    config_path = data_dir / "config.yaml"
     if config_path.exists():
         try:
             with open(config_path) as f:
@@ -678,7 +696,7 @@ def _uninstall(data_dir: Path) -> None:
 
     # Remove data directory (preserving DB if requested)
     if data_dir.exists():
-        if keep_db and db_path.exists():
+        if keep_db and db_path.exists() and db_path == default_db_path:
             # Remove everything except state.db
             for item in data_dir.iterdir():
                 if item.name != "state.db":
@@ -689,12 +707,26 @@ def _uninstall(data_dir: Path) -> None:
         else:
             shutil.rmtree(data_dir)
 
+    # A custom --config/--db path lives outside data_dir, so it survives the
+    # rmtree above and must be removed explicitly.
+    if config_path != default_config_path and config_path.exists():
+        config_path.unlink()
+    if db_path != default_db_path and not keep_db and db_path.exists():
+        db_path.unlink()
+
     print("")
     if keep_db:
         print(f"Removed all eufy-sync data (sync history kept in {db_path}).")
     else:
         print("Removed all eufy-sync data.")
-    print("To remove the package itself, run: pipx uninstall eufy-sync")
+
+    if "/uv/tools/" in sys.executable:
+        removal_cmd = "uv tool uninstall eufy-sync"
+    elif shutil.which("pipx"):
+        removal_cmd = "pipx uninstall eufy-sync"
+    else:
+        removal_cmd = "pip uninstall eufy-sync"
+    print(f"To remove the package itself, run: {removal_cmd}")
 
 
 def _print_summary(total_counts: dict[str, int], failures: list, state, users: list) -> None:
@@ -875,6 +907,13 @@ def _migrate_config_passwords(config_path: Path) -> None:
         for service in ["eufy", "garmin"]:
             pw = user.get(service, {}).get("password")
             if pw:
+                if re.fullmatch(r"\$\{\w+\}", pw):
+                    # A deliberate ${VAR} env-var reference, not a literal
+                    # secret - leave it in the YAML for config.py to
+                    # interpolate. Storing the literal placeholder string to
+                    # the keychain would permanently break the setup, since
+                    # the keychain always wins over the YAML afterward.
+                    continue
                 key = f"{name}:{service}"
                 # Always store the YAML value, even over a stale keychain
                 # entry - the file edit is the newer intent. Otherwise a
@@ -950,7 +989,7 @@ def main() -> None:
 
     # Handle full uninstall
     if args.uninstall:
-        _uninstall(DATA_DIR)
+        _uninstall(DATA_DIR, config_path=config_path, db_path=db_path)
         return
 
     # Handle Launch Agent install/uninstall
@@ -989,6 +1028,14 @@ def main() -> None:
         _reauth(config_path, force=True, target=target)
         return
 
+    # --status/--history are read-only inspection commands - on a fresh
+    # install they must refuse cleanly rather than dropping the user into
+    # the interactive setup wizard (which prints "Running first sync ..."
+    # that a --status/--history invocation never actually runs).
+    if (args.status or args.history is not None) and not config_path.exists():
+        print("No config found. Run eufy-sync first to set up.")
+        sys.exit(1)
+
     # First-run setup if no config exists
     first_run = not config_path.exists()
     if first_run and args.headless:
@@ -1022,7 +1069,11 @@ def main() -> None:
     # Handle status
     if args.status:
         from eufy_sync.state import SyncState
-        state = SyncState(db_path)
+        try:
+            state = SyncState(db_path)
+        except Exception as e:
+            print(f"Could not read sync state: {e}")
+            sys.exit(1)
         _show_status(state, config.users)
         state.close()
         return
@@ -1030,7 +1081,11 @@ def main() -> None:
     # Handle history
     if args.history is not None:
         from eufy_sync.state import SyncState
-        state = SyncState(db_path)
+        try:
+            state = SyncState(db_path)
+        except Exception as e:
+            print(f"Could not read sync state: {e}")
+            sys.exit(1)
         _show_history(state, config.users, limit=args.history)
         state.close()
         return
@@ -1115,6 +1170,14 @@ def main() -> None:
                 fail_msg = "; ".join(f"{name}: {err[:80]}" for name, err in failures)
                 _notify("eufy-sync failed", fail_msg)
             logger.error("Sync failed for: %s", "; ".join(f"{n}: {e[:80]}" for n, e in failures))
+
+        if args.dry_run:
+            target_label = " and ".join(n.capitalize() for n in total_counts if total_counts[n] > 0)
+            if total > 0:
+                print(f"[DRY RUN] Would sync {total} measurement{'s' if total != 1 else ''} to {target_label}.")
+            else:
+                print("[DRY RUN] Would sync 0 measurements. Nothing new to sync.")
+            sys.exit(1 if failures else 0)
 
         if total > 0:
             target_label = " and ".join(n.capitalize() for n in total_counts if total_counts[n] > 0)

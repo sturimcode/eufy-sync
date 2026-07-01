@@ -31,6 +31,23 @@ def test_state_init_and_roundtrip(tmp_path: Path):
     state.close()
 
 
+def test_state_creates_parent_directory(tmp_path: Path):
+    """SyncState must create its parent directory if it doesn't exist yet,
+    the same way the token/config writers do - otherwise a not-yet-created
+    data dir crashes with a raw sqlite OperationalError."""
+    db_path = tmp_path / "sub" / "dir" / "state.db"
+    assert not db_path.parent.exists()
+
+    state = SyncState(db_path)
+    try:
+        assert db_path.parent.exists()
+        assert db_path.exists()
+        mode = oct(db_path.parent.stat().st_mode)[-3:]
+        assert mode == "700"
+    finally:
+        state.close()
+
+
 def test_latest_sync_timestamp(tmp_path: Path):
     state = SyncState(tmp_path / "test.db")
 
@@ -215,6 +232,42 @@ def test_strava_receives_measurements_in_chronological_order(tmp_path: Path):
         f"Strava must receive weights oldest→newest so the final value is the newest, "
         f"got order: {weights_uploaded}"
     )
+
+    state.close()
+
+
+def test_dry_run_prints_preview_and_records_nothing(tmp_path: Path, capsys):
+    """--dry-run must be honest: it previews each measurement via print (so
+    it is visible at default log level) and never writes to state, since a
+    dry run is not a real sync."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+
+    first = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+    second = _measurement(84.7, datetime(2026, 5, 11, 8, 0, tzinfo=timezone.utc))
+
+    fake_eufy = MagicMock()
+    fake_eufy.authenticate.return_value = None
+    fake_eufy.fetch_measurements.return_value = [first, second]
+    fake_eufy.close.return_value = None
+
+    fake_garmin = MagicMock()
+    fake_garmin.authenticate.return_value = None
+    fake_garmin.close.return_value = None
+
+    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=fake_garmin):
+        counts, errors = sync_user(user, state, backfill_days=7, dry_run=True)
+
+    assert errors == {}
+    assert counts == {"garmin": 2}
+
+    out = capsys.readouterr().out
+    assert out.count("[DRY RUN] Would sync") == 2
+
+    fake_garmin.upload_body_composition.assert_not_called()
+    assert not state.is_synced(user.name, first.measurement_id, "garmin")
+    assert not state.is_synced(user.name, second.measurement_id, "garmin")
 
     state.close()
 

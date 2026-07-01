@@ -8,6 +8,7 @@ from pathlib import Path
 class SyncState:
     def __init__(self, db_path: Path):
         self.db_path = db_path
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._conn = sqlite3.connect(str(db_path))
         self._migrate_if_needed()
         self._init_db()

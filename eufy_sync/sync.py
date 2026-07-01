@@ -143,7 +143,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     continue
 
                 if dry_run:
-                    logger.info("[DRY RUN] Would sync to %s: %.1f kg at %s", target_name, m.weight_kg, m.timestamp)
+                    print(f"[DRY RUN] Would sync to {target_name}: {m.weight_kg:.1f} kg at {m.timestamp}")
                     counts[target_name] += 1
                     continue
 

@@ -150,6 +150,23 @@ def test_refresh_429_is_a_plain_retryable_failure(mock_load, mock_save):
     client.close()
 
 
+def test_authorize_strava_socket_bind_failure_names_the_port():
+    """If the local OAuth callback port is already in use, HTTPServer's bind
+    raises a raw OSError. That must surface as a RuntimeError that names the
+    port and suggests freeing it, not an unexplained 'Address already in
+    use' traceback."""
+    from eufy_sync.strava_client import authorize_strava, CALLBACK_PORT
+
+    with patch("eufy_sync.strava_client.HTTPServer",
+               side_effect=OSError(48, "Address already in use")):
+        try:
+            authorize_strava(_make_config())
+            assert False, "Should have raised"
+        except RuntimeError as e:
+            assert str(CALLBACK_PORT) in str(e)
+            assert "already in use" in str(e).lower() or "close" in str(e).lower()
+
+
 @patch("eufy_sync.strava_client._load_tokens", return_value=None)
 def test_authenticate_raises_without_tokens(mock_load):
     client = StravaClient(_make_config())
