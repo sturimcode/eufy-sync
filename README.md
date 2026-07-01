@@ -28,19 +28,27 @@ eufy-sync logs in through [python-garminconnect](https://github.com/cyberjunky/p
 
 ## Install
 
-You need Python 3.12+, a Eufy scale with cloud sync, and a Garmin Connect and/or Strava account.
+You need a Eufy scale with cloud sync and a Garmin Connect and/or Strava account.
+
+With [Homebrew](https://brew.sh/):
 
 ```bash
-brew install pipx        # or: pip3 install pipx
+brew install pipx
 pipx install eufy-sync
 eufy-sync
 ```
 
-First run walks you through choosing targets and entering credentials, then runs the first sync.
+Without Homebrew, or on a Python older than 3.12, use [uv](https://docs.astral.sh/uv/). It fetches a compatible Python on its own, without touching your system Python:
 
-> **Python older than 3.12?** The simplest path is [uv](https://docs.astral.sh/uv/): `uv tool install eufy-sync` fetches a compatible Python for you, without touching your system Python. Or `brew install python@3.12` then `pipx install --python python3.12 eufy-sync`.
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv tool install eufy-sync
+eufy-sync
+```
 
-> **Cloned the repo?** Run pipx commands from outside the repo directory to avoid path conflicts, e.g. `cd /tmp && pipx install eufy-sync`.
+Either way, first run walks you through choosing targets and entering credentials, then runs the first sync. Whichever installer you used, `eufy-sync --update` handles updates from then on.
+
+> **Cloned the repo?** Run install commands from outside the repo directory to avoid path conflicts, e.g. `cd /tmp && pipx install eufy-sync`.
 
 ## Usage
 
