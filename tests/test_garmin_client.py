@@ -70,6 +70,26 @@ def test_has_weight_on_date_false_on_read_error():
     assert client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc)) is False
 
 
+def test_has_weight_on_date_queries_local_calendar_date():
+    """The duplicate check must query by LOCAL date, since that is the
+    calendar date Garmin files the (now-corrected) upload under. midnight_utc
+    is a UTC instant chosen right at 00:00 UTC: in any timezone west of UTC
+    (negative offset) the local calendar date is one day earlier, so this
+    reliably diverges from the raw-UTC date string on most machines while the
+    assertion itself stays generic (no hardcoded offset)."""
+    fake = MagicMock()
+    fake.get_body_composition.return_value = {"dateWeightList": []}
+    client = _client_with_fake_garmin(fake)
+
+    midnight_utc = datetime(2026, 6, 10, 0, 0, 0, tzinfo=timezone.utc)
+    client.has_weight_on_date(midnight_utc)
+
+    expected_date_str = midnight_utc.astimezone().strftime("%Y-%m-%d")
+    args, kwargs = fake.get_body_composition.call_args
+    queried = args[0] if args else kwargs.get("startdate")
+    assert queried == expected_date_str
+
+
 def test_authenticate_uses_auth_login():
     client = GarminClient(GarminConfig(email="g@example.com", password="pw"))
     fake_garmin = MagicMock()

@@ -87,6 +87,86 @@ def test_authenticate_refreshes_expired_token(mock_load, mock_save):
     client.close()
 
 
+@patch("eufy_sync.strava_client._save_tokens")
+@patch("eufy_sync.strava_client._load_tokens")
+def test_refresh_401_tells_user_to_reauthorize(mock_load, mock_save):
+    """A 401/400 on refresh means the grant is dead - tell the user to
+    re-authorize."""
+    mock_load.return_value = _make_tokens(expired=True)
+
+    mock_response = MagicMock()
+    mock_response.status_code = 401
+    mock_response.text = "Unauthorized"
+
+    client = StravaClient(_make_config())
+    with patch.object(client._client, "post", return_value=mock_response):
+        try:
+            client.authenticate()
+            assert False, "Should have raised"
+        except RuntimeError as e:
+            assert "Re-authorize" in str(e)
+    client.close()
+
+
+@patch("eufy_sync.strava_client._save_tokens")
+@patch("eufy_sync.strava_client._load_tokens")
+def test_refresh_500_is_a_plain_retryable_failure(mock_load, mock_save):
+    """A 5xx on refresh is transient - it must NOT tell the user to
+    re-authorize, since their grant is probably still fine."""
+    mock_load.return_value = _make_tokens(expired=True)
+
+    mock_response = MagicMock()
+    mock_response.status_code = 500
+    mock_response.text = "Internal Server Error"
+
+    client = StravaClient(_make_config())
+    with patch.object(client._client, "post", return_value=mock_response):
+        try:
+            client.authenticate()
+            assert False, "Should have raised"
+        except RuntimeError as e:
+            assert "Re-authorize" not in str(e)
+            assert "temporary" in str(e).lower() or "500" in str(e)
+    client.close()
+
+
+@patch("eufy_sync.strava_client._save_tokens")
+@patch("eufy_sync.strava_client._load_tokens")
+def test_refresh_429_is_a_plain_retryable_failure(mock_load, mock_save):
+    """A 429 on refresh is rate-limiting, not a dead grant."""
+    mock_load.return_value = _make_tokens(expired=True)
+
+    mock_response = MagicMock()
+    mock_response.status_code = 429
+    mock_response.text = "Too Many Requests"
+
+    client = StravaClient(_make_config())
+    with patch.object(client._client, "post", return_value=mock_response):
+        try:
+            client.authenticate()
+            assert False, "Should have raised"
+        except RuntimeError as e:
+            assert "Re-authorize" not in str(e)
+    client.close()
+
+
+def test_authorize_strava_socket_bind_failure_names_the_port():
+    """If the local OAuth callback port is already in use, HTTPServer's bind
+    raises a raw OSError. That must surface as a RuntimeError that names the
+    port and suggests freeing it, not an unexplained 'Address already in
+    use' traceback."""
+    from eufy_sync.strava_client import authorize_strava, CALLBACK_PORT
+
+    with patch("eufy_sync.strava_client.HTTPServer",
+               side_effect=OSError(48, "Address already in use")):
+        try:
+            authorize_strava(_make_config())
+            assert False, "Should have raised"
+        except RuntimeError as e:
+            assert str(CALLBACK_PORT) in str(e)
+            assert "already in use" in str(e).lower() or "close" in str(e).lower()
+
+
 @patch("eufy_sync.strava_client._load_tokens", return_value=None)
 def test_authenticate_raises_without_tokens(mock_load):
     client = StravaClient(_make_config())

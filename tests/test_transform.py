@@ -43,7 +43,27 @@ def test_timestamp_is_iso():
     m = _make_measurement()
     result = transform(m)
     assert result is not None
-    assert result.timestamp == "2024-04-01T12:00:00+00:00"
+    # Compare against the same expression the implementation uses so this
+    # passes regardless of the machine's timezone (no hardcoded offset).
+    assert result.timestamp == m.timestamp.astimezone().isoformat()
+
+
+def test_timestamp_represents_local_wall_clock_of_same_instant():
+    """garminconnect encodes the FIT timestamp with mktime(timetuple()), which
+    reads wall-clock fields as LOCAL time. If we hand it UTC wall-clock fields,
+    the upload lands at the wrong instant (shifted by the machine's UTC
+    offset). The transform must convert to local time first so the wall-clock
+    fields mktime() reads are correct for the machine's zone."""
+    m = _make_measurement(timestamp=datetime(2024, 4, 1, 23, 30, 0, tzinfo=timezone.utc))
+    result = transform(m)
+    assert result is not None
+
+    parsed = datetime.fromisoformat(result.timestamp)
+    # Same instant in time...
+    assert parsed == m.timestamp
+    # ...expressed with local wall-clock fields (not the original UTC fields).
+    assert parsed.utcoffset() == m.timestamp.astimezone().utcoffset()
+    assert parsed.timetuple() == m.timestamp.astimezone().timetuple()
 
 
 def test_none_fields_pass_through():

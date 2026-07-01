@@ -82,7 +82,13 @@ def authorize_strava(config: StravaConfig) -> dict:
         def log_message(self, format, *args):
             pass  # Suppress HTTP server logging
 
-    server = HTTPServer(("localhost", CALLBACK_PORT), CallbackHandler)
+    try:
+        server = HTTPServer(("localhost", CALLBACK_PORT), CallbackHandler)
+    except OSError as e:
+        raise RuntimeError(
+            f"Could not start the local OAuth callback server on port {CALLBACK_PORT} "
+            f"({e}). Something else may already be using that port - close it and try again."
+        ) from e
 
     def _serve_until_done():
         while not captured_code and not captured_error:
@@ -188,9 +194,15 @@ class StravaClient:
 
         if resp.status_code != 200:
             logger.debug("Strava token refresh failed: %d %s", resp.status_code, resp.text)
+            if resp.status_code in (400, 401):
+                # The grant itself is dead - only re-authorizing will fix it.
+                raise RuntimeError(
+                    f"Failed to refresh Strava token (HTTP {resp.status_code}). "
+                    f"Re-authorize with: eufy-sync --setup-strava"
+                )
             raise RuntimeError(
-                f"Failed to refresh Strava token (HTTP {resp.status_code}). "
-                f"Re-authorize with: eufy-sync --setup-strava"
+                f"Temporary Strava failure refreshing the access token "
+                f"(HTTP {resp.status_code}). This is not a revoked grant; retrying later should work."
             )
 
         data = resp.json()
