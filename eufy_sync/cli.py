@@ -1066,11 +1066,11 @@ def main() -> None:
         total = sum(total_counts.values())
 
         if failures:
-            reauth_needed = any("re-authenticate" in err for _, err in failures)
+            reauth_needed = any("--reauth" in err for _, err in failures)
             eufy_password = any("changed your Eufy password" in err for _, err in failures)
             multiple_profiles = any("multiple Eufy profiles" in err for _, err in failures)
             if reauth_needed:
-                _notify("eufy-sync: re-login needed", "Run: eufy-sync --reauth")
+                _notify("eufy-sync: re-login needed", "Run: eufy-sync --reauth garmin")
             elif eufy_password:
                 _notify("eufy-sync: Eufy login failed", "Run: eufy-sync --update-password")
             elif multiple_profiles:

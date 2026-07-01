@@ -6,13 +6,24 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from garminconnect import GarminConnectAuthenticationError
+from garminconnect import GarminConnectAuthenticationError, GarminConnectConnectionError
 
 from eufy_sync.config import GarminConfig
 from eufy_sync.garmin_auth import GarminAuth
 from eufy_sync.transform import GarminBodyComposition
 
 logger = logging.getLogger(__name__)
+
+
+def _is_garmin_auth_failure(exc: Exception) -> bool:
+    """True when a Garmin call failed because the session is dead. Covers the
+    dedicated auth error and the 401/403 that the library reports as a generic
+    connection error ("API Error 401 - ...")."""
+    if isinstance(exc, GarminConnectAuthenticationError):
+        return True
+    return isinstance(exc, GarminConnectConnectionError) and (
+        "401" in str(exc) or "403" in str(exc)
+    )
 
 
 class GarminClient:
@@ -58,13 +69,15 @@ class GarminClient:
     def upload_body_composition(self, body_comp: GarminBodyComposition) -> dict:
         try:
             result = self._add_body_composition(body_comp)
-        except GarminConnectAuthenticationError:
-            # Restored session is dead (refresh token expired or revoked).
+        except (GarminConnectAuthenticationError, GarminConnectConnectionError) as e:
+            if not _is_garmin_auth_failure(e):
+                raise  # transient connection error; let _retry handle it
+            # Restored session is dead (token expired or revoked, seen as a 401).
             if not self._allow_interactive:
                 from eufy_sync.sync import PermanentSyncError
                 raise PermanentSyncError(
-                    "Garmin session expired; run: eufy-sync --reauth"
-                )
+                    "Garmin session expired. Re-authenticate: run eufy-sync --reauth garmin"
+                ) from e
             logger.info("Garmin session expired; re-authenticating")
             self._garmin = self._auth.force_reauth()
             result = self._add_body_composition(body_comp)
