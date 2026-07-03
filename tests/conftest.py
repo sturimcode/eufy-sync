@@ -12,7 +12,7 @@ def _mute_notifications(monkeypatch):
 
     _notify shells out to osascript, so an unmocked call from any code path
     fires a real notification on the machine running the suite. Tests that
-    assert on notifications patch eufy_sync.cli._notify themselves; that
+    assert on notifications patch eufy_sync.cli.shared._notify themselves; that
     patch layers over this stub and restores it on exit.
     """
-    monkeypatch.setattr("eufy_sync.cli._notify", MagicMock())
+    monkeypatch.setattr("eufy_sync.cli.shared._notify", MagicMock())
