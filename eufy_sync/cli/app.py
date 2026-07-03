@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from eufy_sync.cli import maintenance, profiles, setup, shared, status, updater
+from eufy_sync.cli import doctor, maintenance, profiles, setup, shared, status, updater
 
 
 def main() -> None:
@@ -18,6 +18,7 @@ def main() -> None:
     )
     parser.add_argument("--version", "-V", action="version", version=f"eufy-sync {__version__}")
     parser.add_argument("--status", action="store_true", help="Show sync status and token health")
+    parser.add_argument("--doctor", action="store_true", help="Check the whole setup and print fixes for anything wrong")
     parser.add_argument("--reauth", nargs="?", const="all", default=None, metavar="TARGET",
                         help="Re-authenticate (optionally: garmin or strava)")
     parser.add_argument("--setup-strava", action="store_true", help="Connect Strava to your account")
@@ -39,6 +40,11 @@ def main() -> None:
 
     config_path = args.config or shared.DEFAULT_CONFIG
     db_path = args.db or shared.DEFAULT_DB
+
+    # Handle doctor - must report even on a fresh install, never launch the
+    # first-run wizard, and never traceback.
+    if args.doctor:
+        sys.exit(doctor._run_doctor(config_path, db_path))
 
     # Handle full uninstall
     if args.uninstall:
