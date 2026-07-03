@@ -11,26 +11,23 @@ import yaml
 from eufy_sync.cli import profiles, shared
 
 
-def _store_passwords_in_keychain(
+def _store_passwords(
     user_name: str,
     eufy_password: str,
     garmin_password: str | None = None,
-) -> bool:
-    """Store passwords in keychain. Returns True if successful."""
-    from eufy_sync.credentials import store_password, _keyring_available
-    if not _keyring_available():
-        return False
+) -> None:
+    """Store passwords in the credential store (keychain vault or file)."""
+    from eufy_sync.credentials import store_password
     store_password(f"{user_name}:eufy", eufy_password)
     if garmin_password:
         store_password(f"{user_name}:garmin", garmin_password)
-    return True
 
 
 def _first_run_setup(config_path: Path) -> None:
     """Interactive setup wizard for first-time users."""
     print("")
     print("  eufy-sync - first time setup")
-    print("  Credentials are stored in your system keychain (macOS Keychain / Secret Service).")
+    print("  Credentials are stored in your system keychain, or a 0o600 file if none is available.")
     print("")
 
     eufy_email = input("Eufy email: ").strip()
@@ -72,10 +69,14 @@ def _first_run_setup(config_path: Path) -> None:
 
     user_name = "default"
 
-    # Store passwords in keychain
-    keychain_ok = _store_passwords_in_keychain(user_name, eufy_password, garmin_password)
+    # Passwords always go to the credential store (keychain vault, or a
+    # 0o600 file when there is no keychain) - never into config.yaml.
+    _store_passwords(user_name, eufy_password, garmin_password)
 
-    # Config YAML stores only emails (no passwords) when keychain is available
+    from eufy_sync.credentials import active_store_label
+    print(f"Passwords saved to the {active_store_label()}.")
+
+    # Config YAML stores only emails, never passwords.
     user_config: dict = {
         "name": user_name,
         "eufy": {"email": eufy_email},
@@ -84,14 +85,6 @@ def _first_run_setup(config_path: Path) -> None:
         user_config["garmin"] = {"email": garmin_email}
     if strava_config:
         user_config["strava"] = strava_config
-    if not keychain_ok:
-        # Fallback: store passwords in config file (with 0o600 permissions)
-        user_config["eufy"]["password"] = eufy_password
-        if garmin_password:
-            user_config["garmin"]["password"] = garmin_password
-        print("Warning: keychain not available, passwords stored in config file.")
-    else:
-        print("Passwords saved to system keychain.")
 
     # On a shared account, pick the right person before the first sync.
     try:
@@ -187,11 +180,9 @@ def _setup_strava(config_path: Path) -> None:
 
 
 def _migrate_config_passwords(config_path: Path) -> None:
-    """One-time migration: move passwords from config.yaml to keychain."""
-    from eufy_sync.credentials import store_password, _keyring_available
+    """One-time migration: move passwords from config.yaml to the credential store."""
+    from eufy_sync.credentials import store_password
 
-    if not _keyring_available():
-        return
     if not config_path.exists():
         return
 
@@ -221,7 +212,7 @@ def _migrate_config_passwords(config_path: Path) -> None:
 
     if changed:
         shared._write_config(config_path, config)
-        print("Migrated passwords from config file to system keychain.")
+        print("Migrated passwords from config file to the credential store.")
 
 
 UPGRADE_NOTICE_FILE = shared.DATA_DIR / ".strava_notice_shown"

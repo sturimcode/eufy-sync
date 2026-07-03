@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import secrets
 import time
 import webbrowser
@@ -259,12 +258,11 @@ class StravaClient:
 
 
 def _load_tokens() -> dict | None:
-    """Load Strava tokens from keychain or file fallback."""
-    from eufy_sync.credentials import get_token, _keyring_available
-    if _keyring_available():
-        data = get_token("strava")
-        if data:
-            return data
+    """Load Strava tokens from the credential store or the legacy file fallback."""
+    from eufy_sync.credentials import get_token
+    data = get_token("strava")
+    if data:
+        return data
 
     token_path = Path.home() / ".garmin-sync" / "strava_token.json"
     if token_path.exists():
@@ -276,18 +274,9 @@ def _load_tokens() -> dict | None:
 
 
 def _save_tokens(tokens: dict) -> None:
-    """Save Strava tokens to keychain or file fallback."""
-    from eufy_sync.credentials import store_token, _keyring_available
-    if _keyring_available():
-        store_token("strava", tokens)
-        # Remove legacy file if it exists
-        token_path = Path.home() / ".garmin-sync" / "strava_token.json"
-        if token_path.exists():
-            token_path.unlink()
-        return
-
+    """Save Strava tokens to the credential store, and clear the legacy file."""
+    from eufy_sync.credentials import store_token
+    store_token("strava", tokens)
     token_path = Path.home() / ".garmin-sync" / "strava_token.json"
-    token_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(str(token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(json.dumps(tokens, indent=2))
+    if token_path.exists():
+        token_path.unlink()

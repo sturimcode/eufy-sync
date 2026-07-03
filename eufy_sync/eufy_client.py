@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -109,10 +108,8 @@ class EufyClient:
 
     def token_status(self) -> dict:
         """Return token health without authenticating."""
-        from eufy_sync.credentials import get_token, _keyring_available
-        data = None
-        if _keyring_available():
-            data = get_token("eufy")
+        from eufy_sync.credentials import get_token
+        data = get_token("eufy")
         if data is None and self.token_path.exists():
             try:
                 data = json.loads(self.token_path.read_text())
@@ -127,16 +124,15 @@ class EufyClient:
         return {"state": "valid", "days_remaining": days}
 
     def _load_cached_token(self) -> bool:
-        # Try keychain first
-        from eufy_sync.credentials import get_token, _keyring_available
-        if _keyring_available():
-            data = get_token("eufy")
-            if data and time.time() < data.get("expires_at", 0) - 3600:
-                self.access_token = data["access_token"]
-                self.user_id = data["user_id"]
-                logger.info("Using cached Eufy token from keychain (expires in %d days)",
-                            int((data["expires_at"] - time.time()) / 86400))
-                return True
+        # Try the credential store first
+        from eufy_sync.credentials import get_token
+        data = get_token("eufy")
+        if data and time.time() < data.get("expires_at", 0) - 3600:
+            self.access_token = data["access_token"]
+            self.user_id = data["user_id"]
+            logger.info("Using cached Eufy token from credential store (expires in %d days)",
+                        int((data["expires_at"] - time.time()) / 86400))
+            return True
 
         # Fallback to file
         if not self.token_path.exists():
@@ -160,24 +156,15 @@ class EufyClient:
             "expires_at": time.time() + expires_in,
         }
 
-        from eufy_sync.credentials import store_token, _keyring_available
-        if _keyring_available():
-            store_token("eufy", token_data)
-            # Remove legacy file if it exists
-            if self.token_path.exists():
-                self.token_path.unlink()
-            return
-
-        # Fallback to file
-        self.token_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(str(self.token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(token_data, f)
+        from eufy_sync.credentials import store_token
+        store_token("eufy", token_data)
+        # Remove legacy file if it exists
+        if self.token_path.exists():
+            self.token_path.unlink()
 
     def _clear_cached_token(self) -> None:
-        from eufy_sync.credentials import delete_token, _keyring_available
-        if _keyring_available():
-            delete_token("eufy")
+        from eufy_sync.credentials import delete_token
+        delete_token("eufy")
         if self.token_path.exists():
             self.token_path.unlink()
             logger.info("Cleared cached Eufy token")

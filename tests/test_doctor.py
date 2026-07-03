@@ -326,18 +326,23 @@ def test_profile_unset_warns_with_select_profile_fix(tmp_path, monkeypatch, caps
     assert code == 0
 
 
-def test_keychain_fallback_warns_never_fails(tmp_path, monkeypatch, capsys):
+def test_keychain_fallback_never_fails(tmp_path, monkeypatch, capsys):
+    """With no keychain backend, credentials fall back to the 0o600 file
+    store automatically - this is a normal, working configuration, not a
+    problem, so it must report PASS, never FAIL or WARN."""
     config_path, db_path = _patch_all_pass(tmp_path, monkeypatch)
-    doctor._keyring_available = MagicMock(return_value=False)
+    monkeypatch.setattr(doctor, "active_store_label", MagicMock(return_value="file (~/.garmin-sync/credentials.json)"))
 
     code = doctor._run_doctor(config_path, db_path)
 
     out = capsys.readouterr().out
-    assert "WARN" in out
+    assert "PASS" in out
     assert "keychain" in out
-    assert "file fallback" in out
-    # keychain must never contribute a FAIL line of its own
+    assert "file" in out
+    # keychain must never contribute a FAIL or WARN line of its own
     assert "FAIL  keychain" not in out
+    assert "WARN  keychain" not in out
+    assert code == 0
 
 
 def test_launch_agent_not_installed_warns(tmp_path, monkeypatch, capsys):

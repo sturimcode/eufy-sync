@@ -67,14 +67,13 @@ def _walk_and_interpolate(obj: dict | list | str) -> dict | list | str:
 
 
 def _get_password(user_name: str, service: str, email: str, yaml_password: str | None) -> str:
-    """Resolve password: keychain first, then YAML fallback."""
-    from eufy_sync.credentials import get_password, _keyring_available
+    """Resolve password: credential store first, then YAML fallback."""
+    from eufy_sync.credentials import get_password
 
-    if _keyring_available():
-        key = f"{user_name}:{service}"
-        stored = get_password(key)
-        if stored:
-            return stored
+    key = f"{user_name}:{service}"
+    stored = get_password(key)
+    if stored:
+        return stored
 
     if yaml_password:
         return yaml_password
