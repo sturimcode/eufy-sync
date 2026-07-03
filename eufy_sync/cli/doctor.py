@@ -108,8 +108,13 @@ def _run_doctor(config_path: Path, db_path: Path) -> int:
     if fail_count == 0 and warn_count == 0:
         print("All checks passed.")
         return 0
-    print(f"{fail_count + warn_count} problem(s) found.")
-    return 1 if fail_count > 0 else 0
+    if fail_count == 0:
+        # Warnings alone exit 0; saying "problems found" here would contradict
+        # the exit code and read as a failure.
+        print(f"{warn_count} warning(s), nothing blocking.")
+        return 0
+    print(f"{fail_count} problem(s) found.")
+    return 1
 
 
 def _check_profile(report, user) -> None:
@@ -237,6 +242,7 @@ def _check_launch_agent(report) -> None:
             ["launchctl", "list"],
             capture_output=True,
             text=True,
+            timeout=5,
         )
         if shared.LAUNCH_AGENT_LABEL not in (result.stdout or ""):
             report("WARN", "launch agent", "installed but not loaded", "eufy-sync --install-agent")

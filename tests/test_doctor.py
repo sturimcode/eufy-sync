@@ -235,7 +235,32 @@ def test_warnings_alone_still_exit_zero(tmp_path, monkeypatch, capsys):
     assert code == 0
     assert "FAIL" not in out
     assert out.count("WARN") >= 2
-    assert "problem(s) found" in out
+    # A warning-only run exits 0, so the summary must not claim problems.
+    assert "warning(s), nothing blocking" in out
+    assert "problem(s) found" not in out
+
+
+def test_doctor_dispatches_before_wizard_via_main(tmp_path, capsys):
+    """--doctor through the real entry point: a no-config run must report and
+    exit 1 without ever entering the first-run wizard. Guards the dispatch
+    ORDER in app.main(), which the direct _run_doctor tests cannot see."""
+    from eufy_sync.cli.app import main
+
+    def boom_input(*a, **k):
+        raise AssertionError("wizard input() must not be called for --doctor")
+
+    argv = ["eufy-sync", "--doctor",
+            "--config", str(tmp_path / "missing" / "config.yaml"),
+            "--db", str(tmp_path / "state.db")]
+    with patch("sys.argv", argv), \
+         patch("builtins.input", side_effect=boom_input), \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "FAIL" in out and "config" in out
+    assert "first time setup" not in out
 
 
 def test_eufy_token_expired_is_warn_not_fail(tmp_path, monkeypatch, capsys):
