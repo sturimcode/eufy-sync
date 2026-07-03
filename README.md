@@ -63,6 +63,7 @@ First run walks you through choosing targets and entering credentials, then runs
 ```bash
 eufy-sync                      # sync new measurements to all configured targets
 eufy-sync --status             # last sync + token health
+eufy-sync --doctor             # check the whole setup and print fixes for anything wrong
 eufy-sync --dry-run            # preview without uploading
 eufy-sync --update             # update to the latest version
 eufy-sync --setup-strava       # add Strava
