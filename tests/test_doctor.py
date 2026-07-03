@@ -240,6 +240,30 @@ def test_warnings_alone_still_exit_zero(tmp_path, monkeypatch, capsys):
     assert "problem(s) found" not in out
 
 
+def test_eufy_cloud_check_authenticates_before_fetching(tmp_path, monkeypatch, capsys):
+    """Caught live: the mocked client hid that fetch_measurements requires a
+    prior authenticate(); the real client raises without it. Pin the order."""
+    config_path, db_path = _patch_all_pass(tmp_path, monkeypatch)
+    calls = []
+    client = doctor.EufyClient.return_value
+    client.authenticate.side_effect = lambda: calls.append("authenticate")
+    original_fetch = client.fetch_measurements.return_value
+
+    def fetch(**kwargs):
+        if "authenticate" not in calls:
+            raise RuntimeError("Must authenticate before fetching measurements")
+        return original_fetch
+
+    client.fetch_measurements.side_effect = fetch
+
+    code = doctor._run_doctor(config_path, db_path)
+
+    out = capsys.readouterr().out
+    assert "Must authenticate" not in out
+    assert "PASS  eufy cloud" in out
+    assert code == 0
+
+
 def test_doctor_dispatches_before_wizard_via_main(tmp_path, capsys):
     """--doctor through the real entry point: a no-config run must report and
     exit 1 without ever entering the first-run wizard. Guards the dispatch
