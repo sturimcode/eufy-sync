@@ -7,15 +7,13 @@ from unittest.mock import patch, MagicMock
 import pytest
 import yaml
 
-from eufy_sync.cli import (
-    _write_config,
+from eufy_sync.cli.shared import _write_config, LAUNCH_AGENT_LABEL, LAUNCH_AGENT_PATH
+from eufy_sync.cli.maintenance import (
     _generate_plist,
     _install_launch_agent,
     _uninstall,
     _uninstall_launch_agent,
     _offer_launch_agent,
-    LAUNCH_AGENT_LABEL,
-    LAUNCH_AGENT_PATH,
 )
 
 
@@ -72,10 +70,10 @@ def test_generate_plist_contains_log_path():
     assert ".garmin-sync/sync.log" in plist
 
 
-@patch("eufy_sync.cli.subprocess.run")
-@patch("eufy_sync.cli.shutil.which", return_value="/home/user/.local/bin/eufy-sync")
-@patch("eufy_sync.cli.platform.system", return_value="Darwin")
-@patch("eufy_sync.cli.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.cli.maintenance.subprocess.run")
+@patch("eufy_sync.cli.maintenance.shutil.which", return_value="/home/user/.local/bin/eufy-sync")
+@patch("eufy_sync.cli.maintenance.platform.system", return_value="Darwin")
+@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
 def test_install_launch_agent_writes_plist_and_loads(mock_path, mock_system, mock_which, mock_run):
     mock_path.parent.mkdir = MagicMock()
     mock_path.write_text = MagicMock()
@@ -93,21 +91,21 @@ def test_install_launch_agent_writes_plist_and_loads(mock_path, mock_system, moc
     assert "load" in mock_run.call_args_list[1][0][0]
 
 
-@patch("eufy_sync.cli.platform.system", return_value="Linux")
+@patch("eufy_sync.cli.maintenance.platform.system", return_value="Linux")
 def test_install_launch_agent_skips_on_linux(mock_system, capsys):
     _install_launch_agent()
     assert "only supported on macOS" in capsys.readouterr().out
 
 
-@patch("eufy_sync.cli.shutil.which", return_value=None)
-@patch("eufy_sync.cli.platform.system", return_value="Darwin")
+@patch("eufy_sync.cli.maintenance.shutil.which", return_value=None)
+@patch("eufy_sync.cli.maintenance.platform.system", return_value="Darwin")
 def test_install_launch_agent_warns_if_binary_not_found(mock_system, mock_which, capsys):
     _install_launch_agent()
     assert "could not find eufy-sync" in capsys.readouterr().out
 
 
-@patch("eufy_sync.cli.subprocess.run")
-@patch("eufy_sync.cli.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.cli.maintenance.subprocess.run")
+@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
 def test_uninstall_launch_agent_removes_plist(mock_path, mock_run):
     mock_path.exists.return_value = True
     mock_path.unlink = MagicMock()
@@ -119,7 +117,7 @@ def test_uninstall_launch_agent_removes_plist(mock_path, mock_run):
     mock_path.unlink.assert_called_once()
 
 
-@patch("eufy_sync.cli.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
 def test_uninstall_launch_agent_noop_if_not_installed(mock_path, capsys):
     mock_path.exists.return_value = False
 
@@ -128,10 +126,10 @@ def test_uninstall_launch_agent_noop_if_not_installed(mock_path, capsys):
     assert "No Launch Agent installed" in capsys.readouterr().out
 
 
-@patch("eufy_sync.cli._install_launch_agent")
+@patch("eufy_sync.cli.maintenance._install_launch_agent")
 @patch("builtins.input", return_value="y")
-@patch("eufy_sync.cli.sys.stdin")
-@patch("eufy_sync.cli.platform.system", return_value="Darwin")
+@patch("eufy_sync.cli.maintenance.sys.stdin")
+@patch("eufy_sync.cli.maintenance.platform.system", return_value="Darwin")
 def test_offer_launch_agent_installs_on_yes(mock_system, mock_stdin, mock_input, mock_install):
     mock_stdin.isatty.return_value = True
 
@@ -140,10 +138,10 @@ def test_offer_launch_agent_installs_on_yes(mock_system, mock_stdin, mock_input,
     mock_install.assert_called_once()
 
 
-@patch("eufy_sync.cli._install_launch_agent")
+@patch("eufy_sync.cli.maintenance._install_launch_agent")
 @patch("builtins.input", return_value="n")
-@patch("eufy_sync.cli.sys.stdin")
-@patch("eufy_sync.cli.platform.system", return_value="Darwin")
+@patch("eufy_sync.cli.maintenance.sys.stdin")
+@patch("eufy_sync.cli.maintenance.platform.system", return_value="Darwin")
 def test_offer_launch_agent_skips_on_no(mock_system, mock_stdin, mock_input, mock_install):
     mock_stdin.isatty.return_value = True
 
@@ -152,9 +150,9 @@ def test_offer_launch_agent_skips_on_no(mock_system, mock_stdin, mock_input, moc
     mock_install.assert_not_called()
 
 
-@patch("eufy_sync.cli._install_launch_agent")
-@patch("eufy_sync.cli.sys.stdin")
-@patch("eufy_sync.cli.platform.system", return_value="Darwin")
+@patch("eufy_sync.cli.maintenance._install_launch_agent")
+@patch("eufy_sync.cli.maintenance.sys.stdin")
+@patch("eufy_sync.cli.maintenance.platform.system", return_value="Darwin")
 def test_offer_launch_agent_skips_non_interactive(mock_system, mock_stdin, mock_install):
     mock_stdin.isatty.return_value = False
 
@@ -166,12 +164,12 @@ def test_offer_launch_agent_skips_non_interactive(mock_system, mock_stdin, mock_
 # --- _uninstall keychain cleanup ---
 
 
-@patch("eufy_sync.cli.LAUNCH_AGENT_PATH")
-@patch("eufy_sync.cli.subprocess.run")
+@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.cli.maintenance.subprocess.run")
 @patch("eufy_sync.credentials._keyring_available", return_value=True)
 @patch("eufy_sync.credentials.delete_token")
 @patch("eufy_sync.credentials.delete_password")
-@patch("eufy_sync.cli.sys.stdin")
+@patch("eufy_sync.cli.maintenance.sys.stdin")
 @patch("builtins.input", side_effect=["y", "n"])
 def test_uninstall_clears_keychain_for_configured_user_name(
     mock_input, mock_stdin, mock_delete_pw, mock_delete_tok,
@@ -201,12 +199,12 @@ def test_uninstall_clears_keychain_for_configured_user_name(
     assert "elias:garmin" in deleted_accounts
 
 
-@patch("eufy_sync.cli.LAUNCH_AGENT_PATH")
-@patch("eufy_sync.cli.subprocess.run")
+@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.cli.maintenance.subprocess.run")
 @patch("eufy_sync.credentials._keyring_available", return_value=True)
 @patch("eufy_sync.credentials.delete_token")
 @patch("eufy_sync.credentials.delete_password")
-@patch("eufy_sync.cli.sys.stdin")
+@patch("eufy_sync.cli.maintenance.sys.stdin")
 @patch("builtins.input", side_effect=["y", "n"])
 def test_uninstall_names_uv_for_uv_installs(
     mock_input, mock_stdin, mock_delete_pw, mock_delete_tok,
@@ -215,7 +213,7 @@ def test_uninstall_names_uv_for_uv_installs(
     """When eufy-sync is running from a `uv tool install` venv, the
     uninstall hint must tell the user to run `uv tool uninstall`, not the
     always-pipx line - pipx was never involved in a uv install."""
-    from eufy_sync.cli import _uninstall
+    from eufy_sync.cli.maintenance import _uninstall
 
     mock_stdin.isatty.return_value = True
     mock_launch_path.exists.return_value = False
@@ -223,7 +221,7 @@ def test_uninstall_names_uv_for_uv_installs(
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
-    with patch("eufy_sync.cli.sys.executable", "/Users/x/.local/share/uv/tools/eufy-sync/bin/python"):
+    with patch("eufy_sync.cli.maintenance.sys.executable", "/Users/x/.local/share/uv/tools/eufy-sync/bin/python"):
         _uninstall(data_dir)
 
     out = capsys.readouterr().out
@@ -231,19 +229,19 @@ def test_uninstall_names_uv_for_uv_installs(
     assert "pipx uninstall" not in out
 
 
-@patch("eufy_sync.cli.LAUNCH_AGENT_PATH")
-@patch("eufy_sync.cli.subprocess.run")
+@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.cli.maintenance.subprocess.run")
 @patch("eufy_sync.credentials._keyring_available", return_value=True)
 @patch("eufy_sync.credentials.delete_token")
 @patch("eufy_sync.credentials.delete_password")
-@patch("eufy_sync.cli.sys.stdin")
+@patch("eufy_sync.cli.maintenance.sys.stdin")
 @patch("builtins.input", side_effect=["y", "n"])
 def test_uninstall_names_pipx_when_not_uv(
     mock_input, mock_stdin, mock_delete_pw, mock_delete_tok,
     mock_keyring, mock_run, mock_launch_path, tmp_path, capsys,
 ):
     """A regular pipx install should keep naming pipx as before."""
-    from eufy_sync.cli import _uninstall
+    from eufy_sync.cli.maintenance import _uninstall
 
     mock_stdin.isatty.return_value = True
     mock_launch_path.exists.return_value = False
@@ -251,20 +249,20 @@ def test_uninstall_names_pipx_when_not_uv(
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
-    with patch("eufy_sync.cli.sys.executable", "/Users/x/.local/pipx/venvs/eufy-sync/bin/python"), \
-         patch("eufy_sync.cli.shutil.which", return_value="/usr/local/bin/pipx"):
+    with patch("eufy_sync.cli.maintenance.sys.executable", "/Users/x/.local/pipx/venvs/eufy-sync/bin/python"), \
+         patch("eufy_sync.cli.maintenance.shutil.which", return_value="/usr/local/bin/pipx"):
         _uninstall(data_dir)
 
     out = capsys.readouterr().out
     assert "pipx uninstall eufy-sync" in out
 
 
-@patch("eufy_sync.cli.LAUNCH_AGENT_PATH")
-@patch("eufy_sync.cli.subprocess.run")
+@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.cli.maintenance.subprocess.run")
 @patch("eufy_sync.credentials._keyring_available", return_value=True)
 @patch("eufy_sync.credentials.delete_token")
 @patch("eufy_sync.credentials.delete_password")
-@patch("eufy_sync.cli.sys.stdin")
+@patch("eufy_sync.cli.maintenance.sys.stdin")
 @patch("builtins.input", side_effect=["y", "n"])
 def test_uninstall_removes_custom_config_and_db_paths(
     mock_input, mock_stdin, mock_delete_pw, mock_delete_tok,
@@ -274,7 +272,7 @@ def test_uninstall_removes_custom_config_and_db_paths(
     files under the default ~/.garmin-sync directory. Before the fix,
     _uninstall(DATA_DIR) always looked at data_dir/config.yaml and
     data_dir/state.db, so custom paths elsewhere on disk were left behind."""
-    from eufy_sync.cli import _uninstall
+    from eufy_sync.cli.maintenance import _uninstall
 
     mock_stdin.isatty.return_value = True
     mock_launch_path.exists.return_value = False
@@ -302,7 +300,7 @@ def test_uninstall_removes_custom_config_and_db_paths(
 def test_prompt_profile_choice_returns_selected_customer_id():
     from datetime import datetime, timezone
     from unittest.mock import patch
-    from eufy_sync.cli import _prompt_profile_choice
+    from eufy_sync.cli.profiles import _prompt_profile_choice
     from eufy_sync.eufy_client import EufyProfile
     profiles = [
         EufyProfile("cid-a", datetime(2026, 6, 1, tzinfo=timezone.utc), 80.0),
@@ -316,7 +314,8 @@ def test_prompt_profile_choice_returns_selected_customer_id():
 def test_select_profile_writes_chosen_customer_id(_keyring, tmp_path: Path):
     from datetime import datetime, timezone
     from unittest.mock import MagicMock, patch
-    from eufy_sync.cli import _select_profile, _write_config
+    from eufy_sync.cli.profiles import _select_profile
+    from eufy_sync.cli.shared import _write_config
     from eufy_sync.eufy_client import EufyProfile
 
     cfg_path = tmp_path / "config.yaml"
@@ -345,7 +344,7 @@ def test_select_profile_writes_chosen_customer_id(_keyring, tmp_path: Path):
 def test_prompt_profile_choice_retries_on_invalid_input():
     from datetime import datetime, timezone
     from unittest.mock import patch
-    from eufy_sync.cli import _prompt_profile_choice
+    from eufy_sync.cli.profiles import _prompt_profile_choice
     from eufy_sync.eufy_client import EufyProfile
     profiles = [
         EufyProfile("cid-a", datetime(2026, 6, 1, tzinfo=timezone.utc), 80.0),
@@ -357,7 +356,7 @@ def test_prompt_profile_choice_retries_on_invalid_input():
 
 def test_configure_logging_quiets_garminconnect_when_not_verbose():
     import logging
-    from eufy_sync.cli import _configure_logging
+    from eufy_sync.cli.shared import _configure_logging
 
     logging.getLogger("garminconnect").setLevel(logging.NOTSET)
     _configure_logging(verbose=False)
@@ -366,7 +365,7 @@ def test_configure_logging_quiets_garminconnect_when_not_verbose():
 
 def test_configure_logging_keeps_garminconnect_detail_when_verbose():
     import logging
-    from eufy_sync.cli import _configure_logging
+    from eufy_sync.cli.shared import _configure_logging
 
     logging.getLogger("garminconnect").setLevel(logging.ERROR)
     _configure_logging(verbose=True)
@@ -374,7 +373,8 @@ def test_configure_logging_keeps_garminconnect_detail_when_verbose():
 
 
 def test_save_customer_id_writes_into_config(tmp_path: Path):
-    from eufy_sync.cli import _save_customer_id, _write_config
+    from eufy_sync.cli.profiles import _save_customer_id
+    from eufy_sync.cli.shared import _write_config
 
     cfg_path = tmp_path / "config.yaml"
     _write_config(cfg_path, {
@@ -422,7 +422,7 @@ def test_migration_overwrites_stale_keychain_entry_with_yaml_value(_keyring, tmp
     same account. The old behavior only stored to the keychain when nothing
     was there yet, then deleted the YAML key regardless - silently keeping
     the stale keychain value."""
-    from eufy_sync.cli import _migrate_config_passwords
+    from eufy_sync.cli.setup import _migrate_config_passwords
 
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, {
@@ -448,7 +448,7 @@ def test_migration_skips_env_var_reference_passwords(_keyring, tmp_path):
     (resolved later by config.py's interpolation), not a literal secret. The
     migration must leave it untouched in the YAML and must not store the
     literal placeholder string into the keychain."""
-    from eufy_sync.cli import _migrate_config_passwords
+    from eufy_sync.cli.setup import _migrate_config_passwords
 
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, {
@@ -470,7 +470,7 @@ def test_migration_skips_env_var_reference_passwords(_keyring, tmp_path):
 def test_setup_strava_exits_cleanly_on_oauth_failure(tmp_path, capsys):
     """A Strava OAuth failure (timeout, denial, occupied port) must print the
     error message and exit 1 - not escape as a raw traceback."""
-    from eufy_sync.cli import _setup_strava
+    from eufy_sync.cli.setup import _setup_strava
 
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, {
@@ -495,7 +495,7 @@ def test_setup_strava_exits_cleanly_on_oauth_failure(tmp_path, capsys):
 def test_reauth_strava_exits_cleanly_on_oauth_failure(capsys):
     """The Strava branch of _reauth must also catch OAuth failures instead
     of letting them escape as a raw traceback."""
-    from eufy_sync.cli import _reauth
+    from eufy_sync.cli.maintenance import _reauth
 
     config = {
         "users": [{
@@ -519,7 +519,7 @@ def test_reauth_confirmation_on_non_tty_defaults_to_no():
     """The prompt's documented default is No ([y/N]). On a non-tty run there
     is no human to answer, so it must skip re-auth rather than proceeding as
     if 'yes' had been typed - that would destroy a valid token unattended."""
-    from eufy_sync.cli import _reauth
+    from eufy_sync.cli.maintenance import _reauth
 
     config = {
         "users": [{
@@ -533,7 +533,7 @@ def test_reauth_confirmation_on_non_tty_defaults_to_no():
 
     with patch("eufy_sync.garmin_auth.GarminAuth", return_value=mock_auth), \
          patch("eufy_sync.config._get_password", return_value="pw"), \
-         patch("eufy_sync.cli.sys.stdin") as mock_stdin:
+         patch("eufy_sync.cli.maintenance.sys.stdin") as mock_stdin:
         mock_stdin.isatty.return_value = False
         _reauth(Path("/nonexistent"), config=config, force=True)
 
@@ -544,7 +544,7 @@ def test_status_with_no_config_exits_without_wizard(tmp_path, capsys):
     """eufy-sync --status with no config must never launch the setup
     wizard - it should print a plain message and exit 1, matching the
     pattern used by --setup-strava, --select-profile, etc."""
-    from eufy_sync.cli import main
+    from eufy_sync.cli.app import main
 
     config_path = tmp_path / "config.yaml"
     db_path = tmp_path / "state.db"
@@ -567,7 +567,7 @@ def test_status_with_no_config_exits_without_wizard(tmp_path, capsys):
 
 def test_history_with_no_config_exits_without_wizard(tmp_path, capsys):
     """Same guard as --status must apply to --history."""
-    from eufy_sync.cli import main
+    from eufy_sync.cli.app import main
 
     config_path = tmp_path / "config.yaml"
     db_path = tmp_path / "state.db"
@@ -593,7 +593,7 @@ def test_status_with_corrupt_db_exits_cleanly(tmp_path):
     --status must print a plain one-line error and exit 1 - not a raw
     traceback. This is Pass 2's startup-guard pattern extended to the
     --status/--history handlers, which currently sit outside it."""
-    from eufy_sync.cli import main
+    from eufy_sync.cli.app import main
 
     config_path = _write_synced_config(tmp_path)
     db_path = tmp_path / "state.db"
@@ -608,11 +608,11 @@ def test_status_with_corrupt_db_exits_cleanly(tmp_path):
     assert exc.value.code == 1
 
 
-@patch("eufy_sync.cli._notify")
+@patch("eufy_sync.cli.shared._notify")
 def test_headless_first_run_refuses_wizard(mock_notify, tmp_path):
     """A headless run with no config must never call input() - it should
     print guidance, notify, and exit 1 instead of hanging in the wizard."""
-    from eufy_sync.cli import main
+    from eufy_sync.cli.app import main
 
     config_path = tmp_path / "config.yaml"
     db_path = tmp_path / "state.db"
@@ -631,12 +631,12 @@ def test_headless_first_run_refuses_wizard(mock_notify, tmp_path):
     mock_notify.assert_called()
 
 
-@patch("eufy_sync.cli._notify")
+@patch("eufy_sync.cli.shared._notify")
 def test_startup_failure_before_harness_notifies_and_exits(mock_notify, tmp_path):
     """A load_config failure (e.g. missing keychain entry -> ValueError) that
     happens before the sync try/except harness must still notify and exit 1,
     not escape as a raw traceback."""
-    from eufy_sync.cli import main
+    from eufy_sync.cli.app import main
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("users:\n  - name: default\n    eufy:\n      email: e@example.com\n")
@@ -644,8 +644,8 @@ def test_startup_failure_before_harness_notifies_and_exits(mock_notify, tmp_path
 
     argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path)]
     with patch("sys.argv", argv), \
-         patch("eufy_sync.cli._migrate_config_passwords"), \
-         patch("eufy_sync.cli._show_upgrade_notice"), \
+         patch("eufy_sync.cli.setup._migrate_config_passwords"), \
+         patch("eufy_sync.cli.setup._show_upgrade_notice"), \
          patch("eufy_sync.config.load_config", side_effect=ValueError("no password found")), \
          pytest.raises(SystemExit) as exc:
         main()
@@ -654,18 +654,18 @@ def test_startup_failure_before_harness_notifies_and_exits(mock_notify, tmp_path
     mock_notify.assert_called()
 
 
-@patch("eufy_sync.cli._notify")
-@patch("eufy_sync.cli._check_for_updates")
-@patch("eufy_sync.cli._show_upgrade_notice")
-@patch("eufy_sync.cli._migrate_config_passwords")
+@patch("eufy_sync.cli.shared._notify")
+@patch("eufy_sync.cli.updater._check_for_updates")
+@patch("eufy_sync.cli.setup._show_upgrade_notice")
+@patch("eufy_sync.cli.setup._migrate_config_passwords")
 @patch("eufy_sync.credentials._keyring_available", return_value=False)
-@patch("eufy_sync.cli.sys.stdin")
+@patch("eufy_sync.cli.app.sys.stdin")
 def test_dry_run_does_not_notify_and_prints_preview_summary(
     mock_stdin, _keyring, _migrate, _notice, _updates, mock_notify, tmp_path, capsys
 ):
     """--dry-run must not fire the success notification or claim a real
     'Synced N' summary - it should print an honest preview summary instead."""
-    from eufy_sync.cli import main
+    from eufy_sync.cli.app import main
 
     mock_stdin.isatty.return_value = True
     config_path = _write_synced_config(tmp_path)
@@ -689,17 +689,17 @@ def test_dry_run_does_not_notify_and_prints_preview_summary(
     assert "[DRY RUN] Would sync 2 measurements to Garmin." in out
 
 
-@patch("eufy_sync.cli._print_summary")
-@patch("eufy_sync.cli._notify")
-@patch("eufy_sync.cli._check_for_updates")
-@patch("eufy_sync.cli._show_upgrade_notice")
-@patch("eufy_sync.cli._migrate_config_passwords")
+@patch("eufy_sync.cli.status._print_summary")
+@patch("eufy_sync.cli.shared._notify")
+@patch("eufy_sync.cli.updater._check_for_updates")
+@patch("eufy_sync.cli.setup._show_upgrade_notice")
+@patch("eufy_sync.cli.setup._migrate_config_passwords")
 @patch("eufy_sync.credentials._keyring_available", return_value=False)
-@patch("eufy_sync.cli.sys.stdin")
+@patch("eufy_sync.cli.app.sys.stdin")
 def test_interactive_ambiguous_profile_resolves_and_syncs(
     mock_stdin, _keyring, _migrate, _notice, _updates, _notify, _summary, tmp_path
 ):
-    from eufy_sync.cli import main
+    from eufy_sync.cli.app import main
     from eufy_sync.eufy_client import AmbiguousProfileError
 
     mock_stdin.isatty.return_value = True
@@ -730,17 +730,17 @@ def test_interactive_ambiguous_profile_resolves_and_syncs(
     assert seen_customer_ids == [None, "cid-human"]
 
 
-@patch("eufy_sync.cli._print_summary")
-@patch("eufy_sync.cli._notify")
-@patch("eufy_sync.cli._check_for_updates")
-@patch("eufy_sync.cli._show_upgrade_notice")
-@patch("eufy_sync.cli._migrate_config_passwords")
+@patch("eufy_sync.cli.status._print_summary")
+@patch("eufy_sync.cli.shared._notify")
+@patch("eufy_sync.cli.updater._check_for_updates")
+@patch("eufy_sync.cli.setup._show_upgrade_notice")
+@patch("eufy_sync.cli.setup._migrate_config_passwords")
 @patch("eufy_sync.credentials._keyring_available", return_value=False)
-@patch("eufy_sync.cli.sys.stdin")
+@patch("eufy_sync.cli.app.sys.stdin")
 def test_noninteractive_ambiguous_profile_bails(
     mock_stdin, _keyring, _migrate, _notice, _updates, _notify, _summary, tmp_path, capsys
 ):
-    from eufy_sync.cli import main
+    from eufy_sync.cli.app import main
     from eufy_sync.eufy_client import AmbiguousProfileError
 
     mock_stdin.isatty.return_value = False  # no human present

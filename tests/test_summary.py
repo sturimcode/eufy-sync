@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from unittest.mock import patch, MagicMock
 
-from eufy_sync.cli import _print_summary
+from eufy_sync.cli.status import _print_summary
 
 
 def _mock_state(last_sync_ts: int | None = None):
