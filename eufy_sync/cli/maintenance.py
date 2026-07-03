@@ -304,6 +304,10 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
         except Exception:
             pass
 
+    # Clear the keychain vault. On a file-backend machine this gate skips the
+    # deletes, which is safe only because credentials.json lives inside data_dir
+    # and is erased by the rmtree below; keep them together if CRED_FILE ever
+    # moves outside ~/.garmin-sync.
     from eufy_sync.credentials import delete_password, delete_token, _keyring_available
     if _keyring_available():
         for name in user_names:

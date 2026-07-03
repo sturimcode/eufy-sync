@@ -125,6 +125,21 @@ def test_only_one_keyring_account_is_ever_written(fake_keyring, cred_file):
     assert fake_keyring.accounts_written() == {"vault"}
 
 
+def test_storing_a_second_secret_does_not_clobber_the_first(fake_keyring, cred_file):
+    """Read-modify-write integrity: every secret shares one vault, so a store
+    must load, add one key, and save the whole object. If it wrote only the new
+    key, the earlier secrets would vanish."""
+    from eufy_sync.credentials import store_password, store_token, get_password, get_token
+
+    store_password("default:eufy", "pw1")
+    store_token("garmin", {"di_token": "b"})
+    store_password("default:garmin", "pw2")   # later writes must not drop the earlier keys
+
+    assert get_password("default:eufy") == "pw1"
+    assert get_password("default:garmin") == "pw2"
+    assert get_token("garmin") == {"di_token": "b"}
+
+
 # --- 2. file backend round-trip; 0o600; keyring never touched ---------------
 
 
