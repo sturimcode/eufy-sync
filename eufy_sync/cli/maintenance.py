@@ -148,8 +148,28 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
         print("Done - Strava tokens saved.")
 
 
-def _generate_plist(binary_path: str) -> str:
-    """Generate a Launch Agent plist that runs eufy-sync every 4 hours."""
+def _write_run_script(binary_path: str) -> Path:
+    """Write the stable wrapper script the Launch Agent runs.
+
+    macOS re-announces "can run in the background" whenever a registered
+    background item's executable changes identity, and pipx/uv replace the
+    binary on every update. The agent therefore points at this script, whose
+    bytes never change across updates, so the announcement fires once, not
+    once per release. Skipping the rewrite when content is unchanged is what
+    keeps the file's identity stable.
+    """
+    script_path = shared.DATA_DIR / "run-sync.sh"
+    content = f'#!/bin/sh\nexec "{binary_path}" --headless\n'
+    if script_path.exists() and script_path.read_text() == content:
+        return script_path
+    script_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    script_path.write_text(content)
+    script_path.chmod(0o755)
+    return script_path
+
+
+def _generate_plist(program_path: str) -> str:
+    """Generate a Launch Agent plist that runs the given program every 4 hours."""
     log_path = str(shared.LOG_FILE)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -160,8 +180,7 @@ def _generate_plist(binary_path: str) -> str:
 
     <key>ProgramArguments</key>
     <array>
-        <string>{binary_path}</string>
-        <string>--headless</string>
+        <string>{program_path}</string>
     </array>
 
     <key>StartInterval</key>
@@ -195,8 +214,9 @@ def _install_launch_agent() -> None:
     # Ensure the log directory exists with restricted permissions
     shared.DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
 
+    wrapper = _write_run_script(binary)
     shared.LAUNCH_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    shared.LAUNCH_AGENT_PATH.write_text(_generate_plist(binary))
+    shared.LAUNCH_AGENT_PATH.write_text(_generate_plist(str(wrapper)))
 
     # Unload first in case an old version is loaded
     subprocess.run(
