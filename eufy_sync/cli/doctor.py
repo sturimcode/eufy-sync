@@ -189,6 +189,7 @@ def _check_eufy_cloud(report, eufy_client) -> None:
     if eufy_client is None:
         return
     try:
+        eufy_client.authenticate()
         window_start = int(time.time()) - 30 * 86400
         measurements = eufy_client.fetch_measurements(after_timestamp=window_start)
         if not measurements:
