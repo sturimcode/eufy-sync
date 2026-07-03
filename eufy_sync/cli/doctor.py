@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from eufy_sync import credentials
 from eufy_sync.cli import shared
 from eufy_sync.cli import updater
 from eufy_sync.config import load_config
@@ -134,6 +135,16 @@ def _check_profile(report, user) -> None:
 
 def _check_keychain(report) -> None:
     try:
+        # A credentials file next to an active keychain is a stray unmarked
+        # file being ignored: it holds a stale copy of secrets that nothing
+        # reads or updates, so surface it instead of staying silent.
+        if credentials._active_backend() == "keychain" and credentials.CRED_FILE.exists():
+            report(
+                "WARN", "keychain",
+                "keychain active; unused credentials file at ~/.garmin-sync/credentials.json",
+                "eufy-sync --use-file-store (adopt it) or delete the file",
+            )
+            return
         report("PASS", "keychain", active_store_label())
     except Exception as e:
         report("PASS", "keychain", f"file store (no keychain prompts) ({e})")

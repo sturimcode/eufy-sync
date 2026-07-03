@@ -632,8 +632,12 @@ def test_status_with_corrupt_db_exits_cleanly(tmp_path):
     db_path = tmp_path / "state.db"
 
     argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path), "--status"]
+    # The migration is patched out so this test exercises only the corrupt-db
+    # path; an earlier version left it running and it wrote fake passwords
+    # into the real credentials file (now also blocked by conftest).
     with patch("sys.argv", argv), \
          patch("eufy_sync.credentials._keyring_available", return_value=False), \
+         patch("eufy_sync.cli.setup._migrate_config_passwords"), \
          patch("eufy_sync.state.SyncState", side_effect=OSError("disk I/O error")), \
          pytest.raises(SystemExit) as exc:
         main()

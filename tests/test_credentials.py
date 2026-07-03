@@ -242,6 +242,10 @@ def test_use_file_store_moves_vault_from_keychain_to_file(fake_keyring, cred_fil
     # Keychain vault item cleared.
     assert keyring.get_password(SERVICE_NAME, "vault") is None
 
+    # The file carries the opt-in marker: only use_file_store writes it, and
+    # it is what makes the file win over a working keychain from now on.
+    assert on_disk["explicit"] is True
+
     assert _active_backend() == "file"
     # Reads now come from the file, unaffected by the (cleared) keychain.
     assert get_password("default:eufy") == "pw1"
@@ -394,7 +398,197 @@ def test_cli_use_keychain_exits_one_with_message_when_no_keychain(tmp_path, caps
     assert "no keychain backend available" in out
 
 
-# --- 10. doctor reflects active store ---------------------------------------
+# --- 10. explicit opt-in: backend selection ----------------------------------
+#
+# A credentials file only overrides a working keychain when it carries the
+# "explicit" marker that use_file_store() writes. An unmarked file is either
+# the headless auto-fallback (no keychain: keep using it) or a stray leftover
+# (keychain works: ignore it, never delete it).
+
+
+def test_unmarked_file_with_keyring_is_ignored(fake_keyring, cred_file):
+    from eufy_sync.credentials import _active_backend, store_password, get_password
+
+    cred_file.parent.mkdir(parents=True, exist_ok=True)
+    cred_file.write_text(json.dumps({"passwords": {"default:eufy": "stray-pw"}, "tokens": {}}))
+
+    assert _active_backend() == "keychain"
+
+    store_password("default:eufy", "keychain-pw")
+    assert get_password("default:eufy") == "keychain-pw"
+    # The stray file is ignored but never deleted or rewritten.
+    on_disk = json.loads(cred_file.read_text())
+    assert on_disk["passwords"]["default:eufy"] == "stray-pw"
+
+
+def test_unmarked_file_without_keyring_stays_file(no_keyring, cred_file):
+    """Headless auto-fallback: the file it creates has no marker, and it must
+    keep being the active backend on every later run."""
+    from eufy_sync.credentials import _active_backend, store_token, get_token
+
+    store_token("eufy", {"access_token": "t"})
+
+    on_disk = json.loads(cred_file.read_text())
+    assert "explicit" not in on_disk
+    assert _active_backend() == "file"
+    assert get_token("eufy") == {"access_token": "t"}
+
+
+def test_marked_file_with_keyring_stays_file(fake_keyring, cred_file):
+    from eufy_sync.credentials import _active_backend, get_password
+
+    cred_file.parent.mkdir(parents=True, exist_ok=True)
+    cred_file.write_text(json.dumps({
+        "passwords": {"default:eufy": "file-pw"}, "tokens": {}, "explicit": True,
+    }))
+
+    assert _active_backend() == "file"
+    assert get_password("default:eufy") == "file-pw"
+
+
+def test_malformed_file_counts_as_unmarked(fake_keyring, cred_file):
+    from eufy_sync.credentials import _active_backend
+
+    cred_file.parent.mkdir(parents=True, exist_ok=True)
+    cred_file.write_text("{not valid json::")
+
+    assert _active_backend() == "keychain"
+
+
+# --- 11. explicit opt-in: use_file_store merge + marker ----------------------
+
+
+def test_use_file_store_sets_marker_and_activates_file(fake_keyring, cred_file):
+    from eufy_sync.credentials import use_file_store, _active_backend, store_password, get_password
+
+    store_password("default:eufy", "pw1")
+
+    use_file_store()
+
+    on_disk = json.loads(cred_file.read_text())
+    assert on_disk["explicit"] is True
+    assert _active_backend() == "file"
+    assert get_password("default:eufy") == "pw1"
+
+
+def test_use_file_store_merges_keychain_and_stray_file(fake_keyring, cred_file):
+    """Opting in must not lose secrets from either side: union of both vaults,
+    with the currently active store (the keychain here) winning conflicts."""
+    from eufy_sync.credentials import use_file_store, store_token
+
+    store_token("garmin", {"di_token": "keychain-A"})
+    store_token("shared", {"v": "keychain"})
+
+    cred_file.parent.mkdir(parents=True, exist_ok=True)
+    cred_file.write_text(json.dumps({
+        "passwords": {},
+        "tokens": {"strava": {"access_token": "file-B"}, "shared": {"v": "file"}},
+    }))
+
+    use_file_store()
+
+    on_disk = json.loads(cred_file.read_text())
+    assert on_disk["explicit"] is True
+    assert on_disk["tokens"]["garmin"] == {"di_token": "keychain-A"}
+    assert on_disk["tokens"]["strava"] == {"access_token": "file-B"}
+    assert on_disk["tokens"]["shared"] == {"v": "keychain"}
+
+
+def test_use_file_store_is_idempotent_on_marked_file(fake_keyring, cred_file):
+    from eufy_sync.credentials import use_file_store, store_password
+
+    store_password("default:eufy", "pw1")
+    use_file_store()
+    before = json.loads(cred_file.read_text())
+
+    use_file_store()
+
+    assert json.loads(cred_file.read_text()) == before
+
+
+def test_use_file_store_keychain_read_failure_notes_and_continues(fake_keyring, cred_file, monkeypatch, capsys):
+    """A locked keychain must not block opting into the file store; the
+    existing file contents are adopted and a one-line note explains that the
+    keychain secrets could not be copied."""
+    from eufy_sync.credentials import use_file_store
+
+    def boom(service, account):
+        raise OSError("keychain locked")
+
+    monkeypatch.setattr("keyring.get_password", boom)
+    cred_file.parent.mkdir(parents=True, exist_ok=True)
+    cred_file.write_text(json.dumps({"passwords": {"default:eufy": "file-pw"}, "tokens": {}}))
+
+    use_file_store()
+
+    out = capsys.readouterr().out
+    assert "keychain" in out.lower()
+    on_disk = json.loads(cred_file.read_text())
+    assert on_disk["explicit"] is True
+    assert on_disk["passwords"]["default:eufy"] == "file-pw"
+
+
+def test_marker_survives_store_token_round_trip(fake_keyring, cred_file):
+    """_normalize_vault must preserve the marker, or the first write after
+    opting in would silently flip the backend to the keychain again."""
+    from eufy_sync.credentials import use_file_store, store_token, _active_backend
+
+    use_file_store()
+    store_token("garmin", {"di_token": "abc"})
+
+    on_disk = json.loads(cred_file.read_text())
+    assert on_disk["explicit"] is True
+    assert on_disk["tokens"]["garmin"] == {"di_token": "abc"}
+    assert _active_backend() == "file"
+
+
+# --- 12. explicit opt-in: use_keychain_store strips the marker ---------------
+
+
+def test_use_keychain_store_strips_marker_and_unlinks_file(fake_keyring, cred_file):
+    import keyring
+    from eufy_sync.credentials import (
+        SERVICE_NAME, store_password, use_file_store, use_keychain_store, get_password,
+    )
+
+    store_password("default:eufy", "pw1")
+    use_file_store()
+
+    use_keychain_store()
+
+    assert not cred_file.exists()
+    stored = json.loads(keyring.get_password(SERVICE_NAME, "vault"))
+    assert "explicit" not in stored
+    assert stored["passwords"]["default:eufy"] == "pw1"
+    assert get_password("default:eufy") == "pw1"
+
+
+# --- 13. locked keychain: reads raise, never overwrite -----------------------
+
+
+def test_keychain_read_failure_raises_actionable_error_and_writes_nothing(fake_keyring, cred_file, monkeypatch):
+    """If the keychain cannot be read, returning an empty vault would let the
+    next save overwrite the real vault with a near-empty one. The read must
+    raise with an actionable message instead, and nothing may be written."""
+    from eufy_sync.credentials import get_token, get_password
+
+    def boom(service, account):
+        raise OSError("keychain locked")
+
+    monkeypatch.setattr("keyring.get_password", boom)
+
+    with patch("keyring.set_password") as mock_set:
+        with pytest.raises(RuntimeError, match="could not be read") as exc:
+            get_token("garmin")
+        with pytest.raises(RuntimeError, match="--use-file-store"):
+            get_password("default:eufy")
+
+    assert exc.value.__cause__ is not None
+    mock_set.assert_not_called()
+    assert not cred_file.exists()
+
+
+# --- 14. doctor reflects active store ---------------------------------------
 
 
 def test_doctor_keychain_line_reflects_active_store(monkeypatch, capsys):

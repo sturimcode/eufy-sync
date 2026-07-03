@@ -7,12 +7,22 @@ That object is stored in exactly one place at a time:
 
 - keychain backend: one keyring item (account "vault") - one "Always Allow"
   prompt total, instead of one per secret.
-- file backend: ~/.garmin-sync/credentials.json, written 0o600 - used when
-  there is no keychain (e.g. headless Linux) or when the user opts in with
-  --use-file-store.
+- file backend: ~/.garmin-sync/credentials.json, written 0o600.
+
+Which backend is active follows a three-state rule:
+
+1. A credentials file carrying the "explicit" marker (written only by
+   use_file_store, i.e. --use-file-store) always wins.
+2. Otherwise a working keychain wins. A stray unmarked file is ignored but
+   never deleted, so a file that was not created on purpose cannot silently
+   pin the tool to file mode.
+3. With no working keychain (e.g. headless Linux), the file is the automatic
+   fallback, marker or not.
 
 Credential functions never raise for lack of a keychain: the file backend is
 always the fallback, so callers can call get/store/delete unconditionally.
+A keychain that exists but cannot be read (locked, access denied) does
+raise, so a failed read can never be saved back over the real vault.
 
 A lazy, one-time migration promotes secrets from the old per-item keychain
 layout (one keyring account per password/token) into the vault the first
@@ -51,15 +61,28 @@ def _keyring_available() -> bool:
         return False
 
 
-def _active_backend() -> str:
-    """Which backend currently holds the vault.
+def _file_store_is_explicit() -> bool:
+    """True when CRED_FILE carries the opt-in marker that only
+    use_file_store() writes. Malformed JSON counts as no marker."""
+    try:
+        data = json.loads(CRED_FILE.read_text())
+    except (json.JSONDecodeError, TypeError, OSError):
+        return False
+    return isinstance(data, dict) and bool(data.get("explicit"))
 
-    A CRED_FILE on disk always wins (the user opted into file storage, or an
-    earlier run auto-fell-back to it). Otherwise use the keychain if it
-    works; if not, the file backend is where the very next write will land.
-    """
+
+def _active_backend() -> str:
+    """Which backend currently holds the vault (the three-state rule from
+    the module docstring). Re-evaluated on every call: the file can appear,
+    disappear, or gain the marker between calls."""
     if CRED_FILE.exists():
-        return "file"
+        if _file_store_is_explicit():
+            return "file"
+        if not _keyring_available():
+            return "file"
+        # Unmarked file next to a working keychain: a stray leftover, not an
+        # opt-in. Ignore it (never delete it) and stay on the keychain.
+        return "keychain"
     if _keyring_available():
         return "keychain"
     return "file"
@@ -82,15 +105,31 @@ def _normalize_vault(vault: dict | None) -> dict:
         return _empty_vault()
     passwords = vault.get("passwords")
     tokens = vault.get("tokens")
-    return {
+    normalized = {
         "passwords": passwords if isinstance(passwords, dict) else {},
         "tokens": tokens if isinstance(tokens, dict) else {},
     }
+    # The opt-in marker must survive every load/save round trip of the file
+    # backend, or the first store after --use-file-store would drop it and
+    # silently flip the backend back to the keychain.
+    if vault.get("explicit"):
+        normalized["explicit"] = True
+    return normalized
 
 
 def _load_vault_from_keychain() -> dict:
     import keyring
-    raw = keyring.get_password(SERVICE_NAME, VAULT_ACCOUNT)
+    try:
+        raw = keyring.get_password(SERVICE_NAME, VAULT_ACCOUNT)
+    except Exception as e:
+        # Returning an empty vault here would let the next read-modify-write
+        # save a near-empty vault over the real one. Raising keeps every
+        # caller safe; sync/doctor/startup already report exceptions cleanly.
+        raise RuntimeError(
+            "The system keychain could not be read (it may be locked or "
+            "access was denied). Unlock it and retry, or run: "
+            "eufy-sync --use-file-store"
+        ) from e
     if raw is None:
         return _empty_vault()
     try:
@@ -246,18 +285,37 @@ def delete_token(name: str) -> None:
 
 
 def use_file_store() -> None:
-    """Move the vault into a 0o600 file and stop using the keychain.
+    """Adopt the 0o600 file as the permanent credential store.
 
-    Reads whatever is currently active (forcing a keychain read if that is
-    the active backend), writes it to CRED_FILE, then clears the keychain
-    vault item. After this, CRED_FILE existing makes it the active backend.
+    Merges the keychain vault with any existing CRED_FILE vault (union of
+    both; the currently active store's value wins key conflicts), writes the
+    result with the "explicit" opt-in marker, then clears the keychain vault
+    item. Idempotent: running it on an already-marked file store rewrites
+    the same content.
     """
-    if _active_backend() == "keychain":
-        vault = _load_vault_from_keychain()
-    else:
-        vault = _load_vault()
+    active = _active_backend()
 
-    _save_vault_to_file(vault)
+    keychain_vault = _empty_vault()
+    if _keyring_available():
+        try:
+            keychain_vault = _load_vault_from_keychain()
+        except Exception:
+            print("Note: existing keychain secrets could not be copied (keychain unreadable); continuing without them.")
+    file_vault = _load_vault_from_file()
+
+    if active == "keychain":
+        winner, loser = keychain_vault, file_vault
+    else:
+        winner, loser = file_vault, keychain_vault
+    merged = {
+        "passwords": {**loser["passwords"], **winner["passwords"]},
+        "tokens": {**loser["tokens"], **winner["tokens"]},
+        "explicit": True,
+    }
+
+    # File first, keychain delete second: if the write fails, the keychain
+    # copy is still intact.
+    _save_vault_to_file(merged)
 
     if _keyring_available():
         try:
@@ -270,6 +328,10 @@ def use_file_store() -> None:
 def use_keychain_store() -> None:
     """Move the vault into the system keychain and stop using the file.
 
+    Merges the file vault with any existing keychain vault (the file's
+    values win conflicts: it was the store being left) and strips the
+    "explicit" marker, which only ever belongs in the file.
+
     Raises RuntimeError if no working keyring backend is available.
     """
     if not _keyring_available():
@@ -278,8 +340,15 @@ def use_keychain_store() -> None:
             "cannot be moved into it. Staying on the file store."
         )
 
-    vault = _load_vault_from_file()
-    _save_vault_to_keychain(vault)
+    file_vault = _load_vault_from_file()
+    keychain_vault = _load_vault_from_keychain()
+    merged = {
+        "passwords": {**keychain_vault["passwords"], **file_vault["passwords"]},
+        "tokens": {**keychain_vault["tokens"], **file_vault["tokens"]},
+    }
+    # Keychain first, unlink second: the file is only removed once the
+    # keychain holds everything.
+    _save_vault_to_keychain(merged)
 
     if CRED_FILE.exists():
         CRED_FILE.unlink()

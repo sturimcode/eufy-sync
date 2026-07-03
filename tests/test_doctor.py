@@ -326,6 +326,31 @@ def test_profile_unset_warns_with_select_profile_fix(tmp_path, monkeypatch, caps
     assert code == 0
 
 
+def test_keychain_stray_unmarked_file_warns_adopt_or_delete(tmp_path, monkeypatch):
+    """A credentials file that was not created by --use-file-store is ignored
+    while the keychain works. Doctor must surface it: it holds a stale copy
+    of secrets that nothing reads or updates."""
+    from eufy_sync import credentials
+
+    stray = tmp_path / "credentials.json"
+    stray.write_text('{"passwords": {"default:eufy": "old"}, "tokens": {}}')
+    monkeypatch.setattr(credentials, "CRED_FILE", stray)
+    monkeypatch.setattr(credentials, "_keyring_available", lambda: True)
+
+    lines = []
+
+    def report(status, label, detail, fix=None):
+        lines.append((status, label, detail, fix))
+
+    doctor._check_keychain(report)
+
+    status, label, detail, fix = lines[0]
+    assert status == "WARN"
+    assert label == "keychain"
+    assert detail == "keychain active; unused credentials file at ~/.garmin-sync/credentials.json"
+    assert fix == "eufy-sync --use-file-store (adopt it) or delete the file"
+
+
 def test_keychain_fallback_never_fails(tmp_path, monkeypatch, capsys):
     """With no keychain backend, credentials fall back to the 0o600 file
     store automatically - this is a normal, working configuration, not a
