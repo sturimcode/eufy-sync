@@ -56,13 +56,40 @@ def test_write_config_overwrites_existing(tmp_path: Path):
 # --- Launch Agent tests ---
 
 
-def test_generate_plist_contains_binary_path():
-    plist = _generate_plist("/usr/local/bin/eufy-sync")
-    assert "/usr/local/bin/eufy-sync" in plist
-    assert "--headless" in plist
+def test_generate_plist_points_at_given_program():
+    plist = _generate_plist("/home/user/.garmin-sync/run-sync.sh")
+    assert "/home/user/.garmin-sync/run-sync.sh" in plist
+    # --headless lives in the wrapper script, not the plist, so the registered
+    # program's bytes stay stable across updates.
+    assert "--headless" not in plist
     assert LAUNCH_AGENT_LABEL in plist
     assert "StartInterval" in plist
     assert "14400" in plist
+
+
+def test_write_run_script_creates_executable_wrapper(tmp_path):
+    from eufy_sync.cli.maintenance import _write_run_script
+    with patch("eufy_sync.cli.shared.DATA_DIR", tmp_path):
+        script = _write_run_script("/home/user/.local/bin/eufy-sync")
+    assert script == tmp_path / "run-sync.sh"
+    content = script.read_text()
+    assert content.startswith("#!/bin/sh")
+    assert 'exec "/home/user/.local/bin/eufy-sync" --headless' in content
+    assert oct(script.stat().st_mode)[-3:] == "755"
+
+
+def test_write_run_script_is_byte_stable_across_installs(tmp_path):
+    # macOS re-announces background items when the registered file changes;
+    # a second install with the same binary must not rewrite the script.
+    import os
+    from eufy_sync.cli.maintenance import _write_run_script
+    with patch("eufy_sync.cli.shared.DATA_DIR", tmp_path):
+        first = _write_run_script("/home/user/.local/bin/eufy-sync")
+        mtime_before = os.stat(first).st_mtime_ns
+        second = _write_run_script("/home/user/.local/bin/eufy-sync")
+    assert first == second
+    assert os.stat(second).st_mtime_ns == mtime_before
+    assert first.read_text() == second.read_text()
 
 
 def test_generate_plist_contains_log_path():
@@ -74,16 +101,22 @@ def test_generate_plist_contains_log_path():
 @patch("eufy_sync.cli.maintenance.shutil.which", return_value="/home/user/.local/bin/eufy-sync")
 @patch("eufy_sync.cli.maintenance.platform.system", return_value="Darwin")
 @patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
-def test_install_launch_agent_writes_plist_and_loads(mock_path, mock_system, mock_which, mock_run):
+def test_install_launch_agent_writes_plist_and_loads(mock_path, mock_system, mock_which, mock_run, tmp_path):
     mock_path.parent.mkdir = MagicMock()
     mock_path.write_text = MagicMock()
 
-    _install_launch_agent()
+    with patch("eufy_sync.cli.shared.DATA_DIR", tmp_path):
+        _install_launch_agent()
 
     mock_which.assert_called_once_with("eufy-sync")
     mock_path.write_text.assert_called_once()
     plist_content = mock_path.write_text.call_args[0][0]
-    assert "/home/user/.local/bin/eufy-sync" in plist_content
+    # The agent registers the stable wrapper, never the pipx/uv binary, so
+    # updates do not re-trigger the macOS background-activity announcement.
+    assert str(tmp_path / "run-sync.sh") in plist_content
+    assert "/home/user/.local/bin/eufy-sync" not in plist_content
+    wrapper = tmp_path / "run-sync.sh"
+    assert 'exec "/home/user/.local/bin/eufy-sync" --headless' in wrapper.read_text()
 
     # Should call launchctl unload then load
     assert mock_run.call_count == 2
