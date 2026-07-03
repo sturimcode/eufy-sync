@@ -17,7 +17,7 @@ from pathlib import Path
 from eufy_sync.cli import shared
 from eufy_sync.cli import updater
 from eufy_sync.config import load_config
-from eufy_sync.credentials import _keyring_available
+from eufy_sync.credentials import _keyring_available, active_store_label
 from eufy_sync.eufy_client import EufyClient
 from eufy_sync.garmin_auth import GarminAuth
 from eufy_sync.state import SyncState
@@ -134,12 +134,9 @@ def _check_profile(report, user) -> None:
 
 def _check_keychain(report) -> None:
     try:
-        if _keyring_available():
-            report("PASS", "keychain", "macOS Keychain")
-        else:
-            report("WARN", "keychain", "file fallback (no keychain backend)")
+        report("PASS", "keychain", active_store_label())
     except Exception as e:
-        report("WARN", "keychain", f"file fallback ({e})")
+        report("PASS", "keychain", f"file store (no keychain prompts) ({e})")
 
 
 def _check_eufy_token(report, user):

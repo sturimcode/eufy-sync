@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -294,15 +293,13 @@ class GarminAuth:
         return {"state": "no_session", "days_remaining": None}
 
     def _load_token(self) -> dict | None:
-        from eufy_sync.credentials import get_token, _keyring_available
+        from eufy_sync.credentials import get_token
         # A valid library blob has di_token as a STRING. The old Playwright
         # session also had a "di_token" key but as a nested dict; reject it so
         # those users migrate cleanly to a fresh login.
-        if _keyring_available():
-            data = get_token("garmin")
-            if data and isinstance(data.get("di_token"), str):
-                return data
-            return None
+        data = get_token("garmin")
+        if data is not None:
+            return data if isinstance(data.get("di_token"), str) else None
         if not self.session_path.exists():
             return None
         try:
@@ -313,20 +310,13 @@ class GarminAuth:
 
     def _save_token(self, garmin: Garmin) -> None:
         blob = json.loads(garmin.client.dumps())
-        from eufy_sync.credentials import store_token, _keyring_available
-        if _keyring_available():
-            store_token("garmin", blob)
-            if self.session_path.exists():
-                self.session_path.unlink()
-            return
-        self.session_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(str(self.session_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(json.dumps(blob, indent=2))
+        from eufy_sync.credentials import store_token
+        store_token("garmin", blob)
+        if self.session_path.exists():
+            self.session_path.unlink()
 
     def _clear_token(self) -> None:
-        from eufy_sync.credentials import delete_token, _keyring_available
-        if _keyring_available():
-            delete_token("garmin")
+        from eufy_sync.credentials import delete_token
+        delete_token("garmin")
         if self.session_path.exists():
             self.session_path.unlink()

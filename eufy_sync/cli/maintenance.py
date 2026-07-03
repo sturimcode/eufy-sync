@@ -35,35 +35,23 @@ def _update_password(config_path: Path) -> None:
         print("No changes made.")
         return
 
-    from eufy_sync.credentials import store_password, delete_token, _keyring_available
-    keychain_ok = _keyring_available()
+    from eufy_sync.credentials import store_password, delete_token
 
     if eufy_pw:
-        if keychain_ok:
-            store_password(f"{user_name}:eufy", eufy_pw)
-        else:
-            user["eufy"]["password"] = eufy_pw
+        store_password(f"{user_name}:eufy", eufy_pw)
 
     if garmin_pw:
-        if keychain_ok:
-            store_password(f"{user_name}:garmin", garmin_pw)
-        else:
-            user["garmin"]["password"] = garmin_pw
-
-    if not keychain_ok:
-        shared._write_config(config_path, config)
+        store_password(f"{user_name}:garmin", garmin_pw)
 
     # Clear cached tokens for changed services
     if eufy_pw:
-        if keychain_ok:
-            delete_token("eufy")
+        delete_token("eufy")
         eufy_token = shared.DATA_DIR / "eufy_token.json"
         if eufy_token.exists():
             eufy_token.unlink()
 
     if garmin_pw:
-        if keychain_ok:
-            delete_token("garmin")
+        delete_token("garmin")
         garmin_session = shared.DATA_DIR / "session.json"
         if garmin_session.exists():
             garmin_session.unlink()

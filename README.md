@@ -75,6 +75,8 @@ eufy-sync --verbose            # detailed logs
 eufy-sync --install-agent      # turn automatic sync on
 eufy-sync --uninstall-agent    # turn automatic sync off
 eufy-sync --uninstall          # remove all data and clean up
+eufy-sync --use-file-store     # store credentials in a 0o600 file, no keychain prompts
+eufy-sync --use-keychain       # move credentials back into the system keychain
 ```
 
 ## Updating
@@ -146,7 +148,11 @@ On each run it pulls your Eufy history and checks a local SQLite DB for what eac
 
 ## Security
 
-Passwords and OAuth tokens live in your macOS Keychain, not plaintext files. The config in `~/.garmin-sync/` holds only email addresses and Strava app credentials, at `600` permissions. Credentials go over HTTPS to Eufy, Garmin, and Strava only, and are never logged or sent anywhere else. The one other outbound call is a weekly version check to pypi.org, with no credentials. On a host without a keychain (headless Linux), credentials fall back to a `600` file.
+Passwords and OAuth tokens live in a single item in your macOS Keychain, not plaintext files. The config in `~/.garmin-sync/` holds only email addresses and Strava app credentials, at `600` permissions. Credentials go over HTTPS to Eufy, Garmin, and Strava only, and are never logged or sent anywhere else. The one other outbound call is a weekly version check to pypi.org, with no credentials. On a host without a keychain (headless Linux), or if you choose `--use-file-store`, credentials fall back to a single `600` file at `~/.garmin-sync/credentials.json`.
+
+### Credential storage
+
+By default, credentials go into one keychain item, so macOS only asks to "Always Allow" once, not once per secret. Run `eufy-sync --use-file-store` to keep credentials in a `600` file instead, with no keychain prompts at all - a good fit for headless or scheduled setups. Run `eufy-sync --use-keychain` to move them back.
 
 ## Known quirks
 

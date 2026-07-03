@@ -34,6 +34,8 @@ def main() -> None:
     parser.add_argument("--install-agent", action="store_true", help="Set up automatic sync (macOS Launch Agent)")
     parser.add_argument("--uninstall-agent", action="store_true", help="Remove the automatic sync Launch Agent")
     parser.add_argument("--uninstall", action="store_true", help="Remove all data, tokens, and Launch Agent")
+    parser.add_argument("--use-file-store", action="store_true", help="Store credentials in a 0o600 file instead of the keychain (no keychain prompts)")
+    parser.add_argument("--use-keychain", action="store_true", help="Move credentials back into the system keychain")
     parser.add_argument("--config", type=Path, default=None, help="Config path (default: ~/.garmin-sync/config.yaml)")
     parser.add_argument("--db", type=Path, default=None, help="Database path (default: ~/.garmin-sync/state.db)")
     args = parser.parse_args()
@@ -50,6 +52,23 @@ def main() -> None:
     if args.uninstall:
         maintenance._uninstall(shared.DATA_DIR, config_path=config_path, db_path=db_path)
         return
+
+    # Handle credential store mode switches
+    if args.use_file_store:
+        from eufy_sync import credentials
+        credentials.use_file_store()
+        print("Credentials moved to a 0o600 file (~/.garmin-sync/credentials.json). No more keychain prompts.")
+        sys.exit(0)
+
+    if args.use_keychain:
+        from eufy_sync import credentials
+        try:
+            credentials.use_keychain_store()
+        except RuntimeError as e:
+            print(str(e))
+            sys.exit(1)
+        print("Credentials moved into the system keychain.")
+        sys.exit(0)
 
     # Handle Launch Agent install/uninstall
     if args.install_agent:
