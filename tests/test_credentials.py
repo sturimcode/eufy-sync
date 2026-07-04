@@ -455,6 +455,17 @@ def test_malformed_file_counts_as_unmarked(fake_keyring, cred_file):
     assert _active_backend() == "keychain"
 
 
+def test_non_utf8_file_counts_as_unmarked(fake_keyring, cred_file):
+    """read_text() raises UnicodeDecodeError (a ValueError) on non-UTF-8
+    bytes; that must count as no marker, not crash every backend lookup."""
+    from eufy_sync.credentials import _active_backend
+
+    cred_file.parent.mkdir(parents=True, exist_ok=True)
+    cred_file.write_bytes(b"\x80\x81\xfe\xff")
+
+    assert _active_backend() == "keychain"
+
+
 # --- 11. explicit opt-in: use_file_store merge + marker ----------------------
 
 
@@ -528,6 +539,46 @@ def test_use_file_store_keychain_read_failure_notes_and_continues(fake_keyring, 
     assert on_disk["passwords"]["default:eufy"] == "file-pw"
 
 
+def test_use_file_store_keeps_keychain_vault_when_read_fails(fake_keyring, cred_file, monkeypatch, capsys):
+    """Deleting the keychain vault item needs no read access, so after a
+    failed read it would destroy the only copy of every secret that never
+    made it into the file. The item must be left alone."""
+    from eufy_sync.credentials import SERVICE_NAME, VAULT_ACCOUNT, use_file_store
+
+    fake_keyring.set_password(SERVICE_NAME, VAULT_ACCOUNT, json.dumps({
+        "passwords": {"default:eufy": "real-pw"}, "tokens": {},
+    }))
+
+    def boom(service, account):
+        raise OSError("access denied")
+
+    monkeypatch.setattr("keyring.get_password", boom)
+
+    use_file_store()
+
+    on_disk = json.loads(cred_file.read_text())
+    assert on_disk["explicit"] is True
+    assert (SERVICE_NAME, VAULT_ACCOUNT) in fake_keyring.data
+
+
+def test_interrupted_file_save_keeps_previous_vault(fake_keyring, cred_file):
+    """The vault file is replaced atomically: a write that dies partway
+    through must leave the previous contents (and the opt-in marker) intact
+    instead of truncating the file in place."""
+    from eufy_sync.credentials import use_file_store, store_token, _active_backend
+
+    use_file_store()
+    store_token("garmin", {"di_token": "abc"})
+    before = cred_file.read_bytes()
+
+    with pytest.raises(TypeError):
+        store_token("bad", {"obj": object()})  # json.dump raises mid-write
+
+    assert cred_file.read_bytes() == before
+    assert not cred_file.with_name(cred_file.name + ".tmp").exists()
+    assert _active_backend() == "file"
+
+
 def test_marker_survives_store_token_round_trip(fake_keyring, cred_file):
     """_normalize_vault must preserve the marker, or the first write after
     opting in would silently flip the backend to the keychain again."""
@@ -561,6 +612,28 @@ def test_use_keychain_store_strips_marker_and_unlinks_file(fake_keyring, cred_fi
     assert "explicit" not in stored
     assert stored["passwords"]["default:eufy"] == "pw1"
     assert get_password("default:eufy") == "pw1"
+
+
+def test_use_keychain_store_stray_file_does_not_overwrite_keychain(fake_keyring, cred_file):
+    """A stray unmarked file was never the active store, so moving 'back' to
+    the keychain must not let its leftover values clobber real keychain
+    secrets. Union is still kept: file-only keys survive the move."""
+    import keyring
+    from eufy_sync.credentials import SERVICE_NAME, store_password, use_keychain_store
+
+    store_password("default:eufy", "real-pw")  # active backend: keychain
+    cred_file.parent.mkdir(parents=True, exist_ok=True)
+    cred_file.write_text(json.dumps({
+        "passwords": {"default:eufy": "stale-pw", "default:garmin": "file-only"},
+        "tokens": {},
+    }))
+
+    use_keychain_store()
+
+    stored = json.loads(keyring.get_password(SERVICE_NAME, "vault"))
+    assert stored["passwords"]["default:eufy"] == "real-pw"
+    assert stored["passwords"]["default:garmin"] == "file-only"
+    assert not cred_file.exists()
 
 
 # --- 13. locked keychain: reads raise, never overwrite -----------------------

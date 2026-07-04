@@ -645,6 +645,16 @@ def test_status_with_corrupt_db_exits_cleanly(tmp_path):
     assert exc.value.code == 1
 
 
+def test_upgrade_notice_file_is_hermetic(tmp_path):
+    """setup.py freezes UPGRADE_NOTICE_FILE from shared.DATA_DIR at import
+    time, so patching shared.DATA_DIR alone is not enough; the autouse
+    fixture must repoint the constant itself or _show_upgrade_notice writes
+    to the real ~/.garmin-sync."""
+    from eufy_sync.cli import setup
+
+    assert str(setup.UPGRADE_NOTICE_FILE).startswith(str(tmp_path))
+
+
 @patch("eufy_sync.cli.shared._notify")
 def test_headless_first_run_refuses_wizard(mock_notify, tmp_path):
     """A headless run with no config must never call input() - it should

@@ -28,6 +28,12 @@ def _hermetic_machine(tmp_path, monkeypatch):
         "eufy_sync.cli.shared.LAUNCH_AGENT_PATH",
         tmp_path / "LaunchAgents" / "com.sturimcode.eufy-garmin-sync.plist",
     )
+    # setup.py captures shared.DATA_DIR at import time into this module-level
+    # constant, so patching shared.DATA_DIR alone leaves it pointed at the
+    # real ~/.garmin-sync.
+    monkeypatch.setattr(
+        "eufy_sync.cli.setup.UPGRADE_NOTICE_FILE", data_dir / ".strava_notice_shown"
+    )
 
     store: dict[tuple[str, str], str] = {}
 
