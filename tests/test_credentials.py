@@ -398,6 +398,25 @@ def test_cli_use_keychain_exits_one_with_message_when_no_keychain(tmp_path, caps
     assert "no keychain backend available" in out
 
 
+def test_cli_use_file_store_exits_one_when_keychain_unreadable(tmp_path, capsys):
+    """An unreadable keychain makes use_file_store abort with RuntimeError;
+    the CLI must surface the message and exit 1, not dump a traceback."""
+    from eufy_sync.cli.app import main
+
+    config_path = tmp_path / "config.yaml"
+    db_path = tmp_path / "state.db"
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path), "--use-file-store"]
+
+    with patch("sys.argv", argv), \
+         patch("eufy_sync.credentials.use_file_store", side_effect=RuntimeError("keychain could not be read")), \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "keychain could not be read" in out
+
+
 # --- 10. explicit opt-in: backend selection ----------------------------------
 #
 # A credentials file only overrides a working keychain when it carries the
@@ -517,11 +536,12 @@ def test_use_file_store_is_idempotent_on_marked_file(fake_keyring, cred_file):
     assert json.loads(cred_file.read_text()) == before
 
 
-def test_use_file_store_keychain_read_failure_notes_and_continues(fake_keyring, cred_file, monkeypatch, capsys):
-    """A locked keychain must not block opting into the file store; the
-    existing file contents are adopted and a one-line note explains that the
-    keychain secrets could not be copied."""
-    from eufy_sync.credentials import use_file_store
+def test_use_file_store_aborts_when_keychain_unreadable(fake_keyring, cred_file, monkeypatch):
+    """A keychain that exists but cannot be read must abort the opt-in and
+    change nothing. Writing the marker over a file that lacks the unread
+    keychain secrets would orphan them permanently. Even with existing file
+    contents present, the safe move is to stop and let the user retry."""
+    from eufy_sync.credentials import use_file_store, _active_backend
 
     def boom(service, account):
         raise OSError("keychain locked")
@@ -529,20 +549,23 @@ def test_use_file_store_keychain_read_failure_notes_and_continues(fake_keyring, 
     monkeypatch.setattr("keyring.get_password", boom)
     cred_file.parent.mkdir(parents=True, exist_ok=True)
     cred_file.write_text(json.dumps({"passwords": {"default:eufy": "file-pw"}, "tokens": {}}))
+    before = cred_file.read_text()
 
-    use_file_store()
+    with pytest.raises(RuntimeError) as exc:
+        use_file_store()
 
-    out = capsys.readouterr().out
-    assert "keychain" in out.lower()
-    on_disk = json.loads(cred_file.read_text())
-    assert on_disk["explicit"] is True
-    assert on_disk["passwords"]["default:eufy"] == "file-pw"
+    # Actionable message and no state change: the file is byte-for-byte the
+    # same (no marker written) and the backend has not flipped to file.
+    assert "keychain" in str(exc.value).lower()
+    assert cred_file.read_text() == before
+    assert _active_backend() == "keychain"
 
 
-def test_use_file_store_keeps_keychain_vault_when_read_fails(fake_keyring, cred_file, monkeypatch, capsys):
-    """Deleting the keychain vault item needs no read access, so after a
-    failed read it would destroy the only copy of every secret that never
-    made it into the file. The item must be left alone."""
+def test_use_file_store_keeps_keychain_vault_when_read_fails(fake_keyring, cred_file, monkeypatch):
+    """After a failed keychain read the vault item must be left alone.
+    Deleting it needs no read access, so removing it would destroy the only
+    copy of every secret that never made it into the file. The abort must
+    happen before any write or delete."""
     from eufy_sync.credentials import SERVICE_NAME, VAULT_ACCOUNT, use_file_store
 
     fake_keyring.set_password(SERVICE_NAME, VAULT_ACCOUNT, json.dumps({
@@ -554,11 +577,12 @@ def test_use_file_store_keeps_keychain_vault_when_read_fails(fake_keyring, cred_
 
     monkeypatch.setattr("keyring.get_password", boom)
 
-    use_file_store()
+    with pytest.raises(RuntimeError):
+        use_file_store()
 
-    on_disk = json.loads(cred_file.read_text())
-    assert on_disk["explicit"] is True
+    # Keychain vault item still present; no file written.
     assert (SERVICE_NAME, VAULT_ACCOUNT) in fake_keyring.data
+    assert not cred_file.exists()
 
 
 def test_interrupted_file_save_keeps_previous_vault(fake_keyring, cred_file):
@@ -575,7 +599,9 @@ def test_interrupted_file_save_keeps_previous_vault(fake_keyring, cred_file):
         store_token("bad", {"obj": object()})  # json.dump raises mid-write
 
     assert cred_file.read_bytes() == before
-    assert not cred_file.with_name(cred_file.name + ".tmp").exists()
+    # No partial temp file left behind (the temp name carries the writer pid).
+    leftovers = list(cred_file.parent.glob(cred_file.name + ".*.tmp"))
+    assert leftovers == []
     assert _active_backend() == "file"
 
 

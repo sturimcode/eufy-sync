@@ -310,12 +310,19 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
     # moves outside ~/.garmin-sync.
     from eufy_sync.credentials import delete_password, delete_token, _keyring_available
     if _keyring_available():
-        for name in user_names:
-            for suffix in ["eufy", "garmin"]:
-                delete_password(f"{name}:{suffix}")
-        delete_token("eufy")
-        delete_token("garmin")
-        delete_token("strava")
+        # Best-effort: a locked keychain makes the vault read raise, and a
+        # half-finished uninstall that leaves the data dir behind (the rmtree
+        # is below) plus a raw traceback is worse than skipping this. The
+        # rmtree still erases a file-backed vault under data_dir.
+        try:
+            for name in user_names:
+                for suffix in ["eufy", "garmin"]:
+                    delete_password(f"{name}:{suffix}")
+            delete_token("eufy")
+            delete_token("garmin")
+            delete_token("strava")
+        except Exception:
+            print("Note: could not clear keychain entries (the keychain may be locked).")
 
     # Remove data directory (preserving DB if requested)
     if data_dir.exists():

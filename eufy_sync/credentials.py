@@ -22,7 +22,9 @@ Which backend is active follows a three-state rule:
 Credential functions never raise for lack of a keychain: the file backend is
 always the fallback, so callers can call get/store/delete unconditionally.
 A keychain that exists but cannot be read (locked, access denied) does
-raise, so a failed read can never be saved back over the real vault.
+raise, so a failed read can never be saved back over the real vault, and
+--use-file-store aborts rather than write an empty marker file that would
+orphan the unread keychain secrets.
 
 A lazy, one-time migration promotes secrets from the old per-item keychain
 layout (one keyring account per password/token) into the vault the first
@@ -159,8 +161,11 @@ def _save_vault_to_file(vault: dict) -> None:
     CRED_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Temp file + atomic rename: an interrupted in-place write would truncate
     # the vault, destroying the secrets and the opt-in marker (which would
-    # silently flip the backend to an empty keychain on the next run).
-    tmp = CRED_FILE.with_name(CRED_FILE.name + ".tmp")
+    # silently flip the backend to an empty keychain on the next run). The
+    # temp name carries the pid so two concurrent writers (e.g. the 4-hourly
+    # Launch Agent and an interactive command) never share one temp inode and
+    # truncate each other's partial write before the rename.
+    tmp = CRED_FILE.with_name(f"{CRED_FILE.name}.{os.getpid()}.tmp")
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w") as f:
@@ -306,19 +311,27 @@ def use_file_store() -> None:
     Merges the keychain vault with any existing CRED_FILE vault (union of
     both; the currently active store's value wins key conflicts), writes the
     result with the "explicit" opt-in marker, then clears the keychain vault
-    item - but only if its contents were actually copied. Idempotent:
-    running it on an already-marked file store rewrites the same content.
+    item. Idempotent: running it on an already-marked file store rewrites the
+    same content.
+
+    Raises RuntimeError, changing nothing, if a keychain exists but cannot be
+    read. Writing the marker with an unread keychain would permanently switch
+    to a file that does not hold the keychain's secrets, orphaning them; it is
+    safer to stop and let the user unlock the keychain and retry.
     """
     active = _active_backend()
 
     keychain_vault = _empty_vault()
-    keychain_read_ok = False
     if _keyring_available():
         try:
             keychain_vault = _load_vault_from_keychain()
-            keychain_read_ok = True
-        except Exception:
-            print("Note: existing keychain secrets could not be copied (keychain unreadable); they were left in the keychain.")
+        except Exception as e:
+            raise RuntimeError(
+                "The system keychain could not be read (it may be locked or "
+                "access was denied), so its secrets cannot be copied into the "
+                "file. Nothing was changed. Unlock the keychain and retry: "
+                "eufy-sync --use-file-store"
+            ) from e
     file_vault = _load_vault_from_file()
 
     if active == "keychain":
@@ -332,12 +345,12 @@ def use_file_store() -> None:
     }
 
     # File first, keychain delete second: if the write fails, the keychain
-    # copy is still intact. And only delete when the read succeeded: deleting
-    # needs no read access, so after a failed read it would destroy the only
-    # copy of the secrets that never made it into the file.
+    # copy is still intact. The keychain read above succeeded (or there is no
+    # keychain), so deleting the vault item now cannot strand an uncopied
+    # secret.
     _save_vault_to_file(merged)
 
-    if keychain_read_ok:
+    if _keyring_available():
         try:
             import keyring
             keyring.delete_password(SERVICE_NAME, VAULT_ACCOUNT)
