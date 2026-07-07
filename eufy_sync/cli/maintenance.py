@@ -144,9 +144,10 @@ def _write_run_script(binary_path: str) -> Path:
     binary on every update. The agent therefore points at this script, whose
     bytes never change across updates, so the announcement fires once, not
     once per release. Skipping the rewrite when content is unchanged is what
-    keeps the file's identity stable.
+    keeps the file's identity stable. The filename is what macOS shows in that
+    announcement, so it is a recognizable "eufy-sync-agent", not an opaque one.
     """
-    script_path = shared.DATA_DIR / "run-sync.sh"
+    script_path = shared.DATA_DIR / shared.LAUNCH_WRAPPER_NAME
     content = f'#!/bin/sh\nexec "{binary_path}" --headless\n'
     if script_path.exists() and script_path.read_text() == content:
         return script_path
@@ -203,6 +204,13 @@ def _install_launch_agent() -> None:
     shared.DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     wrapper = _write_run_script(binary)
+
+    # Drop the pre-1.7.17 wrapper name so it does not linger as an orphan next
+    # to the new one.
+    legacy_wrapper = shared.DATA_DIR / shared.LEGACY_LAUNCH_WRAPPER_NAME
+    if legacy_wrapper.exists():
+        legacy_wrapper.unlink()
+
     shared.LAUNCH_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
     shared.LAUNCH_AGENT_PATH.write_text(_generate_plist(str(wrapper)))
 

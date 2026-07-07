@@ -15,6 +15,15 @@ LOG_FILE = DATA_DIR / "sync.log"
 LAUNCH_AGENT_LABEL = "com.sturimcode.eufy-garmin-sync"
 LAUNCH_AGENT_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
 
+# The Launch Agent points at this wrapper script, not the pipx/uv binary,
+# so the registered executable's bytes stay stable across updates (macOS
+# only re-announces "can run in the background" when they change). macOS
+# labels the background-item notification by this filename, so it is named
+# recognizably rather than something opaque. LEGACY_LAUNCH_WRAPPER_NAME is
+# the pre-1.7.17 name, cleaned up on the next --install-agent.
+LAUNCH_WRAPPER_NAME = "eufy-sync-agent"
+LEGACY_LAUNCH_WRAPPER_NAME = "run-sync.sh"
+
 UPDATE_CHECK_INTERVAL = 604800  # check once per week
 
 

@@ -238,7 +238,7 @@ def _check_launch_agent(report) -> None:
             return
 
         content = shared.LAUNCH_AGENT_PATH.read_text()
-        wrapper_name = "run-sync.sh"
+        wrapper_name = shared.LAUNCH_WRAPPER_NAME
         if wrapper_name not in content:
             report(
                 "WARN", "launch agent",

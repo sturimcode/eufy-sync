@@ -74,7 +74,7 @@ def _patch_all_pass(tmp_path, monkeypatch):
     monkeypatch.setattr(doctor, "StravaClient", MagicMock(return_value=strava_client))
 
     monkeypatch.setattr(doctor.platform, "system", MagicMock(return_value="Darwin"))
-    wrapper = tmp_path / "run-sync.sh"
+    wrapper = tmp_path / "eufy-sync-agent"
     wrapper.write_text("#!/bin/sh\n")
     monkeypatch.setattr(doctor.shared, "LAUNCH_AGENT_PATH", tmp_path / "agent.plist")
     plist = f"""<?xml version="1.0"?>
@@ -204,6 +204,29 @@ def test_launch_agent_pointing_at_raw_binary_warns_install_agent(tmp_path, monke
     assert code == 0
     assert "WARN" in out
     assert "launch agent" in out
+    assert "outdated registration" in out
+    assert "fix: eufy-sync --install-agent" in out
+
+
+def test_launch_agent_pointing_at_legacy_wrapper_warns_install_agent(tmp_path, monkeypatch, capsys):
+    """A plist still pointing at the pre-1.7.17 run-sync.sh wrapper is an
+    outdated registration: re-running --install-agent adopts the recognizable
+    eufy-sync-agent name (and gives the user one final, well-named background
+    announcement)."""
+    config_path, db_path = _patch_all_pass(tmp_path, monkeypatch)
+    legacy = tmp_path / "run-sync.sh"
+    legacy.write_text("#!/bin/sh\n")
+    plist = f"""<?xml version="1.0"?>
+<plist><dict>
+<key>ProgramArguments</key>
+<array><string>{legacy}</string></array>
+</dict></plist>"""
+    doctor.shared.LAUNCH_AGENT_PATH.write_text(plist)
+
+    code = doctor._run_doctor(config_path, db_path)
+
+    out = capsys.readouterr().out
+    assert code == 0
     assert "outdated registration" in out
     assert "fix: eufy-sync --install-agent" in out
 
