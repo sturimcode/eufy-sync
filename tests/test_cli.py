@@ -57,8 +57,8 @@ def test_write_config_overwrites_existing(tmp_path: Path):
 
 
 def test_generate_plist_points_at_given_program():
-    plist = _generate_plist("/home/user/.garmin-sync/run-sync.sh")
-    assert "/home/user/.garmin-sync/run-sync.sh" in plist
+    plist = _generate_plist("/home/user/.garmin-sync/eufy-sync-agent")
+    assert "/home/user/.garmin-sync/eufy-sync-agent" in plist
     # --headless lives in the wrapper script, not the plist, so the registered
     # program's bytes stay stable across updates.
     assert "--headless" not in plist
@@ -71,7 +71,7 @@ def test_write_run_script_creates_executable_wrapper(tmp_path):
     from eufy_sync.cli.maintenance import _write_run_script
     with patch("eufy_sync.cli.shared.DATA_DIR", tmp_path):
         script = _write_run_script("/home/user/.local/bin/eufy-sync")
-    assert script == tmp_path / "run-sync.sh"
+    assert script == tmp_path / "eufy-sync-agent"
     content = script.read_text()
     assert content.startswith("#!/bin/sh")
     assert 'exec "/home/user/.local/bin/eufy-sync" --headless' in content
@@ -113,15 +113,36 @@ def test_install_launch_agent_writes_plist_and_loads(mock_path, mock_system, moc
     plist_content = mock_path.write_text.call_args[0][0]
     # The agent registers the stable wrapper, never the pipx/uv binary, so
     # updates do not re-trigger the macOS background-activity announcement.
-    assert str(tmp_path / "run-sync.sh") in plist_content
+    assert str(tmp_path / "eufy-sync-agent") in plist_content
     assert "/home/user/.local/bin/eufy-sync" not in plist_content
-    wrapper = tmp_path / "run-sync.sh"
+    wrapper = tmp_path / "eufy-sync-agent"
     assert 'exec "/home/user/.local/bin/eufy-sync" --headless' in wrapper.read_text()
 
     # Should call launchctl unload then load
     assert mock_run.call_count == 2
     assert "unload" in mock_run.call_args_list[0][0][0]
     assert "load" in mock_run.call_args_list[1][0][0]
+
+
+@patch("eufy_sync.cli.maintenance.subprocess.run")
+@patch("eufy_sync.cli.maintenance.shutil.which", return_value="/home/user/.local/bin/eufy-sync")
+@patch("eufy_sync.cli.maintenance.platform.system", return_value="Darwin")
+@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
+def test_install_launch_agent_removes_legacy_wrapper(mock_path, mock_system, mock_which, mock_run, tmp_path):
+    """Re-installing must delete the pre-1.7.17 run-sync.sh wrapper so it does
+    not linger as an orphan next to the new eufy-sync-agent script."""
+    mock_path.parent.mkdir = MagicMock()
+    mock_path.write_text = MagicMock()
+
+    legacy = tmp_path / "run-sync.sh"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("#!/bin/sh\nexec old\n")
+
+    with patch("eufy_sync.cli.shared.DATA_DIR", tmp_path):
+        _install_launch_agent()
+
+    assert not legacy.exists()
+    assert (tmp_path / "eufy-sync-agent").exists()
 
 
 @patch("eufy_sync.cli.maintenance.platform.system", return_value="Linux")
