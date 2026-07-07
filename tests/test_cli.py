@@ -235,6 +235,36 @@ def test_uninstall_clears_keychain_for_configured_user_name(
 @patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
 @patch("eufy_sync.cli.maintenance.subprocess.run")
 @patch("eufy_sync.credentials._keyring_available", return_value=True)
+@patch("eufy_sync.credentials.delete_password", side_effect=RuntimeError("keychain locked"))
+@patch("eufy_sync.cli.maintenance.sys.stdin")
+@patch("builtins.input", side_effect=["y", "n"])
+def test_uninstall_survives_locked_keychain(
+    mock_input, mock_stdin, mock_delete_pw,
+    mock_keyring, mock_run, mock_launch_path, tmp_path, capsys,
+):
+    """A locked keychain makes the vault clear raise; _uninstall must catch
+    that, note it, and still erase the data dir, not abort with a traceback
+    and a half-removed install."""
+    mock_stdin.isatty.return_value = True
+    mock_launch_path.exists.return_value = False
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    config_path = data_dir / "config.yaml"
+    _write_config(config_path, {
+        "users": [{"name": "default", "eufy": {"email": "e@example.com"}}],
+    })
+
+    _uninstall(data_dir)  # must not raise
+
+    assert not data_dir.exists()
+    out = capsys.readouterr().out
+    assert "keychain" in out.lower()
+
+
+@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.cli.maintenance.subprocess.run")
+@patch("eufy_sync.credentials._keyring_available", return_value=True)
 @patch("eufy_sync.credentials.delete_token")
 @patch("eufy_sync.credentials.delete_password")
 @patch("eufy_sync.cli.maintenance.sys.stdin")
@@ -632,13 +662,27 @@ def test_status_with_corrupt_db_exits_cleanly(tmp_path):
     db_path = tmp_path / "state.db"
 
     argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path), "--status"]
+    # The migration is patched out so this test exercises only the corrupt-db
+    # path; an earlier version left it running and it wrote fake passwords
+    # into the real credentials file (now also blocked by conftest).
     with patch("sys.argv", argv), \
          patch("eufy_sync.credentials._keyring_available", return_value=False), \
+         patch("eufy_sync.cli.setup._migrate_config_passwords"), \
          patch("eufy_sync.state.SyncState", side_effect=OSError("disk I/O error")), \
          pytest.raises(SystemExit) as exc:
         main()
 
     assert exc.value.code == 1
+
+
+def test_upgrade_notice_file_is_hermetic(tmp_path):
+    """setup.py freezes UPGRADE_NOTICE_FILE from shared.DATA_DIR at import
+    time, so patching shared.DATA_DIR alone is not enough; the autouse
+    fixture must repoint the constant itself or _show_upgrade_notice writes
+    to the real ~/.garmin-sync."""
+    from eufy_sync.cli import setup
+
+    assert str(setup.UPGRADE_NOTICE_FILE).startswith(str(tmp_path))
 
 
 @patch("eufy_sync.cli.shared._notify")

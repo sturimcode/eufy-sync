@@ -152,7 +152,7 @@ Passwords and OAuth tokens live in a single item in your macOS Keychain, not pla
 
 ### Credential storage
 
-By default, credentials go into one keychain item, so macOS only asks to "Always Allow" once, not once per secret. Run `eufy-sync --use-file-store` to keep credentials in a `600` file instead, with no keychain prompts at all - a good fit for headless or scheduled setups. Run `eufy-sync --use-keychain` to move them back.
+By default, credentials go into one keychain item, so macOS only asks to "Always Allow" once, not once per secret. The keychain is used whenever it works. Run `eufy-sync --use-file-store` to switch permanently to a `600` file with no keychain prompts at all, a good fit for headless or scheduled setups; run `eufy-sync --use-keychain` to move them back. A credentials file that was not created by `--use-file-store` does not override a working keychain. Systems without a keychain (headless Linux) use the file automatically.
 
 ## Known quirks
 

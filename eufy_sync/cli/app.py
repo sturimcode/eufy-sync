@@ -56,7 +56,11 @@ def main() -> None:
     # Handle credential store mode switches
     if args.use_file_store:
         from eufy_sync import credentials
-        credentials.use_file_store()
+        try:
+            credentials.use_file_store()
+        except RuntimeError as e:
+            print(str(e))
+            sys.exit(1)
         print("Credentials moved to a 0o600 file (~/.garmin-sync/credentials.json). No more keychain prompts.")
         sys.exit(0)
 
