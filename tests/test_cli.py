@@ -793,6 +793,110 @@ def test_dry_run_does_not_notify_and_prints_preview_summary(
 @patch("eufy_sync.cli.setup._show_upgrade_notice")
 @patch("eufy_sync.cli.setup._migrate_config_passwords")
 @patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_headless_transient_failure_silent_until_threshold(
+    _keyring, _migrate, _notice, _updates, mock_notify, _summary, tmp_path
+):
+    """A scheduled run that only hit a network blip must not fire a 'failed'
+    notification. Only the third consecutive network failure escalates."""
+    from eufy_sync.cli.app import main
+
+    config_path = _write_synced_config(tmp_path)
+    db_path = tmp_path / "state.db"
+
+    def fake_sync_user(user, state, **kwargs):
+        raise RuntimeError("[Errno 8] nodename nor servname provided, or not known")
+
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path), "--headless"]
+
+    def run_once():
+        with patch("eufy_sync.sync.sync_user", side_effect=fake_sync_user), \
+             patch("sys.argv", argv), \
+             pytest.raises(SystemExit) as exc:
+            main()
+        return exc.value.code
+
+    assert run_once() == 1
+    assert run_once() == 1
+    mock_notify.assert_not_called()  # first two blips stay silent
+
+    assert run_once() == 1
+    assert mock_notify.call_count == 1  # third escalates, once
+    title, msg = mock_notify.call_args[0][0], mock_notify.call_args[0][1]
+    assert "network" in title.lower()
+    assert "waiting" in msg.lower()
+
+
+@patch("eufy_sync.cli.status._print_summary")
+@patch("eufy_sync.cli.shared._notify")
+@patch("eufy_sync.cli.updater._check_for_updates")
+@patch("eufy_sync.cli.setup._show_upgrade_notice")
+@patch("eufy_sync.cli.setup._migrate_config_passwords")
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_headless_success_clears_network_streak(
+    _keyring, _migrate, _notice, _updates, _notify, _summary, tmp_path
+):
+    """A clean run resets the streak so a later isolated blip starts from zero,
+    not one short of escalating."""
+    from eufy_sync.cli.app import main
+    from eufy_sync.cli import shared
+
+    config_path = _write_synced_config(tmp_path)
+    db_path = tmp_path / "state.db"
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path), "--headless"]
+    streak_file = shared.DATA_DIR / "network_fail_streak.json"
+
+    def run_with(side):
+        with patch("eufy_sync.sync.sync_user", side_effect=side), \
+             patch("sys.argv", argv), \
+             pytest.raises(SystemExit):
+            main()
+
+    boom = RuntimeError("_ssl.c:1063: The handshake operation timed out")
+    run_with(boom)
+    run_with(boom)
+    assert streak_file.exists()  # streak building
+
+    run_with(lambda user, state, **kw: ({"garmin": 1}, {}))  # clean run
+    assert not streak_file.exists()  # cleared on success
+
+
+@patch("eufy_sync.cli.status._print_summary")
+@patch("eufy_sync.cli.shared._notify")
+@patch("eufy_sync.cli.updater._check_for_updates")
+@patch("eufy_sync.cli.setup._show_upgrade_notice")
+@patch("eufy_sync.cli.setup._migrate_config_passwords")
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+@patch("eufy_sync.cli.app.sys.stdin")
+def test_interactive_transient_failure_notifies_immediately(
+    mock_stdin, _keyring, _migrate, _notice, _updates, mock_notify, _summary, tmp_path
+):
+    """The silence is only for unattended runs. An interactive run surfaces a
+    network failure right away, as before."""
+    from eufy_sync.cli.app import main
+
+    mock_stdin.isatty.return_value = True
+    config_path = _write_synced_config(tmp_path)
+    db_path = tmp_path / "state.db"
+
+    def fake_sync_user(user, state, **kwargs):
+        raise RuntimeError("[Errno 8] nodename nor servname provided, or not known")
+
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path)]
+    with patch("eufy_sync.sync.sync_user", side_effect=fake_sync_user), \
+         patch("sys.argv", argv), \
+         pytest.raises(SystemExit):
+        main()
+
+    mock_notify.assert_called_once()
+    assert "failed" in mock_notify.call_args[0][0].lower()
+
+
+@patch("eufy_sync.cli.status._print_summary")
+@patch("eufy_sync.cli.shared._notify")
+@patch("eufy_sync.cli.updater._check_for_updates")
+@patch("eufy_sync.cli.setup._show_upgrade_notice")
+@patch("eufy_sync.cli.setup._migrate_config_passwords")
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
 @patch("eufy_sync.cli.app.sys.stdin")
 def test_interactive_ambiguous_profile_resolves_and_syncs(
     mock_stdin, _keyring, _migrate, _notice, _updates, _notify, _summary, tmp_path

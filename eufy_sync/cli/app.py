@@ -239,19 +239,41 @@ def main() -> None:
         total = sum(total_counts.values())
 
         if failures:
+            from eufy_sync.cli import failure_notify
             reauth_needed = any("--reauth" in err for _, err in failures)
             eufy_password = any("changed your Eufy password" in err for _, err in failures)
             multiple_profiles = any("multiple Eufy profiles" in err for _, err in failures)
+            all_transient = all(failure_notify.is_transient_network_error(err) for _, err in failures)
             if reauth_needed:
                 shared._notify("eufy-sync: re-login needed", "Run: eufy-sync --reauth garmin")
+                failure_notify.clear_network_failures()
             elif eufy_password:
                 shared._notify("eufy-sync: Eufy login failed", "Run: eufy-sync --update-password")
+                failure_notify.clear_network_failures()
             elif multiple_profiles:
                 shared._notify("eufy-sync: choose your profile", "Run: eufy-sync --select-profile")
+                failure_notify.clear_network_failures()
+            elif all_transient and args.headless and not args.dry_run:
+                # A scheduled run that only hit network trouble. Stay quiet - the
+                # next run retries - unless several have failed in a row, which
+                # points at a real outage worth one heads-up.
+                count, hours = failure_notify.record_network_failure()
+                if failure_notify.should_escalate(count):
+                    shared._notify(
+                        "eufy-sync: network still down",
+                        f"No network for ~{round(hours)}h ({count} runs). "
+                        "Measurements are waiting and will sync when it is back.",
+                    )
             else:
                 fail_msg = "; ".join(f"{name}: {err[:80]}" for name, err in failures)
                 shared._notify("eufy-sync failed", fail_msg)
+                failure_notify.clear_network_failures()
             logger.error("Sync failed for: %s", "; ".join(f"{n}: {e[:80]}" for n, e in failures))
+        elif not args.dry_run:
+            # A clean run means the network is back; let a future outage
+            # escalate from scratch.
+            from eufy_sync.cli import failure_notify
+            failure_notify.clear_network_failures()
 
         if args.dry_run:
             target_label = " and ".join(n.capitalize() for n in total_counts if total_counts[n] > 0)
