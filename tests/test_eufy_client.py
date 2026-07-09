@@ -73,6 +73,20 @@ def _record(customer_id, weight_dg, update_time):
     }
 
 
+def _raw_wifi_record(customer_id, weight_kg, timestamp):
+    return {
+        "id": "raw-record-id",
+        "weight": f"{weight_kg:.2f}",
+        "impedance": "112566",
+        "timestamp": str(timestamp),
+        "heart_rate": "0",
+        "customer_id": customer_id,
+        "device_id": "raw-device-id",
+        "user_id": "raw-user-id",
+        "product_code": "",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Task 2: list_profiles
 # ---------------------------------------------------------------------------
@@ -190,7 +204,7 @@ def test_get_raw_records_handles_null_list_500_and_bad_code():
 
 def test_fetch_falls_back_to_raw_when_normal_empty():
     c = _client(customer_id="a")
-    raw = _record("a", 800, 2_000_000_000)  # year 2033, passes the window
+    raw = _raw_wifi_record("a", 80.0, 2_000_000_000)  # year 2033, passes the window
     with patch.object(c, "_get_records", return_value=[]), \
          patch.object(c, "_list_device_ids", return_value=["dev1"]), \
          patch.object(c, "_get_raw_records", return_value=[raw]):
@@ -198,6 +212,7 @@ def test_fetch_falls_back_to_raw_when_normal_empty():
     assert len(measurements) == 1
     assert measurements[0].weight_kg == 80.0
     assert measurements[0].customer_id == "a"
+    assert measurements[0].body_fat_pct is None
 
 
 def test_fetch_does_not_use_raw_when_normal_has_data():
@@ -212,7 +227,10 @@ def test_fetch_does_not_use_raw_when_normal_has_data():
 
 def test_raw_fallback_drops_other_profiles():
     c = _client(customer_id="a")
-    raws = [_record("a", 800, 2_000_000_000), _record("b", 600, 2_000_000_000)]
+    raws = [
+        _raw_wifi_record("a", 80.0, 2_000_000_000),
+        _raw_wifi_record("b", 60.0, 2_000_000_000),
+    ]
     with patch.object(c, "_get_records", return_value=[]), \
          patch.object(c, "_list_device_ids", return_value=["dev1"]), \
          patch.object(c, "_get_raw_records", return_value=raws):
@@ -230,7 +248,7 @@ def test_raw_fallback_degrades_when_device_list_errors():
 
 def test_raw_fallback_degrades_on_malformed_record():
     c = _client(customer_id="a")
-    bad = {"customer_id": "a", "update_time": 100, "scale_data": {"weight": "heavy"}}
+    bad = {"customer_id": "a", "timestamp": "2_000_000_000", "weight": "heavy"}
     with patch.object(c, "_get_records", return_value=[]), \
          patch.object(c, "_list_device_ids", return_value=["dev1"]), \
          patch.object(c, "_get_raw_records", return_value=[bad]):
