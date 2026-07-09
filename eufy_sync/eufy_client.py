@@ -312,7 +312,11 @@ class EufyClient:
                 logger.warning("Raw Wi-Fi fallback: fetch failed for %s: %s", device_id, e)
 
         try:
-            measurements = self._parse_all(records)
+            measurements = []
+            for record in records:
+                m = self._parse_raw_wifi_record(record)
+                if m is not None:
+                    measurements.append(m)
             raw_count = len(measurements)
             if self.config.customer_id:
                 measurements = [m for m in measurements if m.customer_id == self.config.customer_id]
@@ -331,6 +335,35 @@ class EufyClient:
                 "(raw records may not carry a profile id)", raw_count,
             )
         return measurements
+
+    def _parse_raw_wifi_record(self, record: dict) -> EufyMeasurement | None:
+        raw_weight = record.get("weight")
+        raw_timestamp = record.get("timestamp")
+        if raw_weight is None or raw_timestamp is None:
+            logger.warning("Raw Wi-Fi record missing weight or timestamp: %s", record)
+            return None
+
+        try:
+            weight_kg = float(raw_weight)
+            update_time = int(raw_timestamp)
+        except (TypeError, ValueError):
+            logger.warning("Raw Wi-Fi record has invalid weight or timestamp: %s", record)
+            return None
+
+        if weight_kg <= 0:
+            logger.warning("Raw Wi-Fi record has invalid weight: %s", raw_weight)
+            return None
+
+        customer_id = record.get("customer_id", "unknown")
+        measurement_id = f"{customer_id}_{update_time}"
+
+        return EufyMeasurement(
+            measurement_id=measurement_id,
+            customer_id=customer_id,
+            device_id=record.get("device_id", "unknown"),
+            timestamp=datetime.fromtimestamp(update_time, tz=timezone.utc),
+            weight_kg=weight_kg,
+        )
 
     def _parse_record(self, record: dict) -> EufyMeasurement | None:
         scale_data = record.get("scale_data")
