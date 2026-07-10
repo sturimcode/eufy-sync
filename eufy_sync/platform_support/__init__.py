@@ -3,9 +3,8 @@
 Notifications and the scheduled-sync agent (install/uninstall/status/offer)
 differ per platform. The active implementation is chosen once from
 platform.system(): Darwin uses the macOS Launch Agent and osascript
-notifications; every other platform (including Windows for now) uses a
-no-op generic layer. Task 3 adds a Windows implementation and points the
-selection at it.
+notifications; every other platform uses a no-op generic layer. A native
+Windows implementation plugs into the selection below.
 """
 from __future__ import annotations
 
@@ -20,7 +19,7 @@ def _select():
     if system == "Darwin":
         from eufy_sync.platform_support import macos as impl
     else:
-        # Windows falls back to generic for now; Task 3 flips it to windows.
+        # Windows falls back to generic until its native implementation lands.
         from eufy_sync.platform_support import generic as impl
     return impl
 

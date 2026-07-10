@@ -1,8 +1,8 @@
 """Generic no-op layer for platforms without a managed scheduler.
 
-Used on Windows until Task 3, and on Linux and anything else. Notifications
-are silently dropped; the scheduled-sync agent is not managed here, so
---doctor skips the agent check and --uninstall skips the agent removal.
+Covers every platform without a native implementation. Notifications are
+silently dropped; the scheduled-sync agent is not managed here, so --doctor
+skips the agent check and --uninstall skips the agent removal.
 """
 from __future__ import annotations
 
