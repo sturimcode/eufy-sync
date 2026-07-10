@@ -42,6 +42,14 @@ logger = logging.getLogger(__name__)
 SERVICE_NAME = "eufy-garmin-sync"
 VAULT_ACCOUNT = "vault"
 
+# Windows Credential Manager caps one entry at ~2,560 bytes stored as UTF-16,
+# roughly 1,280 characters. A vault larger than CHUNK_LIMIT characters is split
+# across numbered "vault:i" entries so set_password never fails on Windows.
+# MAX_CHUNKS bounds how far a save probes for stale leftover chunks to delete,
+# so a corrupt store can never make that scan run away.
+CHUNK_LIMIT = 1200
+MAX_CHUNKS = 40
+
 CRED_FILE = Path.home() / ".garmin-sync" / "credentials.json"
 
 
@@ -136,15 +144,57 @@ def _load_vault_from_keychain() -> dict:
     if raw is None:
         return _empty_vault()
     try:
-        return _normalize_vault(json.loads(raw))
-    except (json.JSONDecodeError, TypeError):
+        parsed = json.loads(raw)
+        # An oversized vault is stored as a header pointing at numbered chunks;
+        # reassemble the payload before normalizing. A missing chunk means the
+        # header outlived its payload, which is as unusable as malformed JSON.
+        if isinstance(parsed, dict) and "__chunks__" in parsed:
+            count = parsed["__chunks__"]
+            pieces = []
+            for i in range(1, count + 1):
+                piece = keyring.get_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:{i}")
+                if piece is None:
+                    raise ValueError("missing vault chunk")
+                pieces.append(piece)
+            parsed = json.loads("".join(pieces))
+        return _normalize_vault(parsed)
+    except (ValueError, TypeError):
         logger.warning("Keychain vault contained malformed JSON; treating as empty")
         return _empty_vault()
 
 
+def _delete_stale_chunks(start: int) -> None:
+    # A previous save may have used more chunks than this one. Delete numbered
+    # entries from `start` upward until the first gap, so a later read can never
+    # reassemble a stale tail. Bounded by MAX_CHUNKS.
+    import keyring
+    for i in range(start, MAX_CHUNKS + 1):
+        account = f"{VAULT_ACCOUNT}:{i}"
+        if keyring.get_password(SERVICE_NAME, account) is None:
+            break
+        try:
+            keyring.delete_password(SERVICE_NAME, account)
+        except Exception:
+            pass
+
+
 def _save_vault_to_keychain(vault: dict) -> None:
     import keyring
-    keyring.set_password(SERVICE_NAME, VAULT_ACCOUNT, json.dumps(vault))
+    payload = json.dumps(vault)
+    if len(payload) <= CHUNK_LIMIT:
+        keyring.set_password(SERVICE_NAME, VAULT_ACCOUNT, payload)
+        _delete_stale_chunks(1)
+        return
+    chunks = [payload[i:i + CHUNK_LIMIT] for i in range(0, len(payload), CHUNK_LIMIT)]
+    # Chunks first, header last: a reader that races the write sees either the
+    # old vault or a complete new one, never a header pointing at a chunk that
+    # has not been written yet.
+    for i, chunk in enumerate(chunks, start=1):
+        keyring.set_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:{i}", chunk)
+    keyring.set_password(
+        SERVICE_NAME, VAULT_ACCOUNT, json.dumps({"__chunks__": len(chunks)})
+    )
+    _delete_stale_chunks(len(chunks) + 1)
 
 
 def _load_vault_from_file() -> dict:

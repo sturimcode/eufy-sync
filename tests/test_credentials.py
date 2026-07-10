@@ -716,3 +716,60 @@ def test_doctor_keychain_line_reflects_file_store(monkeypatch):
     doctor._check_keychain(report)
     assert lines[0][0] == "PASS"
     assert "file" in lines[0][2]
+
+
+# --- Vault chunking ----------------------------------------------------------
+#
+# Windows Credential Manager caps one entry at ~2,560 bytes (UTF-16). A vault
+# holding Garmin's two OAuth tokens plus Strava's can exceed that, so the
+# keychain backend splits an oversized vault across numbered entries. A vault
+# that fits keeps today's single-entry shape, so existing installs never see
+# a migration.
+
+from eufy_sync.credentials import (
+    CHUNK_LIMIT,
+    SERVICE_NAME,
+    VAULT_ACCOUNT,
+    store_token,
+    get_token,
+)
+
+
+def _big_token(size: int) -> dict:
+    return {"access_token": "x" * size}
+
+
+def test_small_vault_keeps_single_entry_shape(fake_keyring):
+    store_token("garmin", {"a": 1})
+    raw = fake_keyring.get_password(SERVICE_NAME, VAULT_ACCOUNT)
+    data = json.loads(raw)
+    assert "__chunks__" not in data
+    assert data["tokens"]["garmin"] == {"a": 1}
+    assert fake_keyring.get_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:1") is None
+
+
+def test_oversized_vault_chunks_and_round_trips(fake_keyring):
+    store_token("garmin", _big_token(3 * CHUNK_LIMIT))
+    header = json.loads(fake_keyring.get_password(SERVICE_NAME, VAULT_ACCOUNT))
+    n = header["__chunks__"]
+    assert n >= 3
+    for i in range(1, n + 1):
+        chunk = fake_keyring.get_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:{i}")
+        assert chunk is not None
+        assert len(chunk) <= CHUNK_LIMIT
+    assert get_token("garmin") == _big_token(3 * CHUNK_LIMIT)
+
+
+def test_shrinking_vault_deletes_stale_chunks(fake_keyring):
+    store_token("garmin", _big_token(3 * CHUNK_LIMIT))
+    store_token("garmin", {"a": 1})  # replaces the big token; vault fits again
+    assert get_token("garmin") == {"a": 1}
+    raw = fake_keyring.get_password(SERVICE_NAME, VAULT_ACCOUNT)
+    assert "__chunks__" not in json.loads(raw)
+    assert fake_keyring.get_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:1") is None
+
+
+def test_missing_chunk_reads_as_empty_vault(fake_keyring, caplog):
+    store_token("garmin", _big_token(3 * CHUNK_LIMIT))
+    fake_keyring.delete_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:2")
+    assert get_token("garmin") is None  # malformed vault treated as empty
