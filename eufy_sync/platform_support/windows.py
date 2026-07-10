@@ -204,6 +204,14 @@ def notify(title: str, message: str, command: str | None = None) -> None:
     """
     try:
         from xml.sax.saxutils import escape
+        # Flatten all whitespace runs (including CR/LF) to single spaces before
+        # the XML escape. The text is embedded in a PowerShell here-string, which
+        # terminates on any line starting with '@, so a newline followed by '@
+        # in the message (raw exception text reaches here) would close the
+        # here-string early and hand the remainder to PowerShell as code.
+        # Newlines must never reach the embedded XML.
+        title = " ".join(title.split())
+        message = " ".join(message.split())
         script = _PS_TOAST.format(title=escape(title), message=escape(message))
         encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
         subprocess.run(

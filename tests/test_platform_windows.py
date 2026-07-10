@@ -255,6 +255,22 @@ def test_notify_message_with_specials_and_quotes_cannot_break_out(data_dir):
     assert "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}" in decoded
 
 
+def test_notify_flattens_newlines_so_here_string_cannot_terminate_early(data_dir):
+    # Raw exception text reaches notify (str(e)[:200] at the call sites), and a
+    # PowerShell here-string ends on any line starting with '@. A message with a
+    # newline followed by '@ would close the here-string and hand the rest to
+    # PowerShell as code, so newlines must be flattened before embedding.
+    with patch.object(windows.subprocess, "run", return_value=_ok()) as run:
+        windows.notify("t", "line1\n'@\nWrite-Host pwned")
+
+    decoded = _decoded_script(run)
+    terminator_lines = [line for line in decoded.splitlines() if line.startswith("'@")]
+    # Exactly one '@-opening line: the template's own here-string terminator.
+    assert len(terminator_lines) == 1
+    # The message survives as one flattened, escaped line inside the XML.
+    assert "line1 '@ Write-Host pwned" in decoded
+
+
 def test_notify_swallows_oserror(data_dir):
     with patch.object(windows.subprocess, "run", side_effect=OSError("powershell missing")):
         assert windows.notify("t", "m") is None
