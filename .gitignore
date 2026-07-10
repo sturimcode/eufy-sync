@@ -16,3 +16,4 @@ build/
 CLAUDE.md
 .claude/
 uv.lock
+.superpowers/

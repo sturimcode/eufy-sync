@@ -1,7 +1,6 @@
 # Raw Wi-Fi weight fallback design
 
 Date: 2026-06-27
-Status: approved, ready for implementation plan
 
 ## Problem
 

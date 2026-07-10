@@ -381,7 +381,7 @@ class EufyClient:
             logger.warning("Record has invalid weight: %s", raw_weight)
             return None
 
-        weight_kg = raw_weight / 10.0  # Eufy returns decigrams
+        weight_kg = raw_weight / 10.0  # Eufy returns weight in 0.1 kg units
         update_time = record.get("update_time", record.get("create_time", 0))
         customer_id = record.get("customer_id", "unknown")
         measurement_id = f"{customer_id}_{update_time}"
