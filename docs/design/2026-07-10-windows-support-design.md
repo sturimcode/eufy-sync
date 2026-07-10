@@ -55,6 +55,11 @@ The vault stays one JSON object stored under one logical name. The keychain back
 - Doctor: the launchd check becomes a platform-layer `agent_status()` check, so Windows gets "scheduled task installed and healthy" with the same PASS/WARN/FAIL reporting.
 - CI: `windows-latest` joins the test matrix in `test.yml` alongside ubuntu and macos.
 - README: drop "macOS only", add a Windows install section (uv's PowerShell one-liner, mirroring the existing uv path), document the toast behavior and the auto-sync task, keep Headless Linux as is.
+- Packaging: add `Operating System :: Microsoft :: Windows` to the pyproject classifiers, which currently list only macOS and Linux.
+
+### First-run offer
+
+The "Set up automatic sync every 4 hours?" prompt after first-run setup is currently gated to macOS. It moves behind the platform layer and fires on Windows too, installing the scheduled task on a yes. The generic platform keeps it silent.
 
 ## Non-goals
 
