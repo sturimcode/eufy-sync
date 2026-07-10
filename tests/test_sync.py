@@ -464,3 +464,218 @@ def test_other_source_same_day_entry_is_still_skipped(tmp_path: Path):
     state.close()
 
 
+
+
+# ---------------------------------------------------------------------------
+# Issue #48: state tracking for weight-only (raw Wi-Fi) syncs
+# ---------------------------------------------------------------------------
+
+def test_weight_only_sync_is_tracked_and_found_by_date(tmp_path: Path):
+    state = SyncState(tmp_path / "test.db")
+    ts = datetime(2026, 7, 9, 7, 0, tzinfo=timezone.utc)
+
+    state.record_sync(
+        "user1", "cust_100", ts.isoformat(), 85.0,
+        "2026-07-09T07:01:00+00:00", target="garmin", weight_only=True,
+    )
+
+    rows = state.weight_only_syncs_on_date("user1", "garmin", ts.astimezone().date())
+    assert len(rows) == 1
+    assert rows[0]["measurement_id"] == "cust_100"
+    assert rows[0]["weight_kg"] == 85.0
+    assert datetime.fromisoformat(rows[0]["measurement_timestamp"]) == ts
+
+    # Other dates, targets, and users see nothing
+    assert state.weight_only_syncs_on_date("user1", "garmin", ts.date() + timedelta(days=1)) == []
+    assert state.weight_only_syncs_on_date("user1", "strava", ts.astimezone().date()) == []
+    assert state.weight_only_syncs_on_date("roommate", "garmin", ts.astimezone().date()) == []
+
+    state.close()
+
+
+def test_full_sync_is_not_upgradable(tmp_path: Path):
+    """Default record_sync (a processed record) must never be offered for upgrade."""
+    state = SyncState(tmp_path / "test.db")
+    ts = datetime(2026, 7, 9, 7, 0, tzinfo=timezone.utc)
+    state.record_sync("user1", "cust_100", ts.isoformat(), 85.0,
+                      "2026-07-09T07:01:00+00:00", target="garmin")
+
+    assert state.weight_only_syncs_on_date("user1", "garmin", ts.astimezone().date()) == []
+    state.close()
+
+
+def test_mark_upgraded_clears_weight_only(tmp_path: Path):
+    state = SyncState(tmp_path / "test.db")
+    ts = datetime(2026, 7, 9, 7, 0, tzinfo=timezone.utc)
+    state.record_sync("user1", "cust_100", ts.isoformat(), 85.0,
+                      "2026-07-09T07:01:00+00:00", target="garmin", weight_only=True)
+
+    state.mark_upgraded("user1", "cust_100", "garmin")
+
+    assert state.weight_only_syncs_on_date("user1", "garmin", ts.astimezone().date()) == []
+    # The sync itself is still recorded (no re-upload of the raw record)
+    assert state.is_synced("user1", "cust_100", "garmin")
+    state.close()
+
+
+def test_weight_only_column_migration(tmp_path: Path):
+    """A database created before the weight_only column must open cleanly,
+    with existing rows treated as full records (they predate the raw
+    fallback, so none of them can be weight-only)."""
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE sync_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_name TEXT NOT NULL,
+            eufy_measurement_id TEXT NOT NULL,
+            measurement_timestamp TEXT NOT NULL,
+            weight_kg REAL,
+            target TEXT NOT NULL DEFAULT 'garmin',
+            synced_at TEXT NOT NULL,
+            response TEXT,
+            UNIQUE(user_name, eufy_measurement_id, target)
+        );
+        INSERT INTO sync_log (user_name, eufy_measurement_id, measurement_timestamp,
+                              weight_kg, target, synced_at)
+        VALUES ('user1', 'cust_100', '2026-07-09T07:00:00+00:00', 85.0,
+                'garmin', '2026-07-09T07:01:00+00:00');
+    """)
+    conn.commit()
+    conn.close()
+
+    state = SyncState(db_path)
+    assert state.is_synced("user1", "cust_100", "garmin")
+    old_date = datetime(2026, 7, 9, 7, 0, tzinfo=timezone.utc).astimezone().date()
+    assert state.weight_only_syncs_on_date("user1", "garmin", old_date) == []
+    # New writes with the flag work after migration
+    state.record_sync("user1", "cust_200", "2026-07-10T07:00:00+00:00", 84.8,
+                      "2026-07-10T07:01:00+00:00", target="garmin", weight_only=True)
+    new_date = datetime(2026, 7, 10, 7, 0, tzinfo=timezone.utc).astimezone().date()
+    assert len(state.weight_only_syncs_on_date("user1", "garmin", new_date)) == 1
+    state.close()
+
+
+def _raw_measurement(weight_kg: float, dt: datetime) -> EufyMeasurement:
+    return EufyMeasurement(
+        measurement_id=f"cust_{int(dt.timestamp())}",
+        customer_id="cust",
+        device_id="dev",
+        timestamp=dt,
+        weight_kg=weight_kg,
+        weight_only=True,
+    )
+
+
+def _full_measurement(weight_kg: float, dt: datetime, measurement_id: str | None = None) -> EufyMeasurement:
+    return EufyMeasurement(
+        measurement_id=measurement_id or f"cust_{int(dt.timestamp())}",
+        customer_id="cust",
+        device_id="dev",
+        timestamp=dt,
+        weight_kg=weight_kg,
+        body_fat_pct=18.5,
+        muscle_mass_kg=45.0,
+    )
+
+
+def test_full_record_with_same_id_upgrades_weight_only_sync(tmp_path: Path):
+    """Issue #48, blocked case: when the raw and processed record share a
+    measurement id, the processed record used to be skipped as already
+    synced, stranding the user on weight-only forever. It must instead
+    replace the weight-only entry in Garmin."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    dt = datetime(2026, 5, 10, 7, 0, tzinfo=timezone.utc)
+
+    raw = _raw_measurement(85.0, dt)
+    fake_garmin_1 = _run_garmin_sync(user, state, [raw], has_weight_on_date_return=False)
+    fake_garmin_1.upload_body_composition.assert_called_once()
+
+    full = _full_measurement(85.0, dt)  # same id: same customer + timestamp
+    assert full.measurement_id == raw.measurement_id
+    fake_garmin_2 = _run_garmin_sync(user, state, [full], has_weight_on_date_return=True)
+
+    fake_garmin_2.delete_weight_entry.assert_called_once()
+    del_dt, del_weight = fake_garmin_2.delete_weight_entry.call_args.args
+    assert del_dt == dt
+    assert del_weight == 85.0
+    fake_garmin_2.upload_body_composition.assert_called_once()
+
+    # The weigh-in is no longer upgradable; a third run does nothing.
+    assert state.weight_only_syncs_on_date(user.name, "garmin", dt.astimezone().date()) == []
+    fake_garmin_3 = _run_garmin_sync(user, state, [full], has_weight_on_date_return=True)
+    fake_garmin_3.upload_body_composition.assert_not_called()
+    fake_garmin_3.delete_weight_entry.assert_not_called()
+
+    state.close()
+
+
+def test_full_record_with_different_id_replaces_instead_of_duplicating(tmp_path: Path):
+    """Issue #48, duplicate case: when the processed record carries a
+    different timestamp (hence id), it used to upload alongside the raw one,
+    giving Garmin a same-day duplicate. It must delete the weight-only entry
+    first."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    weigh_in = datetime(2026, 5, 10, 7, 0, tzinfo=timezone.utc)
+    processed = datetime(2026, 5, 10, 9, 30, tzinfo=timezone.utc)  # app opened later
+
+    raw = _raw_measurement(85.0, weigh_in)
+    _run_garmin_sync(user, state, [raw], has_weight_on_date_return=False)
+
+    full = _full_measurement(85.0, processed)
+    assert full.measurement_id != raw.measurement_id
+    fake_garmin_2 = _run_garmin_sync(user, state, [full], has_weight_on_date_return=True)
+
+    fake_garmin_2.delete_weight_entry.assert_called_once()
+    del_dt, del_weight = fake_garmin_2.delete_weight_entry.call_args.args
+    assert del_dt == weigh_in  # deletes the raw upload, matched by its own timestamp
+    assert del_weight == 85.0
+    fake_garmin_2.upload_body_composition.assert_called_once()
+
+    # Both ids are recorded; nothing left to upgrade.
+    assert state.is_synced(user.name, raw.measurement_id, "garmin")
+    assert state.is_synced(user.name, full.measurement_id, "garmin")
+    assert state.weight_only_syncs_on_date(user.name, "garmin", weigh_in.astimezone().date()) == []
+
+    state.close()
+
+
+def test_second_full_record_same_day_does_not_delete(tmp_path: Path):
+    """Regression: a corrected re-weigh (two FULL records the same day) must
+    keep today's behavior - upload the second one, delete nothing."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+
+    first = _full_measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+    second = _full_measurement(84.7, datetime(2026, 5, 10, 8, 30, tzinfo=timezone.utc))
+
+    _run_garmin_sync(user, state, [first], has_weight_on_date_return=False)
+    fake_garmin_2 = _run_garmin_sync(user, state, [second], has_weight_on_date_return=True)
+
+    fake_garmin_2.upload_body_composition.assert_called_once()
+    fake_garmin_2.delete_weight_entry.assert_not_called()
+
+    state.close()
+
+
+def test_skipped_raw_record_is_not_marked_upgradable(tmp_path: Path):
+    """A raw record skipped by the other-source guard was never uploaded by
+    us, so a later full record must not delete the other source's entry."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    dt = datetime(2026, 5, 10, 7, 0, tzinfo=timezone.utc)
+
+    # Garmin already has data from another source; the raw record is skipped.
+    raw = _raw_measurement(85.0, dt)
+    fake_garmin_1 = _run_garmin_sync(user, state, [raw], has_weight_on_date_return=True)
+    fake_garmin_1.upload_body_composition.assert_not_called()
+
+    assert state.weight_only_syncs_on_date(user.name, "garmin", dt.astimezone().date()) == []
+
+    full = _full_measurement(85.0, datetime(2026, 5, 10, 9, 30, tzinfo=timezone.utc))
+    fake_garmin_2 = _run_garmin_sync(user, state, [full], has_weight_on_date_return=True)
+    fake_garmin_2.delete_weight_entry.assert_not_called()
+
+    state.close()

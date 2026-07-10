@@ -43,6 +43,10 @@ class EufyMeasurement:
     visceral_fat_level: float | None = None
     metabolic_age: int | None = None
     bmi: float | None = None
+    # True for records recovered from the raw Wi-Fi endpoint, which carry
+    # weight but no body composition. sync upgrades these in Garmin when the
+    # processed record for the same weigh-in shows up later (issue #48).
+    weight_only: bool = False
 
 
 @dataclass
@@ -363,6 +367,7 @@ class EufyClient:
             device_id=record.get("device_id", "unknown"),
             timestamp=datetime.fromtimestamp(update_time, tz=timezone.utc),
             weight_kg=weight_kg,
+            weight_only=True,
         )
 
     def _parse_record(self, record: dict) -> EufyMeasurement | None:

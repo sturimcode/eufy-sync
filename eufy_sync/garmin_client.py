@@ -52,6 +52,29 @@ class GarminClient:
             logger.warning("Garmin duplicate-check failed for %s: %s", date_str, e)
             return False
 
+    def delete_weight_entry(self, dt: datetime, weight_kg: float) -> bool:
+        """Delete the weigh-in we uploaded on dt's local date, matched by
+        weight. Used to replace a weight-only (raw Wi-Fi) upload once the
+        full body-comp record for the same weigh-in arrives (issue #48).
+        Fail-open: returns False when nothing matched or the API errored, and
+        the caller uploads anyway - the worst case is the duplicate we would
+        have had without this method."""
+        date_str = dt.astimezone().strftime("%Y-%m-%d")
+        try:
+            data = self._garmin.get_daily_weigh_ins(date_str)
+            for entry in data.get("dateWeightList", []):
+                entry_kg = entry.get("weight", 0) / 1000.0  # Garmin stores grams
+                if abs(entry_kg - weight_kg) <= 0.1:
+                    self._garmin.delete_weigh_in(entry["samplePk"], date_str)
+                    logger.info("Deleted weight-only entry (%.1f kg on %s) ahead of full body comp",
+                                weight_kg, date_str)
+                    return True
+            logger.warning("No weight entry near %.1f kg found on %s to replace", weight_kg, date_str)
+            return False
+        except Exception as e:
+            logger.warning("Could not delete weight entry on %s: %s", date_str, e)
+            return False
+
     def _add_body_composition(self, body_comp: GarminBodyComposition):
         # add_body_composition also accepts visceral_fat_mass, active_met, and
         # physique_rating; the Eufy scale does not provide those, so they are omitted.
