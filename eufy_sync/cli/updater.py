@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import re
 import shutil
 import subprocess
@@ -99,6 +100,23 @@ def _self_update() -> None:
         cmd = ["pipx", "install", "--force", f"eufy-sync=={latest}"]
     else:
         cmd = [sys.executable, "-m", "pip", "install", "--upgrade", f"eufy-sync=={latest}"]
+
+    if platform.system() == "Windows":
+        # A running eufy-sync.exe holds a lock on itself, so it cannot be
+        # overwritten in place. Hand the update to a fresh console that waits
+        # for this process to exit, runs the upgrade, and stays open (pause)
+        # so any failure is visible instead of vanishing with the window.
+        flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0) | getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+        inner = "timeout /t 2 /nobreak >nul & " + " ".join(cmd) + " & echo. & pause"
+        subprocess.Popen(
+            ["cmd", "/c", "start", "eufy-sync update", "cmd", "/c", inner],
+            creationflags=flags,
+        )
+        print(f"Updating eufy-sync from v{__version__} to v{latest} in a new window...")
+        print("(Windows cannot replace a running program, so the update finishes there.)")
+        return
 
     print(f"Updating eufy-sync from v{__version__} to v{latest}...")
     result = subprocess.run(cmd)

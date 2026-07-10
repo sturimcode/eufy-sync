@@ -201,3 +201,42 @@ def test_self_update_reports_failed_install(capsys):
         _self_update()
 
     assert "Update failed" in capsys.readouterr().out
+
+
+def test_self_update_on_windows_uses_detached_console():
+    # Windows cannot overwrite the running eufy-sync.exe, so the update must be
+    # handed to a separate console that waits for this process to exit first.
+    from eufy_sync.cli.updater import _self_update
+    with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Windows"), \
+         patch("eufy_sync.cli.updater.shutil.which", return_value="C:\\pipx\\pipx.exe"), \
+         patch("eufy_sync.cli.updater.subprocess.run") as mock_run, \
+         patch("eufy_sync.cli.updater.subprocess.Popen") as mock_popen:
+        _self_update()
+
+    # The in-process runner must not be used - it would try to replace a locked exe.
+    mock_run.assert_not_called()
+    mock_popen.assert_called_once()
+
+    argv = mock_popen.call_args.args[0]
+    assert argv[:4] == ["cmd", "/c", "start", "eufy-sync update"]
+
+    # The pinned version is what the detached console actually installs.
+    inner = argv[-1]
+    assert "eufy-sync==9.9.9" in inner
+
+
+def test_self_update_on_darwin_runs_inline():
+    # Non-Windows platforms replace the package in place, exactly as before.
+    from eufy_sync.cli.updater import _self_update
+    with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
+         patch("eufy_sync.cli.updater.shutil.which", return_value="/usr/local/bin/pipx"), \
+         patch("eufy_sync.cli.updater.subprocess.Popen") as mock_popen, \
+         patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        _self_update()
+
+    mock_popen.assert_not_called()
+    assert mock_run.call_args.args[0] == ["pipx", "install", "--force", "eufy-sync==9.9.9"]
