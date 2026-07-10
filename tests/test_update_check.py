@@ -168,6 +168,42 @@ def test_self_update_uses_uv_when_installed_via_uv_tool():
     assert mock_run.call_args.args[0] == ["uv", "tool", "install", "--force", "eufy-sync==9.9.9"]
 
 
+def test_self_update_uses_uv_for_windows_uv_tool_path():
+    # A uv tool install on Windows lives under ...\uv\tools\... with
+    # backslashes; the marker match must normalize those or it falls through to
+    # a pip path that cannot work inside a uv venv.
+    from eufy_sync.cli.updater import _self_update
+    win_exe = r"C:\Users\x\AppData\Roaming\uv\tools\eufy-sync\Scripts\python.exe"
+    with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
+         patch("eufy_sync.cli.updater.sys.executable", win_exe), \
+         patch("eufy_sync.cli.updater.shutil.which", return_value="C:\\Users\\x\\uv.exe"), \
+         patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        _self_update()
+
+    assert mock_run.call_args.args[0][:4] == ["uv", "tool", "install", "--force"]
+
+
+def test_self_update_windows_quotes_spaced_executable_path():
+    # The detached inner command is one cmd.exe string; a Python path with
+    # spaces (e.g. C:\Program Files\...) must arrive double-quoted or it splits
+    # into two arguments and the upgrade fails.
+    from eufy_sync.cli.updater import _self_update
+    spaced = "C:\\Program Files\\Python\\python.exe"
+    with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Windows"), \
+         patch("eufy_sync.cli.updater.sys.executable", spaced), \
+         patch("eufy_sync.cli.updater.shutil.which", return_value=None), \
+         patch("eufy_sync.cli.updater.subprocess.Popen") as mock_popen:
+        _self_update()
+
+    inner = mock_popen.call_args.args[0][-1]
+    assert '"C:\\Program Files\\Python\\python.exe"' in inner
+    assert "eufy-sync==9.9.9" in inner
+
+
 def test_self_update_uses_pip_when_no_pipx():
     import sys as _sys
     from eufy_sync.cli.updater import _self_update

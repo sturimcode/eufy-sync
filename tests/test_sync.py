@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,8 +43,10 @@ def test_state_creates_parent_directory(tmp_path: Path):
     try:
         assert db_path.parent.exists()
         assert db_path.exists()
-        mode = oct(db_path.parent.stat().st_mode)[-3:]
-        assert mode == "700"
+        # POSIX modes only; Windows does not honor them.
+        if os.name != "nt":
+            mode = oct(db_path.parent.stat().st_mode)[-3:]
+            assert mode == "700"
     finally:
         state.close()
 

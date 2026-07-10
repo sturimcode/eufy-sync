@@ -73,6 +73,13 @@ def _check_for_updates() -> None:
         pass  # never let update check break a sync
 
 
+def _quote_cmd(cmd: list[str]) -> str:
+    """Join an argv into one command string, double-quoting any element that
+    contains a space so a path like C:\\Program Files\\... survives as a single
+    argument when the string is handed to cmd.exe."""
+    return " ".join(f'"{part}"' if " " in part else part for part in cmd)
+
+
 def _self_update() -> None:
     """Upgrade eufy-sync in place to the latest PyPI release.
 
@@ -92,7 +99,9 @@ def _self_update() -> None:
         print(f"Unexpected version from PyPI ({latest!r}); update manually with pipx.")
         return
 
-    if "/uv/tools/" in sys.executable and shutil.which("uv"):
+    # Normalize backslashes to forward slashes so the marker matches on
+    # Windows uv installs (C:\...\uv\tools\...) as well as POSIX ones.
+    if "/uv/tools/" in sys.executable.replace("\\", "/") and shutil.which("uv"):
         # Installed with `uv tool install`. Its venvs carry no pip, and pipx
         # would create a second copy, so update through uv itself.
         cmd = ["uv", "tool", "install", "--force", f"eufy-sync=={latest}"]
@@ -109,7 +118,7 @@ def _self_update() -> None:
         flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0) | getattr(
             subprocess, "CREATE_NEW_PROCESS_GROUP", 0
         )
-        inner = "timeout /t 2 /nobreak >nul & " + " ".join(cmd) + " & echo. & pause"
+        inner = "timeout /t 2 /nobreak >nul & " + _quote_cmd(cmd) + " & echo. & pause"
         subprocess.Popen(
             ["cmd", "/c", "start", "eufy-sync update", "cmd", "/c", inner],
             creationflags=flags,
@@ -123,4 +132,4 @@ def _self_update() -> None:
     if result.returncode == 0:
         print(f"Updated to v{latest}.")
     else:
-        print("Update failed. Run manually: " + " ".join(cmd))
+        print("Update failed. Run manually: " + _quote_cmd(cmd))

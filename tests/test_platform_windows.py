@@ -106,7 +106,13 @@ def test_install_failure_prints_stderr(data_dir, capsys):
                       return_value=SimpleNamespace(returncode=1, stdout="", stderr="Access is denied.")):
         windows.install_agent()
 
-    assert "Access is denied." in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Access is denied." in out
+    # The printed fallback command must quote the wrapper path inside the /TR
+    # value with escaped inner quotes, matching what the code passes
+    # programmatically, so a cmd.exe paste keeps a spaced path intact.
+    wrapper_path = data_dir / windows.WRAPPER_NAME
+    assert f'/TR "wscript.exe \\"{wrapper_path}\\""' in out
 
 
 def test_uninstall_deletes_task_and_removes_wrapper(data_dir):

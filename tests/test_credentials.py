@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 from unittest.mock import patch
@@ -161,8 +162,10 @@ def test_file_backend_creates_0o600_file_with_json(no_keyring, cred_file):
     store_password("default:eufy", "hunter2")
 
     assert cred_file.exists()
-    mode = stat.S_IMODE(cred_file.stat().st_mode)
-    assert mode == 0o600
+    # POSIX modes only; Windows reports 666/777 regardless of the mode passed.
+    if os.name != "nt":
+        mode = stat.S_IMODE(cred_file.stat().st_mode)
+        assert mode == 0o600
 
     on_disk = json.loads(cred_file.read_text())
     assert on_disk["passwords"]["default:eufy"] == "hunter2"
@@ -233,8 +236,10 @@ def test_use_file_store_moves_vault_from_keychain_to_file(fake_keyring, cred_fil
     use_file_store()
 
     assert cred_file.exists()
-    mode = stat.S_IMODE(cred_file.stat().st_mode)
-    assert mode == 0o600
+    # POSIX modes only; Windows reports 666/777 regardless of the mode passed.
+    if os.name != "nt":
+        mode = stat.S_IMODE(cred_file.stat().st_mode)
+        assert mode == 0o600
     on_disk = json.loads(cred_file.read_text())
     assert on_disk["passwords"]["default:eufy"] == "pw1"
     assert on_disk["tokens"]["garmin"] == {"di_token": "abc"}
@@ -295,8 +300,10 @@ def test_auto_fallback_creates_file_and_persists_token_with_no_keychain(no_keyri
     store_token("eufy", {"access_token": "headless-tok"})
 
     assert cred_file.exists()
-    mode = stat.S_IMODE(cred_file.stat().st_mode)
-    assert mode == 0o600
+    # POSIX modes only; Windows reports 666/777 regardless of the mode passed.
+    if os.name != "nt":
+        mode = stat.S_IMODE(cred_file.stat().st_mode)
+        assert mode == 0o600
     assert get_token("eufy") == {"access_token": "headless-tok"}
 
 
@@ -773,3 +780,50 @@ def test_missing_chunk_reads_as_empty_vault(fake_keyring, caplog):
     store_token("garmin", _big_token(3 * CHUNK_LIMIT))
     fake_keyring.delete_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:2")
     assert get_token("garmin") is None  # malformed vault treated as empty
+
+
+def test_chunk_read_failure_raises_friendly_error(fake_keyring, cred_file, monkeypatch):
+    """A keyring exception while reassembling chunks (locked or access denied
+    partway through) is the same unreadable-keychain condition as a failed
+    initial read - it must surface the actionable RuntimeError, not a raw
+    backend exception, so a partial read can never be saved back over the real
+    vault. A genuinely missing chunk keeps its malformed-vault handling
+    (covered above)."""
+    store_token("garmin", _big_token(3 * CHUNK_LIMIT))
+
+    real_get = fake_keyring.get_password
+
+    def flaky(service, account):
+        # The header read (account "vault") succeeds; the first chunk read fails.
+        if account.startswith(f"{VAULT_ACCOUNT}:"):
+            raise OSError("keychain locked")
+        return real_get(service, account)
+
+    monkeypatch.setattr("keyring.get_password", flaky)
+
+    with pytest.raises(RuntimeError, match="could not be read"):
+        get_token("garmin")
+
+
+def test_vault_exactly_at_chunk_limit_stays_single_entry(fake_keyring):
+    """The chunking boundary is inclusive: a serialized vault whose length is
+    exactly CHUNK_LIMIT still fits in one entry (the split only triggers above
+    the limit). Compute the token size that lands the full payload exactly on
+    CHUNK_LIMIT and confirm no chunk entries are written."""
+    def payload_len(n: int) -> int:
+        vault = {"passwords": {}, "tokens": {"garmin": {"access_token": "x" * n}}}
+        return len(json.dumps(vault))
+
+    # Each extra character in the token string adds exactly one byte to the
+    # serialized JSON, so solve for the size directly.
+    n = 1 + (CHUNK_LIMIT - payload_len(1))
+    assert payload_len(n) == CHUNK_LIMIT
+
+    store_token("garmin", {"access_token": "x" * n})
+
+    raw = fake_keyring.get_password(SERVICE_NAME, VAULT_ACCOUNT)
+    assert len(raw) == CHUNK_LIMIT
+    data = json.loads(raw)
+    assert "__chunks__" not in data
+    assert fake_keyring.get_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:1") is None
+    assert get_token("garmin") == {"access_token": "x" * n}

@@ -17,6 +17,21 @@ from eufy_sync.cli.maintenance import (
 )
 
 
+@pytest.fixture
+def pin_macos_impl(monkeypatch):
+    """Pin the launch-agent dispatch to the macOS implementation.
+
+    maintenance delegates through platform_support._impl(), which resolves the
+    active module from platform.system(). On a Windows CI runner these
+    macOS-specific tests would otherwise drive the real Windows schtasks path;
+    pinning _active (the way test_doctor.py does) keeps them on the macOS module
+    regardless of host OS, so the eufy_sync.platform_support.macos.* patches
+    below actually take effect."""
+    from eufy_sync import platform_support
+    from eufy_sync.platform_support import macos
+    monkeypatch.setattr(platform_support, "_active", macos)
+
+
 def test_write_config_creates_file_with_restricted_permissions(tmp_path: Path):
     config_path = tmp_path / "subdir" / "config.yaml"
     config = {"users": [{"name": "test"}]}
@@ -24,9 +39,11 @@ def test_write_config_creates_file_with_restricted_permissions(tmp_path: Path):
     _write_config(config_path, config)
 
     assert config_path.exists()
-    # File should be 600 (owner read/write only)
-    mode = oct(config_path.stat().st_mode)[-3:]
-    assert mode == "600"
+    # File should be 600 (owner read/write only). Windows reports 666/777
+    # regardless of the mode passed, so skip the POSIX-mode check there.
+    if os.name != "nt":
+        mode = oct(config_path.stat().st_mode)[-3:]
+        assert mode == "600"
 
     # Content should be valid YAML
     with open(config_path) as f:
@@ -38,8 +55,10 @@ def test_write_config_parent_directory_is_restricted(tmp_path: Path):
     config_path = tmp_path / "secure_dir" / "config.yaml"
     _write_config(config_path, {"test": True})
 
-    parent_mode = oct(config_path.parent.stat().st_mode)[-3:]
-    assert parent_mode == "700"
+    # POSIX modes only; Windows does not honor them.
+    if os.name != "nt":
+        parent_mode = oct(config_path.parent.stat().st_mode)[-3:]
+        assert parent_mode == "700"
 
 
 def test_write_config_overwrites_existing(tmp_path: Path):
@@ -75,7 +94,9 @@ def test_write_run_script_creates_executable_wrapper(tmp_path):
     content = script.read_text()
     assert content.startswith("#!/bin/sh")
     assert 'exec "/home/user/.local/bin/eufy-sync" --headless' in content
-    assert oct(script.stat().st_mode)[-3:] == "755"
+    # POSIX modes only; Windows does not honor them.
+    if os.name != "nt":
+        assert oct(script.stat().st_mode)[-3:] == "755"
 
 
 def test_write_run_script_is_byte_stable_across_installs(tmp_path):
@@ -101,7 +122,7 @@ def test_generate_plist_contains_log_path():
 @patch("eufy_sync.platform_support.macos.shutil.which", return_value="/home/user/.local/bin/eufy-sync")
 @patch("eufy_sync.platform_support.macos.platform.system", return_value="Darwin")
 @patch("eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH")
-def test_install_launch_agent_writes_plist_and_loads(mock_path, mock_system, mock_which, mock_run, tmp_path):
+def test_install_launch_agent_writes_plist_and_loads(mock_path, mock_system, mock_which, mock_run, tmp_path, pin_macos_impl):
     mock_path.parent.mkdir = MagicMock()
     mock_path.write_text = MagicMock()
 
@@ -128,7 +149,7 @@ def test_install_launch_agent_writes_plist_and_loads(mock_path, mock_system, moc
 @patch("eufy_sync.platform_support.macos.shutil.which", return_value="/home/user/.local/bin/eufy-sync")
 @patch("eufy_sync.platform_support.macos.platform.system", return_value="Darwin")
 @patch("eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH")
-def test_install_launch_agent_removes_legacy_wrapper(mock_path, mock_system, mock_which, mock_run, tmp_path):
+def test_install_launch_agent_removes_legacy_wrapper(mock_path, mock_system, mock_which, mock_run, tmp_path, pin_macos_impl):
     """Re-installing must delete the pre-1.7.17 run-sync.sh wrapper so it does
     not linger as an orphan next to the new eufy-sync-agent script."""
     mock_path.parent.mkdir = MagicMock()
@@ -146,21 +167,21 @@ def test_install_launch_agent_removes_legacy_wrapper(mock_path, mock_system, moc
 
 
 @patch("eufy_sync.platform_support.macos.platform.system", return_value="Linux")
-def test_install_launch_agent_skips_on_linux(mock_system, capsys):
+def test_install_launch_agent_skips_on_linux(mock_system, capsys, pin_macos_impl):
     _install_launch_agent()
     assert "only supported on macOS" in capsys.readouterr().out
 
 
 @patch("eufy_sync.platform_support.macos.shutil.which", return_value=None)
 @patch("eufy_sync.platform_support.macos.platform.system", return_value="Darwin")
-def test_install_launch_agent_warns_if_binary_not_found(mock_system, mock_which, capsys):
+def test_install_launch_agent_warns_if_binary_not_found(mock_system, mock_which, capsys, pin_macos_impl):
     _install_launch_agent()
     assert "could not find eufy-sync" in capsys.readouterr().out
 
 
 @patch("eufy_sync.platform_support.macos.subprocess.run")
 @patch("eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH")
-def test_uninstall_launch_agent_removes_plist(mock_path, mock_run):
+def test_uninstall_launch_agent_removes_plist(mock_path, mock_run, pin_macos_impl):
     mock_path.exists.return_value = True
     mock_path.unlink = MagicMock()
 
@@ -172,7 +193,7 @@ def test_uninstall_launch_agent_removes_plist(mock_path, mock_run):
 
 
 @patch("eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH")
-def test_uninstall_launch_agent_noop_if_not_installed(mock_path, capsys):
+def test_uninstall_launch_agent_noop_if_not_installed(mock_path, capsys, pin_macos_impl):
     mock_path.exists.return_value = False
 
     _uninstall_launch_agent()
@@ -184,7 +205,7 @@ def test_uninstall_launch_agent_noop_if_not_installed(mock_path, capsys):
 @patch("builtins.input", return_value="y")
 @patch("eufy_sync.platform_support.macos.sys.stdin")
 @patch("eufy_sync.platform_support.macos.platform.system", return_value="Darwin")
-def test_offer_launch_agent_installs_on_yes(mock_system, mock_stdin, mock_input, mock_install):
+def test_offer_launch_agent_installs_on_yes(mock_system, mock_stdin, mock_input, mock_install, pin_macos_impl):
     mock_stdin.isatty.return_value = True
 
     _offer_launch_agent()

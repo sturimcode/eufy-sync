@@ -152,7 +152,20 @@ def _load_vault_from_keychain() -> dict:
             count = parsed["__chunks__"]
             pieces = []
             for i in range(1, count + 1):
-                piece = keyring.get_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:{i}")
+                try:
+                    piece = keyring.get_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:{i}")
+                except Exception as e:
+                    # A keyring failure mid-reassembly (locked, access denied) is
+                    # the same unreadable-keychain condition as the initial read,
+                    # not a missing chunk. Translate it so a partial read can
+                    # never be saved back over the real vault. A chunk that
+                    # returns None (below) is a genuinely missing chunk and keeps
+                    # its malformed-vault handling.
+                    raise RuntimeError(
+                        "The system keychain could not be read (it may be locked or "
+                        "access was denied). Unlock it and retry, or run: "
+                        "eufy-sync --use-file-store"
+                    ) from e
                 if piece is None:
                     raise ValueError("missing vault chunk")
                 pieces.append(piece)

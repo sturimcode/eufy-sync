@@ -10,8 +10,8 @@ binary does not require re-registering the task.
 
 The public entry points (notify, install_agent, uninstall_agent, offer_agent,
 agent_status, agent_installed, purge_agent) are what the platform_support
-package dispatches to. notify is a no-op stub here; native toast support lands
-separately.
+package dispatches to. notify raises a native toast through PowerShell WinRT,
+fire-and-forget.
 """
 from __future__ import annotations
 
@@ -105,10 +105,14 @@ def _install_scheduled_task() -> None:
         print(f"Automatic sync installed (every 4 hours). Logs: {shared.LOG_FILE}")
     else:
         print(result.stderr.strip() or "Could not register the scheduled task.")
+        # Match the /TR value the code passes programmatically: the wrapper path
+        # is quoted inside the /TR argument, and those inner quotes are escaped
+        # with backslashes so a cmd.exe paste keeps the path (which may contain
+        # spaces) as a single argument.
         print(
             "Register it manually with: "
             f'schtasks /Create /F /TN {TASK_NAME} /SC HOURLY /MO 4 '
-            f'/TR "wscript.exe {wrapper_path}"'
+            f'/TR "wscript.exe \\"{wrapper_path}\\""'
         )
 
 
