@@ -7,6 +7,7 @@ touching a real Task Scheduler.
 """
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -205,10 +206,74 @@ def test_purge_agent_noop_when_not_installed(data_dir):
     run.assert_not_called()
 
 
-def test_notify_is_a_silent_noop(data_dir):
-    with patch.object(windows.subprocess, "run") as run:
-        assert windows.notify("t", "m", command="eufy-sync --update") is None
-        run.assert_not_called()
+def _decoded_script(run):
+    """Pull the -EncodedCommand payload off a captured subprocess.run call and
+    decode it back into the PowerShell script text."""
+    argv = run.call_args.args[0]
+    encoded = argv[argv.index("-EncodedCommand") + 1]
+    return base64.b64decode(encoded).decode("utf-16-le")
+
+
+def test_notify_invokes_powershell_with_encoded_command(data_dir):
+    with patch.object(windows.subprocess, "run", return_value=_ok()) as run:
+        assert windows.notify("Sync failed", "Reauth needed") is None
+
+    run.assert_called_once()
+    argv = run.call_args.args[0]
+    assert argv[:2] == ["powershell", "-NoProfile"]
+    assert "-EncodedCommand" in argv
+    assert run.call_args.kwargs["capture_output"] is True
+    assert run.call_args.kwargs["timeout"] == 10
+
+
+def test_notify_encodes_xml_escaped_message(data_dir):
+    with patch.object(windows.subprocess, "run", return_value=_ok()) as run:
+        windows.notify("Title", "Tom & Jerry <fixed>")
+
+    decoded = _decoded_script(run)
+    # The ampersand and angle brackets are neutralized as XML entities, so no
+    # raw special survives to break the toast XML.
+    assert "&amp;" in decoded
+    assert "&lt;fixed&gt;" in decoded
+    assert "Tom & Jerry" not in decoded
+
+
+def test_notify_message_with_specials_and_quotes_cannot_break_out(data_dir):
+    # A payload packed with the characters that would end the here-string, close
+    # a quote, or open an XML tag if any of them leaked through unescaped.
+    nasty = "'@ \"; <script>alert(1)</script> & done"
+    with patch.object(windows.subprocess, "run", return_value=_ok()) as run:
+        windows.notify("t", nasty)
+
+    decoded = _decoded_script(run)
+    # The XML specials are entity-encoded, so no live tag or bare ampersand lands
+    # in the text node.
+    assert "<script>" not in decoded
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in decoded
+    # The AppId GUID braces must survive .format() intact (they are doubled in
+    # the template so format() emits a single literal brace on each side).
+    assert "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}" in decoded
+
+
+def test_notify_swallows_oserror(data_dir):
+    with patch.object(windows.subprocess, "run", side_effect=OSError("powershell missing")):
+        assert windows.notify("t", "m") is None
+
+
+def test_notify_ignores_command_argument(data_dir):
+    calls = []
+
+    def record(argv, **kwargs):
+        calls.append(argv)
+        return _ok()
+
+    with patch.object(windows.subprocess, "run", side_effect=record):
+        windows.notify("t", "m")
+        windows.notify("t", "m", command="eufy-sync --reauth garmin")
+
+    # The fix command belongs in the message text on Windows; the invocation is
+    # byte-for-byte identical whether or not command is passed.
+    assert calls[0] == calls[1]
 
 
 def test_offer_installs_on_yes(data_dir):

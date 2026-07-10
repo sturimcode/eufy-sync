@@ -15,6 +15,7 @@ separately.
 """
 from __future__ import annotations
 
+import base64
 import platform
 import shutil
 import subprocess
@@ -24,6 +25,24 @@ from eufy_sync.cli import shared
 
 TASK_NAME = "eufy-sync"
 WRAPPER_NAME = "eufy-sync-agent.vbs"
+
+# PowerShell script that raises a native toast through the WinRT notification
+# APIs. The title and message are XML-escaped and interpolated with .format(),
+# so the AppId GUID braces are doubled to survive that pass as single literal
+# braces. The AppId points at the built-in Windows PowerShell shortcut so the
+# toast has a registered source and actually shows (an unregistered AppId is
+# silently dropped).
+_PS_TOAST = """\
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType=WindowsRuntime] | Out-Null
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml(@'
+<toast><visual><binding template="ToastGeneric"><text>{title}</text><text>{message}</text></binding></visual></toast>
+'@)
+$appid = '{{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}}\\WindowsPowerShell\\v1.0\\powershell.exe'
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appid).Show(
+    [Windows.UI.Notifications.ToastNotification]::new($xml))
+"""
 
 
 def _wrapper_content(binary_path: str) -> str:
@@ -170,8 +189,30 @@ def purge_agent() -> None:
 
 
 def notify(title: str, message: str, command: str | None = None) -> None:
-    # Toast notifications land separately; this is a no-op until then.
-    pass
+    """Send a native toast through PowerShell WinRT. Fails silently.
+
+    A notification is a courtesy, never the point of the run, so anything that
+    goes wrong here (no powershell, WinRT unavailable, a slow shell) must not
+    turn a completed sync into a crash. Every failure is swallowed, and the
+    call is bounded by a timeout so it cannot hang the process.
+
+    The title and message are XML-escaped and the whole script is handed to
+    powershell as a base64 -EncodedCommand (UTF-16-LE, the encoding PowerShell
+    expects), so no shell quoting layer can misread the text. command is
+    accepted for interface parity but ignored: v1 toasts are not clickable, and
+    call sites already put the fix command in the message text.
+    """
+    try:
+        from xml.sax.saxutils import escape
+        script = _PS_TOAST.format(title=escape(title), message=escape(message))
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+             "-EncodedCommand", encoded],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
 
 
 def install_agent() -> None:
