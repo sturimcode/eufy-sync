@@ -166,7 +166,7 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
     print(f"  - Keychain entries for eufy-sync")
     print(f"  - Sync history database")
     if platform_support.agent_installed():
-        print(f"  - Automatic sync Launch Agent")
+        print(f"  - Automatic sync")
     print("")
 
     answer = input("Are you sure? [y/N] ").strip()
