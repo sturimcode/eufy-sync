@@ -968,7 +968,8 @@ def test_noninteractive_ambiguous_profile_bails(
     out = capsys.readouterr().out
     assert "eufy-sync --select-profile" in out
     _notify.assert_any_call(
-        "eufy-sync: choose your profile", "Run: eufy-sync --select-profile"
+        "eufy-sync: choose your profile", "Run: eufy-sync --select-profile",
+        command="eufy-sync --select-profile",
     )
 
 

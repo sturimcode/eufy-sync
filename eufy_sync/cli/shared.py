@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -27,9 +29,44 @@ LEGACY_LAUNCH_WRAPPER_NAME = "run-sync.sh"
 UPDATE_CHECK_INTERVAL = 604800  # check once per week
 
 
-def _notify(title: str, message: str) -> None:
-    """Send a macOS notification. Fails silently on other platforms."""
+def _find_terminal_notifier() -> str | None:
+    """Locate terminal-notifier (optional Homebrew tool). Checked beyond
+    PATH because launchd runs with a minimal PATH that excludes Homebrew."""
+    found = shutil.which("terminal-notifier")
+    if found:
+        return found
+    for candidate in ("/opt/homebrew/bin/terminal-notifier", "/usr/local/bin/terminal-notifier"):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _notify(title: str, message: str, command: str | None = None) -> None:
+    """Send a macOS notification. Fails silently on other platforms.
+
+    When a fix command is given and terminal-notifier is installed,
+    clicking the notification opens a Terminal window running the command,
+    so the user lands in the interactive prompts instead of Script Editor
+    (plain osascript notifications belong to Script Editor and clicking
+    them just launches it).
+    """
     try:
+        if command:
+            notifier = _find_terminal_notifier()
+            if notifier:
+                do_script = f'tell application "Terminal" to do script "{command}"'
+                activate = 'tell application "Terminal" to activate'
+                subprocess.run(
+                    [
+                        notifier,
+                        "-title", title,
+                        "-message", message,
+                        "-execute", f"osascript -e {shlex.quote(do_script)} -e {shlex.quote(activate)}",
+                    ],
+                    capture_output=True,
+                    timeout=5,
+                )
+                return
         safe_title = json.dumps(title)
         safe_msg = json.dumps(message)
         subprocess.run(

@@ -245,13 +245,13 @@ def main() -> None:
             multiple_profiles = any("multiple Eufy profiles" in err for _, err in failures)
             all_transient = all(failure_notify.is_transient_network_error(err) for _, err in failures)
             if reauth_needed:
-                shared._notify("eufy-sync: re-login needed", "Run: eufy-sync --reauth garmin")
+                shared._notify("eufy-sync: re-login needed", "Run: eufy-sync --reauth garmin", command="eufy-sync --reauth garmin")
                 failure_notify.clear_network_failures()
             elif eufy_password:
-                shared._notify("eufy-sync: Eufy login failed", "Run: eufy-sync --update-password")
+                shared._notify("eufy-sync: Eufy login failed", "Run: eufy-sync --update-password", command="eufy-sync --update-password")
                 failure_notify.clear_network_failures()
             elif multiple_profiles:
-                shared._notify("eufy-sync: choose your profile", "Run: eufy-sync --select-profile")
+                shared._notify("eufy-sync: choose your profile", "Run: eufy-sync --select-profile", command="eufy-sync --select-profile")
                 failure_notify.clear_network_failures()
             elif all_transient and args.headless and not args.dry_run:
                 # A scheduled run that only hit network trouble. Stay quiet - the
