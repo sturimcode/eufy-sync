@@ -15,3 +15,4 @@ build/
 *.plist
 CLAUDE.md
 .claude/
+uv.lock
