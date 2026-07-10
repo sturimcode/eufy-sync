@@ -170,6 +170,10 @@ The Eufy cloud only returns a weigh-in after the Eufy app has processed it. If y
 pytest tests/ -v
 ```
 
+## Support
+
+If this saves you from typing your weight into Garmin by hand, you can [buy me a coffee](https://ko-fi.com/sturim).
+
 ## Disclaimer
 
 Uses unofficial APIs for Eufy and Garmin, and the official Strava API. Could break if any of them change things. Use at your own risk.
