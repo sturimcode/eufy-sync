@@ -138,7 +138,31 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 continue
 
             for target_name, client in targets:
-                if state.is_synced(user.name, m.measurement_id, target_name):
+                synced_already = state.is_synced(user.name, m.measurement_id, target_name)
+
+                # Issue #48: a full record can arrive for a weigh-in we
+                # already synced weight-only from the raw Wi-Fi endpoint.
+                # Depending on how Eufy timestamps the two, the ids may match
+                # (full record would be skipped, stranding the user on
+                # weight-only) or differ (full record would duplicate the
+                # day). Either way, replace the weight-only Garmin entry.
+                upgrade_row = None
+                if target_name == "garmin" and not m.weight_only:
+                    local_date = m.timestamp.astimezone().date()
+                    candidates = state.weight_only_syncs_on_date(user.name, "garmin", local_date)
+                    if synced_already:
+                        upgrade_row = next(
+                            (r for r in candidates if r["measurement_id"] == m.measurement_id), None
+                        )
+                        if upgrade_row is None:
+                            logger.debug("Already synced to %s: %s", target_name, m.measurement_id)
+                            continue
+                    elif candidates:
+                        upgrade_row = min(
+                            candidates,
+                            key=lambda r: abs(datetime.fromisoformat(r["measurement_timestamp"]) - m.timestamp),
+                        )
+                elif synced_already:
                     logger.debug("Already synced to %s: %s", target_name, m.measurement_id)
                     continue
 
@@ -173,6 +197,15 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     continue
 
                 if target_name == "garmin":
+                    if upgrade_row is not None:
+                        # Fail-open (returns False, never raises): if the old
+                        # entry can't be removed, upload anyway - the worst
+                        # case is the duplicate this fix exists to prevent,
+                        # while the body comp still arrives.
+                        client.delete_weight_entry(
+                            datetime.fromisoformat(upgrade_row["measurement_timestamp"]),
+                            upgrade_row["weight_kg"],
+                        )
                     result = _retry(
                         lambda: client.upload_body_composition(body_comp),
                         f"Garmin upload ({m.measurement_id})",
@@ -185,15 +218,20 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     )
                     response_str = json.dumps(result) if result else None
 
-                state.record_sync(
-                    user_name=user.name,
-                    measurement_id=m.measurement_id,
-                    measurement_timestamp=m.timestamp.isoformat(),
-                    weight_kg=m.weight_kg,
-                    synced_at=datetime.now(timezone.utc).isoformat(),
-                    target=target_name,
-                    response=response_str,
-                )
+                if not synced_already:
+                    state.record_sync(
+                        user_name=user.name,
+                        measurement_id=m.measurement_id,
+                        measurement_timestamp=m.timestamp.isoformat(),
+                        weight_kg=m.weight_kg,
+                        synced_at=datetime.now(timezone.utc).isoformat(),
+                        target=target_name,
+                        response=response_str,
+                        weight_only=m.weight_only,
+                    )
+                if upgrade_row is not None:
+                    state.mark_upgraded(user.name, upgrade_row["measurement_id"], "garmin")
+                    logger.info("Upgraded weight-only entry to full body comp for %s", m.timestamp.date())
                 counts[target_name] += 1
                 lb = m.weight_kg * 2.20462
                 detail = "full body comp" if target_name == "garmin" else "weight only"

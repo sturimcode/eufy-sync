@@ -254,3 +254,20 @@ def test_raw_fallback_degrades_on_malformed_record():
          patch.object(c, "_get_raw_records", return_value=[bad]):
         measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
     assert measurements == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #48: raw weight-only records must be distinguishable from processed
+# ones so sync can upgrade them when the full body comp arrives later.
+# ---------------------------------------------------------------------------
+
+def test_raw_wifi_measurement_is_marked_weight_only():
+    c = _client()
+    m = c._parse_raw_wifi_record(_raw_wifi_record("a", 80.0, 2_000_000_000))
+    assert m.weight_only is True
+
+
+def test_processed_measurement_is_not_weight_only():
+    c = _client()
+    m = c._parse_record(_record("a", 800, 100))
+    assert m.weight_only is False

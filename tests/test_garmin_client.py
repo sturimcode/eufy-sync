@@ -192,3 +192,44 @@ def test_upload_propagates_rate_limit_without_reauth():
         with pytest.raises(GarminConnectTooManyRequestsError):
             client.upload_body_composition(bc)
     reauth.assert_not_called()  # a 429 must not trigger a re-login
+
+
+# ---------------------------------------------------------------------------
+# Issue #48: deleting our weight-only entry so the full record replaces it
+# ---------------------------------------------------------------------------
+
+def test_delete_weight_entry_matches_by_weight_and_deletes():
+    fake = MagicMock()
+    fake.get_daily_weigh_ins.return_value = {"dateWeightList": [
+        {"samplePk": 111, "weight": 92500.0},   # someone else's 92.5 kg entry
+        {"samplePk": 222, "weight": 85000.0},   # our 85.0 kg weight-only upload
+    ]}
+    client = _client_with_fake_garmin(fake)
+
+    dt = datetime(2026, 7, 9, 7, 0, tzinfo=timezone.utc)
+    assert client.delete_weight_entry(dt, 85.0) is True
+
+    date_str = dt.astimezone().strftime("%Y-%m-%d")
+    fake.get_daily_weigh_ins.assert_called_once_with(date_str)
+    fake.delete_weigh_in.assert_called_once_with(222, date_str)
+
+
+def test_delete_weight_entry_no_match_deletes_nothing():
+    fake = MagicMock()
+    fake.get_daily_weigh_ins.return_value = {"dateWeightList": [
+        {"samplePk": 111, "weight": 92500.0},
+    ]}
+    client = _client_with_fake_garmin(fake)
+
+    assert client.delete_weight_entry(datetime(2026, 7, 9, 7, 0, tzinfo=timezone.utc), 85.0) is False
+    fake.delete_weigh_in.assert_not_called()
+
+
+def test_delete_weight_entry_fails_open_on_api_error():
+    """A failed lookup or delete must not break the sync run; the caller
+    uploads anyway and the worst case is the pre-existing duplicate."""
+    fake = MagicMock()
+    fake.get_daily_weigh_ins.side_effect = RuntimeError("Garmin 500")
+    client = _client_with_fake_garmin(fake)
+
+    assert client.delete_weight_entry(datetime(2026, 7, 9, 7, 0, tzinfo=timezone.utc), 85.0) is False

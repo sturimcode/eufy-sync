@@ -24,13 +24,19 @@ class SyncState:
                 target TEXT NOT NULL DEFAULT 'garmin',
                 synced_at TEXT NOT NULL,
                 response TEXT,
+                weight_only INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(user_name, eufy_measurement_id, target)
             );
         """)
         self._conn.commit()
 
     def _migrate_if_needed(self) -> None:
-        """Migrate v1 schema (garmin-only) to v2 (multi-target)."""
+        """Migrate v1 schema (garmin-only) to v2 (multi-target), then v2 to v3
+        (weight_only flag)."""
+        self._migrate_multi_target()
+        self._migrate_weight_only_column()
+
+    def _migrate_multi_target(self) -> None:
         cursor = self._conn.execute("PRAGMA table_info(sync_log)")
         columns = {row[1] for row in cursor.fetchall()}
         if not columns:
@@ -64,6 +70,18 @@ class SyncState:
             """)
             self._conn.execute("DROP TABLE sync_log")
             self._conn.execute("ALTER TABLE sync_log_v2 RENAME TO sync_log")
+
+    def _migrate_weight_only_column(self) -> None:
+        """v2 -> v3: add the weight_only flag. Existing rows predate the raw
+        Wi-Fi fallback, so 0 (full record) is correct for all of them."""
+        cursor = self._conn.execute("PRAGMA table_info(sync_log)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if not columns or "weight_only" in columns:
+            return
+        with self._conn:
+            self._conn.execute(
+                "ALTER TABLE sync_log ADD COLUMN weight_only INTEGER NOT NULL DEFAULT 0"
+            )
 
     def has_any_syncs(self, user_name: str, target: str) -> bool:
         """Check if a target has ever been synced to."""
@@ -106,12 +124,41 @@ class SyncState:
         synced_at: str,
         target: str = "garmin",
         response: str | None = None,
+        weight_only: bool = False,
     ) -> None:
         self._conn.execute(
             """INSERT INTO sync_log
-               (user_name, eufy_measurement_id, measurement_timestamp, weight_kg, target, synced_at, response)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (user_name, measurement_id, measurement_timestamp, weight_kg, target, synced_at, response),
+               (user_name, eufy_measurement_id, measurement_timestamp, weight_kg, target, synced_at, response, weight_only)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_name, measurement_id, measurement_timestamp, weight_kg, target, synced_at, response, int(weight_only)),
+        )
+        self._conn.commit()
+
+    def weight_only_syncs_on_date(self, user_name: str, target: str, local_date: date) -> list[dict]:
+        """Weight-only (raw Wi-Fi) syncs for a local calendar date that have
+        not been upgraded to a full record yet. Each dict carries
+        measurement_id, measurement_timestamp, and weight_kg. Date comparison
+        happens in Python for the same reason as has_synced_on_date."""
+        cursor = self._conn.execute(
+            """SELECT eufy_measurement_id, measurement_timestamp, weight_kg
+               FROM sync_log
+               WHERE user_name = ? AND target = ? AND weight_only = 1""",
+            (user_name, target),
+        )
+        return [
+            {"measurement_id": mid, "measurement_timestamp": ts, "weight_kg": kg}
+            for mid, ts, kg in cursor.fetchall()
+            if datetime.fromisoformat(ts).astimezone().date() == local_date
+        ]
+
+    def mark_upgraded(self, user_name: str, measurement_id: str, target: str) -> None:
+        """Clear a sync's weight-only flag once its full body-comp record has
+        replaced it in the target. The row stays, so the raw record itself
+        never re-syncs."""
+        self._conn.execute(
+            """UPDATE sync_log SET weight_only = 0
+               WHERE user_name = ? AND eufy_measurement_id = ? AND target = ?""",
+            (user_name, measurement_id, target),
         )
         self._conn.commit()
 
