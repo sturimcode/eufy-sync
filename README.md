@@ -91,6 +91,8 @@ eufy-sync --update
 
 On first run you can opt into syncing every 4 hours. If you do, a macOS Launch Agent runs it in the background: weigh yourself, open your laptop later, and it syncs on its own. Logs go to `~/.garmin-sync/sync.log`, and you get a notification if something fails. Turn it off with `eufy-sync --uninstall-agent`.
 
+If [terminal-notifier](https://github.com/julienXX/terminal-notifier) is installed (`brew install terminal-notifier`), clicking a failure notification opens Terminal with the fix command already running. Without it, notifications still appear; the click just does nothing useful.
+
 ## Headless Linux (server or VPS)
 
 eufy-sync runs on Linux too, and a server is a good home for it: no laptop that has to be awake. Without a system keychain, credentials fall back to a file with `600` permissions.

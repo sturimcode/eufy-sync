@@ -65,7 +65,7 @@ def _check_for_updates() -> None:
         if sys.stdin.isatty():
             print(f"Update available: v{latest} (you have v{__version__}). Run: eufy-sync --update")
         else:
-            shared._notify("eufy-sync", f"Update available: v{latest}. Run: eufy-sync --update")
+            shared._notify("eufy-sync", f"Update available: v{latest}. Run: eufy-sync --update", command="eufy-sync --update")
 
     except Exception:
         pass  # never let update check break a sync
