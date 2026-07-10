@@ -1,8 +1,6 @@
 # Garmin Hybrid Auth: curl_cffi primary, browser fallback (Design)
 
 **Date:** 2026-06-20
-**Status:** approved, pending implementation plan
-**Owner:** Elias
 
 ## Goal
 

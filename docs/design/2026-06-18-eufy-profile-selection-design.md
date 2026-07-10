@@ -1,8 +1,6 @@
-# Eufy Profile Selection — Design
+# Eufy Profile Selection - Design
 
 **Date:** 2026-06-18
-**Status:** approved, pending implementation plan
-**Owner:** Elias
 **Fixes:** GitHub issue #1 (syncs every household member's weight)
 
 ## Goal

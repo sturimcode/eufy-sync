@@ -15,7 +15,7 @@ def test_parse_record_basic():
         "update_time": 1711900000,
         "create_time": 1711900000,
         "scale_data": {
-            "weight": 862,  # decigrams -> 86.2 kg
+            "weight": 862,  # 0.1 kg units -> 86.2 kg
             "body_fat": 18.5,
             "muscle_mass": 45.2,
             "water": 55.3,
@@ -53,7 +53,7 @@ def test_parse_record_zero_weight():
 
 
 # ---------------------------------------------------------------------------
-# Helpers shared by Task 2 and Task 3 tests
+# Shared record and client helpers
 # ---------------------------------------------------------------------------
 
 def _client(customer_id=None):
@@ -88,7 +88,7 @@ def _raw_wifi_record(customer_id, weight_kg, timestamp):
 
 
 # ---------------------------------------------------------------------------
-# Task 2: list_profiles
+# list_profiles
 # ---------------------------------------------------------------------------
 
 def test_list_profiles_groups_by_customer_id_newest_first():
@@ -104,7 +104,7 @@ def test_list_profiles_groups_by_customer_id_newest_first():
 
 
 # ---------------------------------------------------------------------------
-# Task 3: fetch_measurements filtering and AmbiguousProfileError
+# fetch_measurements filtering and AmbiguousProfileError
 # ---------------------------------------------------------------------------
 
 def test_fetch_filters_to_configured_profile():
@@ -152,7 +152,7 @@ def test_fetch_configured_profile_forwards_after_timestamp():
 
 
 # ---------------------------------------------------------------------------
-# Task 1: _list_device_ids and _get_raw_records
+# _list_device_ids and _get_raw_records
 # ---------------------------------------------------------------------------
 
 def _resp(status_code, json_body):
@@ -199,7 +199,7 @@ def test_get_raw_records_handles_null_list_500_and_bad_code():
 
 
 # ---------------------------------------------------------------------------
-# Task 2: fallback orchestration
+# Raw Wi-Fi fallback orchestration
 # ---------------------------------------------------------------------------
 
 def test_fetch_falls_back_to_raw_when_normal_empty():

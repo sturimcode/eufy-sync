@@ -1,5 +1,0 @@
-httpx>=0.27.0
-garminconnect>=0.3.6
-curl_cffi>=0.7.0
-pyyaml>=6.0
-playwright>=1.40.0

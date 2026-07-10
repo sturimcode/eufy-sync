@@ -24,11 +24,16 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME#v}"
           ver=$(grep -E '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          dunder=$(grep -E '^__version__ = ' eufy_sync/__init__.py | sed -E 's/__version__ = "(.*)"/\1/')
           if [ "$tag" != "$ver" ]; then
             echo "Tag $GITHUB_REF_NAME ($tag) does not match pyproject.toml version ($ver). Refusing to publish."
             exit 1
           fi
-          echo "Tag and package version agree: $ver"
+          if [ "$tag" != "$dunder" ]; then
+            echo "Tag $GITHUB_REF_NAME ($tag) does not match eufy_sync/__init__.py __version__ ($dunder). Refusing to publish."
+            exit 1
+          fi
+          echo "Tag and package versions agree: $ver"
       - run: pip install build
       - run: python -m build
       - uses: pypa/gh-action-pypi-publish@release/v1

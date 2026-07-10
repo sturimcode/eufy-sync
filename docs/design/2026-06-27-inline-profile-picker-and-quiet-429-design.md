@@ -1,7 +1,6 @@
 # Inline Eufy profile picker and quieter Garmin login output
 
 Date: 2026-06-27
-Status: approved, ready for implementation plan
 
 ## Problem
 

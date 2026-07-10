@@ -73,7 +73,7 @@ def browser_login(email: str, password: str) -> str:
             is_mobile=True,
         )
         context.expose_binding(
-            "pirateGarminCaptureLogin",
+            "eufySyncCaptureLogin",
             lambda source, data: handle_login_capture(source, data),
         )
         context.add_init_script("""
@@ -86,7 +86,7 @@ def browser_login(email: str, password: str) -> str:
                         try {
                             const clone = response.clone();
                             const data = await clone.json();
-                            window.pirateGarminCaptureLogin(JSON.stringify(data));
+                            window.eufySyncCaptureLogin(JSON.stringify(data));
                         } catch(e) {}
                     }
                     return response;
@@ -101,7 +101,7 @@ def browser_login(email: str, password: str) -> str:
                     this.addEventListener('load', function() {
                         if (this._url && this._url.includes('/mobile/api/login')) {
                             try {
-                                window.pirateGarminCaptureLogin(this.responseText);
+                                window.eufySyncCaptureLogin(this.responseText);
                             } catch(e) {}
                         }
                     });

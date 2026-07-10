@@ -675,7 +675,7 @@ def test_history_with_no_config_exits_without_wizard(tmp_path, capsys):
 def test_status_with_corrupt_db_exits_cleanly(tmp_path):
     """If SyncState construction raises (locked keychain, corrupt DB file),
     --status must print a plain one-line error and exit 1 - not a raw
-    traceback. This is Pass 2's startup-guard pattern extended to the
+    traceback. This is the startup-guard pattern extended to the
     --status/--history handlers, which currently sit outside it."""
     from eufy_sync.cli.app import main
 
@@ -970,3 +970,19 @@ def test_noninteractive_ambiguous_profile_bails(
     _notify.assert_any_call(
         "eufy-sync: choose your profile", "Run: eufy-sync --select-profile"
     )
+
+
+def test_dunder_version_matches_pyproject():
+    """The version lives in two places (pyproject.toml for packaging,
+    eufy_sync.__version__ for --version and the update checker). 1.7.20
+    shipped with the two out of sync, which made every up-to-date install
+    nag about a phantom update. This keeps them locked together."""
+    import tomllib
+    from pathlib import Path
+
+    import eufy_sync
+
+    pyproject = Path(__file__).parent.parent / "pyproject.toml"
+    with open(pyproject, "rb") as f:
+        declared = tomllib.load(f)["project"]["version"]
+    assert eufy_sync.__version__ == declared

@@ -138,13 +138,13 @@ If Garmin is already set up and you want Strava:
 ## How it works
 
 ```
-Eufy Cloud  ->  eufy_client.py  ->  transform  ->  garmin_client.py  ->  Garmin (FIT)
+Eufy Cloud  ->  eufy_client.py  ->  transform  ->  garmin_client.py  ->  Garmin (body comp)
 (pull)          (auth)              (filter,    ->  strava_client.py  ->  Strava (weight)
                                     dedup,
                                     state.db)
 ```
 
-On each run it pulls your Eufy history and checks a local SQLite DB for what each target already has, then uploads only what is new: a FIT file to Garmin (skipping dates Garmin already holds, so two machines do not double up), and the latest weight to Strava. Every sync is recorded in the DB.
+On each run it pulls your Eufy history and checks a local SQLite DB for what each target already has, then uploads only what is new: full body composition to Garmin through python-garminconnect's upload API (skipping dates Garmin already holds, so two machines do not double up), and the latest weight to Strava. Every sync is recorded in the DB.
 
 ## Security
 
