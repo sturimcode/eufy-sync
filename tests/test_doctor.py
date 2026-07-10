@@ -14,8 +14,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
+from eufy_sync import platform_support
 from eufy_sync.cli import doctor
 from eufy_sync.config import AppConfig, EufyConfig, GarminConfig, StravaConfig, UserConfig
+from eufy_sync.platform_support import generic, macos
 
 
 def _write_config(path: Path, *, garmin: bool = True, strava: bool = True, customer_id: str | None = "abc1234567890867f") -> None:
@@ -73,19 +75,19 @@ def _patch_all_pass(tmp_path, monkeypatch):
     strava_client.token_status.return_value = {"state": "valid", "days_remaining": None, "hours_remaining": 5}
     monkeypatch.setattr(doctor, "StravaClient", MagicMock(return_value=strava_client))
 
-    monkeypatch.setattr(doctor.platform, "system", MagicMock(return_value="Darwin"))
+    monkeypatch.setattr(platform_support, "_active", macos)
     wrapper = tmp_path / "eufy-sync-agent"
     wrapper.write_text("#!/bin/sh\n")
-    monkeypatch.setattr(doctor.shared, "LAUNCH_AGENT_PATH", tmp_path / "agent.plist")
+    monkeypatch.setattr(macos, "LAUNCH_AGENT_PATH", tmp_path / "agent.plist")
     plist = f"""<?xml version="1.0"?>
 <plist><dict>
 <key>ProgramArguments</key>
 <array><string>{wrapper}</string></array>
 </dict></plist>"""
-    doctor.shared.LAUNCH_AGENT_PATH.write_text(plist)
+    macos.LAUNCH_AGENT_PATH.write_text(plist)
     monkeypatch.setattr(
-        doctor.subprocess, "run",
-        MagicMock(return_value=MagicMock(stdout=doctor.shared.LAUNCH_AGENT_LABEL, returncode=0)),
+        macos.subprocess, "run",
+        MagicMock(return_value=MagicMock(stdout=macos.LAUNCH_AGENT_LABEL, returncode=0)),
     )
 
     state = MagicMock()
@@ -196,7 +198,7 @@ def test_launch_agent_pointing_at_raw_binary_warns_install_agent(tmp_path, monke
 <key>ProgramArguments</key>
 <array><string>/Users/x/.local/bin/eufy-sync</string></array>
 </dict></plist>"""
-    doctor.shared.LAUNCH_AGENT_PATH.write_text(plist)
+    macos.LAUNCH_AGENT_PATH.write_text(plist)
 
     code = doctor._run_doctor(config_path, db_path)
 
@@ -221,7 +223,7 @@ def test_launch_agent_pointing_at_legacy_wrapper_warns_install_agent(tmp_path, m
 <key>ProgramArguments</key>
 <array><string>{legacy}</string></array>
 </dict></plist>"""
-    doctor.shared.LAUNCH_AGENT_PATH.write_text(plist)
+    macos.LAUNCH_AGENT_PATH.write_text(plist)
 
     code = doctor._run_doctor(config_path, db_path)
 
@@ -395,7 +397,7 @@ def test_keychain_fallback_never_fails(tmp_path, monkeypatch, capsys):
 
 def test_launch_agent_not_installed_warns(tmp_path, monkeypatch, capsys):
     config_path, db_path = _patch_all_pass(tmp_path, monkeypatch)
-    doctor.shared.LAUNCH_AGENT_PATH.unlink()
+    macos.LAUNCH_AGENT_PATH.unlink()
 
     code = doctor._run_doctor(config_path, db_path)
 
@@ -409,7 +411,7 @@ def test_launch_agent_not_installed_warns(tmp_path, monkeypatch, capsys):
 
 def test_launch_agent_not_loaded_warns(tmp_path, monkeypatch, capsys):
     config_path, db_path = _patch_all_pass(tmp_path, monkeypatch)
-    doctor.subprocess.run = MagicMock(return_value=MagicMock(stdout="", returncode=0))
+    macos.subprocess.run = MagicMock(return_value=MagicMock(stdout="", returncode=0))
 
     code = doctor._run_doctor(config_path, db_path)
 
@@ -423,7 +425,7 @@ def test_launch_agent_not_loaded_warns(tmp_path, monkeypatch, capsys):
 
 def test_launch_agent_skipped_on_non_macos(tmp_path, monkeypatch, capsys):
     config_path, db_path = _patch_all_pass(tmp_path, monkeypatch)
-    doctor.platform.system = MagicMock(return_value="Linux")
+    monkeypatch.setattr(platform_support, "_active", generic)
 
     code = doctor._run_doctor(config_path, db_path)
 

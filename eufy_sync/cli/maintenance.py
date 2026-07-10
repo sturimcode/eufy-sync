@@ -1,15 +1,14 @@
-"""Password updates, re-auth, and the macOS Launch Agent lifecycle."""
+"""Password updates, re-auth, and the scheduled-sync agent lifecycle."""
 from __future__ import annotations
 
 import getpass
-import platform
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 import yaml
 
+from eufy_sync import platform_support
 from eufy_sync.cli import shared
 
 
@@ -136,127 +135,19 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
         print("Done - Strava tokens saved.")
 
 
-def _write_run_script(binary_path: str) -> Path:
-    """Write the stable wrapper script the Launch Agent runs.
-
-    macOS re-announces "can run in the background" whenever a registered
-    background item's executable changes identity, and pipx/uv replace the
-    binary on every update. The agent therefore points at this script, whose
-    bytes never change across updates, so the announcement fires once, not
-    once per release. Skipping the rewrite when content is unchanged is what
-    keeps the file's identity stable. The filename is what macOS shows in that
-    announcement, so it is a recognizable "eufy-sync-agent", not an opaque one.
-    """
-    script_path = shared.DATA_DIR / shared.LAUNCH_WRAPPER_NAME
-    content = f'#!/bin/sh\nexec "{binary_path}" --headless\n'
-    if script_path.exists() and script_path.read_text() == content:
-        return script_path
-    script_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    script_path.write_text(content)
-    script_path.chmod(0o755)
-    return script_path
-
-
-def _generate_plist(program_path: str) -> str:
-    """Generate a Launch Agent plist that runs the given program every 4 hours."""
-    log_path = str(shared.LOG_FILE)
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{shared.LAUNCH_AGENT_LABEL}</string>
-
-    <key>ProgramArguments</key>
-    <array>
-        <string>{program_path}</string>
-    </array>
-
-    <key>StartInterval</key>
-    <integer>14400</integer>
-
-    <key>RunAtLoad</key>
-    <true/>
-
-    <key>StandardOutPath</key>
-    <string>{log_path}</string>
-    <key>StandardErrorPath</key>
-    <string>{log_path}</string>
-</dict>
-</plist>
-"""
-
-
 def _install_launch_agent() -> None:
-    """Install the macOS Launch Agent for automatic sync."""
-    if platform.system() != "Darwin":
-        print("Auto-sync is only supported on macOS.")
-        return
-
-    binary = shutil.which("eufy-sync")
-    if not binary:
-        print("Warning: could not find eufy-sync on PATH. Skipping auto-sync setup.")
-        return
-
-    already_installed = shared.LAUNCH_AGENT_PATH.exists()
-
-    # Ensure the log directory exists with restricted permissions
-    shared.DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-
-    wrapper = _write_run_script(binary)
-
-    # Drop the pre-1.7.17 wrapper name so it does not linger as an orphan next
-    # to the new one.
-    legacy_wrapper = shared.DATA_DIR / shared.LEGACY_LAUNCH_WRAPPER_NAME
-    if legacy_wrapper.exists():
-        legacy_wrapper.unlink()
-
-    shared.LAUNCH_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    shared.LAUNCH_AGENT_PATH.write_text(_generate_plist(str(wrapper)))
-
-    # Unload first in case an old version is loaded
-    subprocess.run(
-        ["launchctl", "unload", str(shared.LAUNCH_AGENT_PATH)],
-        capture_output=True,
-    )
-    subprocess.run(
-        ["launchctl", "load", str(shared.LAUNCH_AGENT_PATH)],
-        capture_output=True,
-    )
-
-    if already_installed:
-        print(f"Launch Agent already installed (reloaded). Logs: {shared.LOG_FILE}")
-    else:
-        print(f"Automatic sync installed. Logs: {shared.LOG_FILE}")
+    """Install the scheduled-sync agent for the current platform."""
+    platform_support.install_agent()
 
 
 def _offer_launch_agent() -> None:
-    """Offer to install a macOS Launch Agent after first-run setup."""
-    if platform.system() != "Darwin":
-        return
-    if not sys.stdin.isatty():
-        return
-
-    print("")
-    answer = input("Set up automatic sync every 4 hours? [y/N] ").strip()
-    if not answer.lower().startswith("y"):
-        return
-
-    _install_launch_agent()
+    """Offer to install the scheduled-sync agent after first-run setup."""
+    platform_support.offer_agent()
 
 
 def _uninstall_launch_agent() -> None:
-    """Remove the macOS Launch Agent."""
-    if not shared.LAUNCH_AGENT_PATH.exists():
-        print("No Launch Agent installed.")
-        return
-
-    subprocess.run(
-        ["launchctl", "unload", str(shared.LAUNCH_AGENT_PATH)],
-        capture_output=True,
-    )
-    shared.LAUNCH_AGENT_PATH.unlink()
-    print("Launch Agent removed. Auto-sync disabled.")
+    """Remove the scheduled-sync agent for the current platform."""
+    platform_support.uninstall_agent()
 
 
 def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | None = None) -> None:
@@ -274,7 +165,7 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
     print(f"  - All saved credentials and tokens in {data_dir}/")
     print(f"  - Keychain entries for eufy-sync")
     print(f"  - Sync history database")
-    if shared.LAUNCH_AGENT_PATH.exists():
+    if platform_support.agent_installed():
         print(f"  - Automatic sync Launch Agent")
     print("")
 
@@ -295,10 +186,9 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
         keep_answer = input("Keep sync history? Prevents duplicates if you reinstall later. [Y/n] ").strip()
         keep_db = not keep_answer.lower().startswith("n")
 
-    # Stop and remove Launch Agent
-    if shared.LAUNCH_AGENT_PATH.exists():
-        subprocess.run(["launchctl", "unload", str(shared.LAUNCH_AGENT_PATH)], capture_output=True)
-        shared.LAUNCH_AGENT_PATH.unlink()
+    # Stop and remove the scheduled-sync agent, where the platform manages one.
+    if platform_support.agent_installed():
+        platform_support.purge_agent()
 
     # Clear keychain entries for every user named in the config
     user_names = ["default"]

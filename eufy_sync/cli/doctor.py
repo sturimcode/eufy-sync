@@ -8,14 +8,12 @@ line) when check 1 (config) fails, since nothing else can load without it.
 """
 from __future__ import annotations
 
-import platform
-import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from eufy_sync import credentials
-from eufy_sync.cli import shared
+from eufy_sync import platform_support
 from eufy_sync.cli import updater
 from eufy_sync.config import load_config
 from eufy_sync.credentials import _keyring_available, active_store_label
@@ -94,9 +92,10 @@ def _run_doctor(config_path: Path, db_path: Path) -> int:
     # 7. eufy cloud
     _check_eufy_cloud(report, eufy_client)
 
-    # 8. launch agent (macOS only)
-    if platform.system() == "Darwin":
-        _check_launch_agent(report)
+    # 8. scheduled sync agent (where the platform manages one)
+    agent = platform_support.agent_status()
+    if agent is not None:
+        report(agent["status"], agent["label"], agent["detail"], agent["fix"])
 
     # 9. state db
     _check_state_db(report, db_path, user)
@@ -229,37 +228,6 @@ def _check_eufy_cloud(report, eufy_client) -> None:
             eufy_client.close()
         except Exception:
             pass
-
-
-def _check_launch_agent(report) -> None:
-    try:
-        if not shared.LAUNCH_AGENT_PATH.exists():
-            report("WARN", "launch agent", "not installed", "eufy-sync --install-agent")
-            return
-
-        content = shared.LAUNCH_AGENT_PATH.read_text()
-        wrapper_name = shared.LAUNCH_WRAPPER_NAME
-        if wrapper_name not in content:
-            report(
-                "WARN", "launch agent",
-                "outdated registration (re-announces on every update)",
-                "eufy-sync --install-agent",
-            )
-            return
-
-        result = subprocess.run(
-            ["launchctl", "list"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if shared.LAUNCH_AGENT_LABEL not in (result.stdout or ""):
-            report("WARN", "launch agent", "installed but not loaded", "eufy-sync --install-agent")
-            return
-
-        report("PASS", "launch agent", "loaded, runs every 4h")
-    except Exception as e:
-        report("WARN", "launch agent", f"could not check ({e})", "eufy-sync --install-agent")
 
 
 def _check_state_db(report, db_path: Path, user) -> None:

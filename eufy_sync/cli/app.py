@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from eufy_sync import platform_support
 from eufy_sync.cli import doctor, maintenance, profiles, setup, shared, status, updater
 
 
@@ -123,7 +124,7 @@ def main() -> None:
     if first_run and args.headless:
         msg = "No config found. Run eufy-sync in a terminal to set up."
         print(msg)
-        shared._notify("eufy-sync", msg)
+        platform_support.notify("eufy-sync", msg)
         sys.exit(1)
 
     try:
@@ -143,7 +144,7 @@ def main() -> None:
     except Exception as e:
         msg = f"eufy-sync could not start: {e}"
         print(msg)
-        shared._notify("eufy-sync failed", str(e)[:200])
+        platform_support.notify("eufy-sync failed", str(e)[:200])
         sys.exit(1)
 
     has_garmin = any(u.garmin for u in config.users)
@@ -192,7 +193,7 @@ def main() -> None:
     except Exception as e:
         msg = f"eufy-sync could not start: {e}"
         print(msg)
-        shared._notify("eufy-sync failed", str(e)[:200])
+        platform_support.notify("eufy-sync failed", str(e)[:200])
         sys.exit(1)
 
     try:
@@ -245,13 +246,13 @@ def main() -> None:
             multiple_profiles = any("multiple Eufy profiles" in err for _, err in failures)
             all_transient = all(failure_notify.is_transient_network_error(err) for _, err in failures)
             if reauth_needed:
-                shared._notify("eufy-sync: re-login needed", "Run: eufy-sync --reauth garmin", command="eufy-sync --reauth garmin")
+                platform_support.notify("eufy-sync: re-login needed", "Run: eufy-sync --reauth garmin", command="eufy-sync --reauth garmin")
                 failure_notify.clear_network_failures()
             elif eufy_password:
-                shared._notify("eufy-sync: Eufy login failed", "Run: eufy-sync --update-password", command="eufy-sync --update-password")
+                platform_support.notify("eufy-sync: Eufy login failed", "Run: eufy-sync --update-password", command="eufy-sync --update-password")
                 failure_notify.clear_network_failures()
             elif multiple_profiles:
-                shared._notify("eufy-sync: choose your profile", "Run: eufy-sync --select-profile", command="eufy-sync --select-profile")
+                platform_support.notify("eufy-sync: choose your profile", "Run: eufy-sync --select-profile", command="eufy-sync --select-profile")
                 failure_notify.clear_network_failures()
             elif all_transient and args.headless and not args.dry_run:
                 # A scheduled run that only hit network trouble. Stay quiet - the
@@ -259,14 +260,14 @@ def main() -> None:
                 # points at a real outage worth one heads-up.
                 count, hours = failure_notify.record_network_failure()
                 if failure_notify.should_escalate(count):
-                    shared._notify(
+                    platform_support.notify(
                         "eufy-sync: network still down",
                         f"No network for ~{round(hours)}h ({count} runs). "
                         "Measurements are waiting and will sync when it is back.",
                     )
             else:
                 fail_msg = "; ".join(f"{name}: {err[:80]}" for name, err in failures)
-                shared._notify("eufy-sync failed", fail_msg)
+                platform_support.notify("eufy-sync failed", fail_msg)
                 failure_notify.clear_network_failures()
             logger.error("Sync failed for: %s", "; ".join(f"{n}: {e[:80]}" for n, e in failures))
         elif not args.dry_run:
@@ -285,7 +286,7 @@ def main() -> None:
 
         if total > 0:
             target_label = " and ".join(n.capitalize() for n in total_counts if total_counts[n] > 0)
-            shared._notify("eufy-sync", f"Synced {total} measurement{'s' if total != 1 else ''} to {target_label}")
+            platform_support.notify("eufy-sync", f"Synced {total} measurement{'s' if total != 1 else ''} to {target_label}")
 
         if first_run:
             if failures:
