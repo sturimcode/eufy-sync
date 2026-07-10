@@ -114,8 +114,12 @@ def test_write_run_script_is_byte_stable_across_installs(tmp_path):
 
 
 def test_generate_plist_contains_log_path():
+    # The plist embeds str(shared.LOG_FILE), which conftest points at a tmp
+    # path; assert against that actual path rather than a hardcoded
+    # forward-slash literal, which would not match Windows separators.
+    from eufy_sync.cli import shared
     plist = _generate_plist("/any/path")
-    assert ".garmin-sync/sync.log" in plist
+    assert str(shared.LOG_FILE) in plist
 
 
 @patch("eufy_sync.platform_support.macos.subprocess.run")

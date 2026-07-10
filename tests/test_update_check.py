@@ -112,9 +112,12 @@ def test_cache_not_written_on_network_error(tmp_path: Path):
 
 
 def test_self_update_uses_pinned_pipx_when_available():
+    # Pin a non-Windows platform: this covers the inline update path, which a
+    # Windows host would otherwise skip for the detached-console branch.
     from eufy_sync.cli.updater import _self_update
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
          patch("eufy_sync.cli.updater.shutil.which", return_value="/usr/local/bin/pipx"), \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
         _self_update()
@@ -157,9 +160,11 @@ def test_handles_pypi_prerelease_version(tmp_path: Path, capsys):
 def test_self_update_uses_uv_when_installed_via_uv_tool():
     # A uv tool venv has no pip, and pipx would create a second copy; the
     # updater must recognize its own install method and use uv.
+    # Pinned to Darwin so a Windows host exercises this inline path too.
     from eufy_sync.cli.updater import _self_update
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
          patch("eufy_sync.cli.updater.sys.executable", "/Users/x/.local/share/uv/tools/eufy-sync/bin/python"), \
          patch("eufy_sync.cli.updater.shutil.which", return_value="/usr/local/bin/uv"), \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
@@ -205,10 +210,12 @@ def test_self_update_windows_quotes_spaced_executable_path():
 
 
 def test_self_update_uses_pip_when_no_pipx():
+    # Pinned to Darwin so a Windows host exercises this inline path too.
     import sys as _sys
     from eufy_sync.cli.updater import _self_update
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
          patch("eufy_sync.cli.updater.shutil.which", return_value=None), \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
         _self_update()
@@ -229,9 +236,12 @@ def test_self_update_silent_when_pypi_unreachable(capsys):
 
 
 def test_self_update_reports_failed_install(capsys):
+    # Pinned to Darwin: the inline runner reports the failure; on a Windows
+    # host the detached branch would print the new-window message instead.
     from eufy_sync.cli.updater import _self_update
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
          patch("eufy_sync.cli.updater.shutil.which", return_value="/usr/local/bin/pipx"), \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=1)):
         _self_update()
