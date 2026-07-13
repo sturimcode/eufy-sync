@@ -9,6 +9,16 @@ from eufy_sync.cli import doctor, maintenance, profiles, setup, shared, status, 
 
 
 def main() -> None:
+    try:
+        _main()
+    except KeyboardInterrupt:
+        # Ctrl+C at any prompt (MFA code, passwords, confirmations) should
+        # read as a cancel, not dump a traceback.
+        print("\nCancelled.")
+        sys.exit(130)
+
+
+def _main() -> None:
     import argparse
 
     from eufy_sync import __version__
@@ -43,6 +53,12 @@ def main() -> None:
 
     config_path = args.config or shared.DEFAULT_CONFIG
     db_path = args.db or shared.DEFAULT_DB
+
+    # Configure logging before any command dispatch. Every path that can reach
+    # a Garmin login (setup, --update-password, --reauth, sync) needs the
+    # garminconnect logger quieted, or its per-strategy 429 warnings print
+    # through logging's last-resort handler and look like errors.
+    shared._configure_logging(args.verbose)
 
     # Handle doctor - must report even on a fresh install, never launch the
     # first-run wizard, and never traceback.
@@ -106,7 +122,6 @@ def main() -> None:
 
     # Handle reauth
     if args.reauth is not None:
-        shared._configure_logging(args.verbose)
         target = None if args.reauth == "all" else args.reauth
         maintenance._reauth(config_path, force=True, target=target)
         return
@@ -179,7 +194,6 @@ def main() -> None:
     from eufy_sync.state import SyncState
     from eufy_sync.eufy_client import AmbiguousProfileError
 
-    shared._configure_logging(args.verbose)
     logger = logging.getLogger("eufy_sync")
 
     updater._check_for_updates()
