@@ -7,7 +7,7 @@
 
 Syncs body composition from a Eufy smart scale to Garmin Connect and Strava.
 
-> macOS only. Needs Python 3.12+ and a terminal.
+> macOS and Windows. Needs Python 3.12+ and a terminal.
 
 ## Sync targets
 
@@ -48,6 +48,14 @@ source $HOME/.local/bin/env
 uv tool install eufy-sync
 ```
 
+**On Windows:** open PowerShell (press Start, type "powershell", hit Enter) and install uv the same way:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Open a fresh terminal so the `uv` command is found, then run `uv tool install eufy-sync`.
+
 Then open a new terminal window, so it picks up the newly installed command, and run:
 
 ```bash
@@ -87,11 +95,13 @@ eufy-sync checks weekly and tells you when a new version is out. To update:
 eufy-sync --update
 ```
 
-## Automatic sync (macOS)
+## Automatic sync
 
 On first run you can opt into syncing every 4 hours. If you do, a macOS Launch Agent runs it in the background: weigh yourself, open your laptop later, and it syncs on its own. Logs go to `~/.garmin-sync/sync.log`, and you get a notification if something fails. Turn it off with `eufy-sync --uninstall-agent`.
 
 If [terminal-notifier](https://github.com/julienXX/terminal-notifier) is installed (`brew install terminal-notifier`), clicking a failure notification opens Terminal with the fix command already running. Without it, notifications still appear; the click just does nothing useful.
+
+On Windows the same option registers a Scheduled Task that runs every 4 hours with no visible window. When a run fails, a toast notification names the command to fix it.
 
 ## Headless Linux (server or VPS)
 
@@ -150,7 +160,7 @@ On each run it pulls your Eufy history and checks a local SQLite DB for what eac
 
 ## Security
 
-Passwords and OAuth tokens live in a single item in your macOS Keychain, not plaintext files. The config in `~/.garmin-sync/` holds only email addresses and Strava app credentials, at `600` permissions. Credentials go over HTTPS to Eufy, Garmin, and Strava only, and are never logged or sent anywhere else. The one other outbound call is a weekly version check to pypi.org, with no credentials. On a host without a keychain (headless Linux), or if you choose `--use-file-store`, credentials fall back to a single `600` file at `~/.garmin-sync/credentials.json`.
+Passwords and OAuth tokens live in a single item in your macOS Keychain, not plaintext files. The config in `~/.garmin-sync/` holds only email addresses and Strava app credentials, at `600` permissions. Credentials go over HTTPS to Eufy, Garmin, and Strava only, and are never logged or sent anywhere else. The one other outbound call is a weekly version check to pypi.org, with no credentials. On a host without a keychain (headless Linux), or if you choose `--use-file-store`, credentials fall back to a single `600` file at `~/.garmin-sync/credentials.json`. On Windows the credential vault lives in Windows Credential Manager, and the file fallback relies on your user profile's permissions since Windows does not honor POSIX file modes.
 
 ### Credential storage
 

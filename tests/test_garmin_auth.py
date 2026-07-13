@@ -136,21 +136,61 @@ def test_login_falls_back_to_browser_when_curl_cffi_fails(monkeypatch):
     assert result is fake
 
 
-def test_login_bad_credentials_fails_both_tiers(monkeypatch):
+def test_login_bad_credentials_skips_browser_and_names_fix(monkeypatch):
+    # Definitively rejected credentials must not open the browser fallback:
+    # it would autofill the same bad password and fail minutes later.
     from garminconnect import GarminConnectAuthenticationError
     auth = _auth()
     monkeypatch.setattr(auth, "_load_token", lambda: None)
     fake = MagicMock()
     fake.login.side_effect = GarminConnectAuthenticationError("bad")
-    monkeypatch.setattr("eufy_sync.garmin_auth._ensure_chromium", lambda: None)
-
-    def _no_ticket(email, password):
-        raise RuntimeError("no service ticket captured")
-    monkeypatch.setattr("eufy_sync.garmin_auth.browser_login", _no_ticket)
+    browser_calls = []
+    monkeypatch.setattr("eufy_sync.garmin_auth.browser_login",
+                        lambda e, p: browser_calls.append(1) or "ticket")
     with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
         with pytest.raises(PermanentSyncError) as exc_info:
             auth.login(interactive=True)
     assert "update-password" in str(exc_info.value)
+    assert browser_calls == []
+
+
+def test_login_mfa_cancel_skips_browser_and_names_fix(monkeypatch):
+    from eufy_sync.garmin_auth import GarminLoginCancelled
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: None)
+    fake = MagicMock()
+    fake.login.side_effect = GarminLoginCancelled("no MFA code entered")
+    browser_calls = []
+    monkeypatch.setattr("eufy_sync.garmin_auth.browser_login",
+                        lambda e, p: browser_calls.append(1) or "ticket")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        with pytest.raises(PermanentSyncError) as exc_info:
+            auth.login(interactive=True)
+    assert "update-password" in str(exc_info.value)
+    assert browser_calls == []
+
+
+def test_mfa_prompt_empty_input_cancels(monkeypatch):
+    from eufy_sync.garmin_auth import GarminLoginCancelled, _mfa_prompt
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    with pytest.raises(GarminLoginCancelled):
+        _mfa_prompt()
+
+
+def test_mfa_prompt_ctrl_c_cancels(monkeypatch):
+    from eufy_sync.garmin_auth import GarminLoginCancelled, _mfa_prompt
+
+    def _interrupt(prompt):
+        raise KeyboardInterrupt
+    monkeypatch.setattr("builtins.input", _interrupt)
+    with pytest.raises(GarminLoginCancelled):
+        _mfa_prompt()
+
+
+def test_mfa_prompt_returns_stripped_code(monkeypatch):
+    from eufy_sync.garmin_auth import _mfa_prompt
+    monkeypatch.setattr("builtins.input", lambda prompt: " 123456 ")
+    assert _mfa_prompt() == "123456"
 
 
 def test_login_headless_never_opens_browser(monkeypatch):

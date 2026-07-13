@@ -112,9 +112,12 @@ def test_cache_not_written_on_network_error(tmp_path: Path):
 
 
 def test_self_update_uses_pinned_pipx_when_available():
+    # Pin a non-Windows platform: this covers the inline update path, which a
+    # Windows host would otherwise skip for the detached-console branch.
     from eufy_sync.cli.updater import _self_update
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
          patch("eufy_sync.cli.updater.shutil.which", return_value="/usr/local/bin/pipx"), \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
         _self_update()
@@ -157,9 +160,11 @@ def test_handles_pypi_prerelease_version(tmp_path: Path, capsys):
 def test_self_update_uses_uv_when_installed_via_uv_tool():
     # A uv tool venv has no pip, and pipx would create a second copy; the
     # updater must recognize its own install method and use uv.
+    # Pinned to Darwin so a Windows host exercises this inline path too.
     from eufy_sync.cli.updater import _self_update
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
          patch("eufy_sync.cli.updater.sys.executable", "/Users/x/.local/share/uv/tools/eufy-sync/bin/python"), \
          patch("eufy_sync.cli.updater.shutil.which", return_value="/usr/local/bin/uv"), \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
@@ -168,11 +173,49 @@ def test_self_update_uses_uv_when_installed_via_uv_tool():
     assert mock_run.call_args.args[0] == ["uv", "tool", "install", "--force", "eufy-sync==9.9.9"]
 
 
+def test_self_update_uses_uv_for_windows_uv_tool_path():
+    # A uv tool install on Windows lives under ...\uv\tools\... with
+    # backslashes; the marker match must normalize those or it falls through to
+    # a pip path that cannot work inside a uv venv.
+    from eufy_sync.cli.updater import _self_update
+    win_exe = r"C:\Users\x\AppData\Roaming\uv\tools\eufy-sync\Scripts\python.exe"
+    with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
+         patch("eufy_sync.cli.updater.sys.executable", win_exe), \
+         patch("eufy_sync.cli.updater.shutil.which", return_value="C:\\Users\\x\\uv.exe"), \
+         patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        _self_update()
+
+    assert mock_run.call_args.args[0][:4] == ["uv", "tool", "install", "--force"]
+
+
+def test_self_update_windows_quotes_spaced_executable_path():
+    # The detached inner command is one cmd.exe string; a Python path with
+    # spaces (e.g. C:\Program Files\...) must arrive double-quoted or it splits
+    # into two arguments and the upgrade fails.
+    from eufy_sync.cli.updater import _self_update
+    spaced = "C:\\Program Files\\Python\\python.exe"
+    with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Windows"), \
+         patch("eufy_sync.cli.updater.sys.executable", spaced), \
+         patch("eufy_sync.cli.updater.shutil.which", return_value=None), \
+         patch("eufy_sync.cli.updater.subprocess.Popen") as mock_popen:
+        _self_update()
+
+    inner = mock_popen.call_args.args[0][-1]
+    assert '"C:\\Program Files\\Python\\python.exe"' in inner
+    assert "eufy-sync==9.9.9" in inner
+
+
 def test_self_update_uses_pip_when_no_pipx():
+    # Pinned to Darwin so a Windows host exercises this inline path too.
     import sys as _sys
     from eufy_sync.cli.updater import _self_update
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
          patch("eufy_sync.cli.updater.shutil.which", return_value=None), \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
         _self_update()
@@ -193,11 +236,53 @@ def test_self_update_silent_when_pypi_unreachable(capsys):
 
 
 def test_self_update_reports_failed_install(capsys):
+    # Pinned to Darwin: the inline runner reports the failure; on a Windows
+    # host the detached branch would print the new-window message instead.
     from eufy_sync.cli.updater import _self_update
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
          patch("eufy_sync.cli.updater.shutil.which", return_value="/usr/local/bin/pipx"), \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=1)):
         _self_update()
 
     assert "Update failed" in capsys.readouterr().out
+
+
+def test_self_update_on_windows_uses_detached_console():
+    # Windows cannot overwrite the running eufy-sync.exe, so the update must be
+    # handed to a separate console that waits for this process to exit first.
+    from eufy_sync.cli.updater import _self_update
+    with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Windows"), \
+         patch("eufy_sync.cli.updater.shutil.which", return_value="C:\\pipx\\pipx.exe"), \
+         patch("eufy_sync.cli.updater.subprocess.run") as mock_run, \
+         patch("eufy_sync.cli.updater.subprocess.Popen") as mock_popen:
+        _self_update()
+
+    # The in-process runner must not be used - it would try to replace a locked exe.
+    mock_run.assert_not_called()
+    mock_popen.assert_called_once()
+
+    argv = mock_popen.call_args.args[0]
+    assert argv[:4] == ["cmd", "/c", "start", "eufy-sync update"]
+
+    # The pinned version is what the detached console actually installs.
+    inner = argv[-1]
+    assert "eufy-sync==9.9.9" in inner
+
+
+def test_self_update_on_darwin_runs_inline():
+    # Non-Windows platforms replace the package in place, exactly as before.
+    from eufy_sync.cli.updater import _self_update
+    with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
+         patch("eufy_sync.cli.updater.shutil.which", return_value="/usr/local/bin/pipx"), \
+         patch("eufy_sync.cli.updater.subprocess.Popen") as mock_popen, \
+         patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        _self_update()
+
+    mock_popen.assert_not_called()
+    assert mock_run.call_args.args[0] == ["pipx", "install", "--force", "eufy-sync==9.9.9"]

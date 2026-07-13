@@ -4,10 +4,21 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from eufy_sync import platform_support
 from eufy_sync.cli import doctor, maintenance, profiles, setup, shared, status, updater
 
 
 def main() -> None:
+    try:
+        _main()
+    except KeyboardInterrupt:
+        # Ctrl+C at any prompt (MFA code, passwords, confirmations) should
+        # read as a cancel, not dump a traceback.
+        print("\nCancelled.")
+        sys.exit(130)
+
+
+def _main() -> None:
     import argparse
 
     from eufy_sync import __version__
@@ -29,11 +40,11 @@ def main() -> None:
                         help="Show recent sync history, last N entries (default: 14)")
     parser.add_argument("--backfill-days", type=int, default=None, help="Sync last N days")
     parser.add_argument("--dry-run", action="store_true", help="Preview without uploading")
-    parser.add_argument("--headless", action="store_true", help="Never prompt; fail with a reauth message if login is needed (for Launch Agent)")
+    parser.add_argument("--headless", action="store_true", help="Never prompt; fail with a reauth message if login is needed (for scheduled runs)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed sync logs")
-    parser.add_argument("--install-agent", action="store_true", help="Set up automatic sync (macOS Launch Agent)")
-    parser.add_argument("--uninstall-agent", action="store_true", help="Remove the automatic sync Launch Agent")
-    parser.add_argument("--uninstall", action="store_true", help="Remove all data, tokens, and Launch Agent")
+    parser.add_argument("--install-agent", action="store_true", help="Set up automatic sync every 4 hours")
+    parser.add_argument("--uninstall-agent", action="store_true", help="Remove automatic sync")
+    parser.add_argument("--uninstall", action="store_true", help="Remove all data, tokens, and automatic sync")
     parser.add_argument("--use-file-store", action="store_true", help="Store credentials in a 0o600 file instead of the keychain (no keychain prompts)")
     parser.add_argument("--use-keychain", action="store_true", help="Move credentials back into the system keychain")
     parser.add_argument("--config", type=Path, default=None, help="Config path (default: ~/.garmin-sync/config.yaml)")
@@ -42,6 +53,12 @@ def main() -> None:
 
     config_path = args.config or shared.DEFAULT_CONFIG
     db_path = args.db or shared.DEFAULT_DB
+
+    # Configure logging before any command dispatch. Every path that can reach
+    # a Garmin login (setup, --update-password, --reauth, sync) needs the
+    # garminconnect logger quieted, or its per-strategy 429 warnings print
+    # through logging's last-resort handler and look like errors.
+    shared._configure_logging(args.verbose)
 
     # Handle doctor - must report even on a fresh install, never launch the
     # first-run wizard, and never traceback.
@@ -105,7 +122,6 @@ def main() -> None:
 
     # Handle reauth
     if args.reauth is not None:
-        shared._configure_logging(args.verbose)
         target = None if args.reauth == "all" else args.reauth
         maintenance._reauth(config_path, force=True, target=target)
         return
@@ -123,7 +139,7 @@ def main() -> None:
     if first_run and args.headless:
         msg = "No config found. Run eufy-sync in a terminal to set up."
         print(msg)
-        shared._notify("eufy-sync", msg)
+        platform_support.notify("eufy-sync", msg)
         sys.exit(1)
 
     try:
@@ -143,7 +159,7 @@ def main() -> None:
     except Exception as e:
         msg = f"eufy-sync could not start: {e}"
         print(msg)
-        shared._notify("eufy-sync failed", str(e)[:200])
+        platform_support.notify("eufy-sync failed", str(e)[:200])
         sys.exit(1)
 
     has_garmin = any(u.garmin for u in config.users)
@@ -178,7 +194,6 @@ def main() -> None:
     from eufy_sync.state import SyncState
     from eufy_sync.eufy_client import AmbiguousProfileError
 
-    shared._configure_logging(args.verbose)
     logger = logging.getLogger("eufy_sync")
 
     updater._check_for_updates()
@@ -192,7 +207,7 @@ def main() -> None:
     except Exception as e:
         msg = f"eufy-sync could not start: {e}"
         print(msg)
-        shared._notify("eufy-sync failed", str(e)[:200])
+        platform_support.notify("eufy-sync failed", str(e)[:200])
         sys.exit(1)
 
     try:
@@ -245,13 +260,13 @@ def main() -> None:
             multiple_profiles = any("multiple Eufy profiles" in err for _, err in failures)
             all_transient = all(failure_notify.is_transient_network_error(err) for _, err in failures)
             if reauth_needed:
-                shared._notify("eufy-sync: re-login needed", "Run: eufy-sync --reauth garmin", command="eufy-sync --reauth garmin")
+                platform_support.notify("eufy-sync: re-login needed", "Run: eufy-sync --reauth garmin", command="eufy-sync --reauth garmin")
                 failure_notify.clear_network_failures()
             elif eufy_password:
-                shared._notify("eufy-sync: Eufy login failed", "Run: eufy-sync --update-password", command="eufy-sync --update-password")
+                platform_support.notify("eufy-sync: Eufy login failed", "Run: eufy-sync --update-password", command="eufy-sync --update-password")
                 failure_notify.clear_network_failures()
             elif multiple_profiles:
-                shared._notify("eufy-sync: choose your profile", "Run: eufy-sync --select-profile", command="eufy-sync --select-profile")
+                platform_support.notify("eufy-sync: choose your profile", "Run: eufy-sync --select-profile", command="eufy-sync --select-profile")
                 failure_notify.clear_network_failures()
             elif all_transient and args.headless and not args.dry_run:
                 # A scheduled run that only hit network trouble. Stay quiet - the
@@ -259,14 +274,14 @@ def main() -> None:
                 # points at a real outage worth one heads-up.
                 count, hours = failure_notify.record_network_failure()
                 if failure_notify.should_escalate(count):
-                    shared._notify(
+                    platform_support.notify(
                         "eufy-sync: network still down",
                         f"No network for ~{round(hours)}h ({count} runs). "
                         "Measurements are waiting and will sync when it is back.",
                     )
             else:
                 fail_msg = "; ".join(f"{name}: {err[:80]}" for name, err in failures)
-                shared._notify("eufy-sync failed", fail_msg)
+                platform_support.notify("eufy-sync failed", fail_msg)
                 failure_notify.clear_network_failures()
             logger.error("Sync failed for: %s", "; ".join(f"{n}: {e[:80]}" for n, e in failures))
         elif not args.dry_run:
@@ -285,7 +300,7 @@ def main() -> None:
 
         if total > 0:
             target_label = " and ".join(n.capitalize() for n in total_counts if total_counts[n] > 0)
-            shared._notify("eufy-sync", f"Synced {total} measurement{'s' if total != 1 else ''} to {target_label}")
+            platform_support.notify("eufy-sync", f"Synced {total} measurement{'s' if total != 1 else ''} to {target_label}")
 
         if first_run:
             if failures:

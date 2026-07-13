@@ -7,14 +7,54 @@ from unittest.mock import patch, MagicMock
 import pytest
 import yaml
 
-from eufy_sync.cli.shared import _write_config, LAUNCH_AGENT_LABEL, LAUNCH_AGENT_PATH
+from eufy_sync.cli.shared import _write_config
+from eufy_sync.platform_support.macos import LAUNCH_AGENT_LABEL, LAUNCH_AGENT_PATH, _generate_plist
 from eufy_sync.cli.maintenance import (
-    _generate_plist,
     _install_launch_agent,
     _uninstall,
     _uninstall_launch_agent,
     _offer_launch_agent,
 )
+
+
+@pytest.fixture
+def pin_macos_impl(monkeypatch):
+    """Pin the launch-agent dispatch to the macOS implementation.
+
+    maintenance delegates through platform_support._impl(), which resolves the
+    active module from platform.system(). On a Windows CI runner these
+    macOS-specific tests would otherwise drive the real Windows schtasks path;
+    pinning _active (the way test_doctor.py does) keeps them on the macOS module
+    regardless of host OS, so the eufy_sync.platform_support.macos.* patches
+    below actually take effect."""
+    from eufy_sync import platform_support
+    from eufy_sync.platform_support import macos
+    monkeypatch.setattr(platform_support, "_active", macos)
+
+
+def test_main_ctrl_c_exits_cleanly(capsys):
+    from eufy_sync.cli import app
+    with patch.object(app, "_main", side_effect=KeyboardInterrupt):
+        with pytest.raises(SystemExit) as exc_info:
+            app.main()
+    assert exc_info.value.code == 130
+    assert "Cancelled" in capsys.readouterr().out
+
+
+def test_update_password_path_configures_logging(monkeypatch, tmp_path: Path):
+    # --update-password reaches a Garmin login, so main() must configure
+    # logging first or garminconnect's per-strategy 429 warnings leak through
+    # logging's last-resort handler.
+    import sys as _sys
+    from eufy_sync.cli import app, shared
+    calls = []
+    monkeypatch.setattr(shared, "_configure_logging", lambda v: calls.append(v))
+    missing_config = tmp_path / "missing.yaml"
+    monkeypatch.setattr(_sys, "argv",
+                        ["eufy-sync", "--update-password", "--config", str(missing_config)])
+    with pytest.raises(SystemExit):
+        app.main()
+    assert calls == [False]
 
 
 def test_write_config_creates_file_with_restricted_permissions(tmp_path: Path):
@@ -24,9 +64,11 @@ def test_write_config_creates_file_with_restricted_permissions(tmp_path: Path):
     _write_config(config_path, config)
 
     assert config_path.exists()
-    # File should be 600 (owner read/write only)
-    mode = oct(config_path.stat().st_mode)[-3:]
-    assert mode == "600"
+    # File should be 600 (owner read/write only). Windows reports 666/777
+    # regardless of the mode passed, so skip the POSIX-mode check there.
+    if os.name != "nt":
+        mode = oct(config_path.stat().st_mode)[-3:]
+        assert mode == "600"
 
     # Content should be valid YAML
     with open(config_path) as f:
@@ -38,8 +80,10 @@ def test_write_config_parent_directory_is_restricted(tmp_path: Path):
     config_path = tmp_path / "secure_dir" / "config.yaml"
     _write_config(config_path, {"test": True})
 
-    parent_mode = oct(config_path.parent.stat().st_mode)[-3:]
-    assert parent_mode == "700"
+    # POSIX modes only; Windows does not honor them.
+    if os.name != "nt":
+        parent_mode = oct(config_path.parent.stat().st_mode)[-3:]
+        assert parent_mode == "700"
 
 
 def test_write_config_overwrites_existing(tmp_path: Path):
@@ -68,21 +112,23 @@ def test_generate_plist_points_at_given_program():
 
 
 def test_write_run_script_creates_executable_wrapper(tmp_path):
-    from eufy_sync.cli.maintenance import _write_run_script
+    from eufy_sync.platform_support.macos import _write_run_script
     with patch("eufy_sync.cli.shared.DATA_DIR", tmp_path):
         script = _write_run_script("/home/user/.local/bin/eufy-sync")
     assert script == tmp_path / "eufy-sync-agent"
     content = script.read_text()
     assert content.startswith("#!/bin/sh")
     assert 'exec "/home/user/.local/bin/eufy-sync" --headless' in content
-    assert oct(script.stat().st_mode)[-3:] == "755"
+    # POSIX modes only; Windows does not honor them.
+    if os.name != "nt":
+        assert oct(script.stat().st_mode)[-3:] == "755"
 
 
 def test_write_run_script_is_byte_stable_across_installs(tmp_path):
     # macOS re-announces background items when the registered file changes;
     # a second install with the same binary must not rewrite the script.
     import os
-    from eufy_sync.cli.maintenance import _write_run_script
+    from eufy_sync.platform_support.macos import _write_run_script
     with patch("eufy_sync.cli.shared.DATA_DIR", tmp_path):
         first = _write_run_script("/home/user/.local/bin/eufy-sync")
         mtime_before = os.stat(first).st_mtime_ns
@@ -93,15 +139,19 @@ def test_write_run_script_is_byte_stable_across_installs(tmp_path):
 
 
 def test_generate_plist_contains_log_path():
+    # The plist embeds str(shared.LOG_FILE), which conftest points at a tmp
+    # path; assert against that actual path rather than a hardcoded
+    # forward-slash literal, which would not match Windows separators.
+    from eufy_sync.cli import shared
     plist = _generate_plist("/any/path")
-    assert ".garmin-sync/sync.log" in plist
+    assert str(shared.LOG_FILE) in plist
 
 
-@patch("eufy_sync.cli.maintenance.subprocess.run")
-@patch("eufy_sync.cli.maintenance.shutil.which", return_value="/home/user/.local/bin/eufy-sync")
-@patch("eufy_sync.cli.maintenance.platform.system", return_value="Darwin")
-@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
-def test_install_launch_agent_writes_plist_and_loads(mock_path, mock_system, mock_which, mock_run, tmp_path):
+@patch("eufy_sync.platform_support.macos.subprocess.run")
+@patch("eufy_sync.platform_support.macos.shutil.which", return_value="/home/user/.local/bin/eufy-sync")
+@patch("eufy_sync.platform_support.macos.platform.system", return_value="Darwin")
+@patch("eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH")
+def test_install_launch_agent_writes_plist_and_loads(mock_path, mock_system, mock_which, mock_run, tmp_path, pin_macos_impl):
     mock_path.parent.mkdir = MagicMock()
     mock_path.write_text = MagicMock()
 
@@ -124,11 +174,11 @@ def test_install_launch_agent_writes_plist_and_loads(mock_path, mock_system, moc
     assert "load" in mock_run.call_args_list[1][0][0]
 
 
-@patch("eufy_sync.cli.maintenance.subprocess.run")
-@patch("eufy_sync.cli.maintenance.shutil.which", return_value="/home/user/.local/bin/eufy-sync")
-@patch("eufy_sync.cli.maintenance.platform.system", return_value="Darwin")
-@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
-def test_install_launch_agent_removes_legacy_wrapper(mock_path, mock_system, mock_which, mock_run, tmp_path):
+@patch("eufy_sync.platform_support.macos.subprocess.run")
+@patch("eufy_sync.platform_support.macos.shutil.which", return_value="/home/user/.local/bin/eufy-sync")
+@patch("eufy_sync.platform_support.macos.platform.system", return_value="Darwin")
+@patch("eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH")
+def test_install_launch_agent_removes_legacy_wrapper(mock_path, mock_system, mock_which, mock_run, tmp_path, pin_macos_impl):
     """Re-installing must delete the pre-1.7.17 run-sync.sh wrapper so it does
     not linger as an orphan next to the new eufy-sync-agent script."""
     mock_path.parent.mkdir = MagicMock()
@@ -145,22 +195,22 @@ def test_install_launch_agent_removes_legacy_wrapper(mock_path, mock_system, moc
     assert (tmp_path / "eufy-sync-agent").exists()
 
 
-@patch("eufy_sync.cli.maintenance.platform.system", return_value="Linux")
-def test_install_launch_agent_skips_on_linux(mock_system, capsys):
+@patch("eufy_sync.platform_support.macos.platform.system", return_value="Linux")
+def test_install_launch_agent_skips_on_linux(mock_system, capsys, pin_macos_impl):
     _install_launch_agent()
     assert "only supported on macOS" in capsys.readouterr().out
 
 
-@patch("eufy_sync.cli.maintenance.shutil.which", return_value=None)
-@patch("eufy_sync.cli.maintenance.platform.system", return_value="Darwin")
-def test_install_launch_agent_warns_if_binary_not_found(mock_system, mock_which, capsys):
+@patch("eufy_sync.platform_support.macos.shutil.which", return_value=None)
+@patch("eufy_sync.platform_support.macos.platform.system", return_value="Darwin")
+def test_install_launch_agent_warns_if_binary_not_found(mock_system, mock_which, capsys, pin_macos_impl):
     _install_launch_agent()
     assert "could not find eufy-sync" in capsys.readouterr().out
 
 
-@patch("eufy_sync.cli.maintenance.subprocess.run")
-@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
-def test_uninstall_launch_agent_removes_plist(mock_path, mock_run):
+@patch("eufy_sync.platform_support.macos.subprocess.run")
+@patch("eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH")
+def test_uninstall_launch_agent_removes_plist(mock_path, mock_run, pin_macos_impl):
     mock_path.exists.return_value = True
     mock_path.unlink = MagicMock()
 
@@ -171,8 +221,8 @@ def test_uninstall_launch_agent_removes_plist(mock_path, mock_run):
     mock_path.unlink.assert_called_once()
 
 
-@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
-def test_uninstall_launch_agent_noop_if_not_installed(mock_path, capsys):
+@patch("eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH")
+def test_uninstall_launch_agent_noop_if_not_installed(mock_path, capsys, pin_macos_impl):
     mock_path.exists.return_value = False
 
     _uninstall_launch_agent()
@@ -180,11 +230,11 @@ def test_uninstall_launch_agent_noop_if_not_installed(mock_path, capsys):
     assert "No Launch Agent installed" in capsys.readouterr().out
 
 
-@patch("eufy_sync.cli.maintenance._install_launch_agent")
+@patch("eufy_sync.platform_support.macos._install_launch_agent")
 @patch("builtins.input", return_value="y")
-@patch("eufy_sync.cli.maintenance.sys.stdin")
-@patch("eufy_sync.cli.maintenance.platform.system", return_value="Darwin")
-def test_offer_launch_agent_installs_on_yes(mock_system, mock_stdin, mock_input, mock_install):
+@patch("eufy_sync.platform_support.macos.sys.stdin")
+@patch("eufy_sync.platform_support.macos.platform.system", return_value="Darwin")
+def test_offer_launch_agent_installs_on_yes(mock_system, mock_stdin, mock_input, mock_install, pin_macos_impl):
     mock_stdin.isatty.return_value = True
 
     _offer_launch_agent()
@@ -192,10 +242,10 @@ def test_offer_launch_agent_installs_on_yes(mock_system, mock_stdin, mock_input,
     mock_install.assert_called_once()
 
 
-@patch("eufy_sync.cli.maintenance._install_launch_agent")
+@patch("eufy_sync.platform_support.macos._install_launch_agent")
 @patch("builtins.input", return_value="n")
-@patch("eufy_sync.cli.maintenance.sys.stdin")
-@patch("eufy_sync.cli.maintenance.platform.system", return_value="Darwin")
+@patch("eufy_sync.platform_support.macos.sys.stdin")
+@patch("eufy_sync.platform_support.macos.platform.system", return_value="Darwin")
 def test_offer_launch_agent_skips_on_no(mock_system, mock_stdin, mock_input, mock_install):
     mock_stdin.isatty.return_value = True
 
@@ -204,9 +254,9 @@ def test_offer_launch_agent_skips_on_no(mock_system, mock_stdin, mock_input, moc
     mock_install.assert_not_called()
 
 
-@patch("eufy_sync.cli.maintenance._install_launch_agent")
-@patch("eufy_sync.cli.maintenance.sys.stdin")
-@patch("eufy_sync.cli.maintenance.platform.system", return_value="Darwin")
+@patch("eufy_sync.platform_support.macos._install_launch_agent")
+@patch("eufy_sync.platform_support.macos.sys.stdin")
+@patch("eufy_sync.platform_support.macos.platform.system", return_value="Darwin")
 def test_offer_launch_agent_skips_non_interactive(mock_system, mock_stdin, mock_install):
     mock_stdin.isatty.return_value = False
 
@@ -218,8 +268,8 @@ def test_offer_launch_agent_skips_non_interactive(mock_system, mock_stdin, mock_
 # --- _uninstall keychain cleanup ---
 
 
-@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
-@patch("eufy_sync.cli.maintenance.subprocess.run")
+@patch("eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.platform_support.macos.subprocess.run")
 @patch("eufy_sync.credentials._keyring_available", return_value=True)
 @patch("eufy_sync.credentials.delete_token")
 @patch("eufy_sync.credentials.delete_password")
@@ -253,8 +303,8 @@ def test_uninstall_clears_keychain_for_configured_user_name(
     assert "elias:garmin" in deleted_accounts
 
 
-@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
-@patch("eufy_sync.cli.maintenance.subprocess.run")
+@patch("eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.platform_support.macos.subprocess.run")
 @patch("eufy_sync.credentials._keyring_available", return_value=True)
 @patch("eufy_sync.credentials.delete_password", side_effect=RuntimeError("keychain locked"))
 @patch("eufy_sync.cli.maintenance.sys.stdin")
@@ -283,8 +333,8 @@ def test_uninstall_survives_locked_keychain(
     assert "keychain" in out.lower()
 
 
-@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
-@patch("eufy_sync.cli.maintenance.subprocess.run")
+@patch("eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.platform_support.macos.subprocess.run")
 @patch("eufy_sync.credentials._keyring_available", return_value=True)
 @patch("eufy_sync.credentials.delete_token")
 @patch("eufy_sync.credentials.delete_password")
@@ -313,8 +363,8 @@ def test_uninstall_names_uv_for_uv_installs(
     assert "pipx uninstall" not in out
 
 
-@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
-@patch("eufy_sync.cli.maintenance.subprocess.run")
+@patch("eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.platform_support.macos.subprocess.run")
 @patch("eufy_sync.credentials._keyring_available", return_value=True)
 @patch("eufy_sync.credentials.delete_token")
 @patch("eufy_sync.credentials.delete_password")
@@ -341,8 +391,8 @@ def test_uninstall_names_pipx_when_not_uv(
     assert "pipx uninstall eufy-sync" in out
 
 
-@patch("eufy_sync.cli.shared.LAUNCH_AGENT_PATH")
-@patch("eufy_sync.cli.maintenance.subprocess.run")
+@patch("eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH")
+@patch("eufy_sync.platform_support.macos.subprocess.run")
 @patch("eufy_sync.credentials._keyring_available", return_value=True)
 @patch("eufy_sync.credentials.delete_token")
 @patch("eufy_sync.credentials.delete_password")
@@ -706,7 +756,7 @@ def test_upgrade_notice_file_is_hermetic(tmp_path):
     assert str(setup.UPGRADE_NOTICE_FILE).startswith(str(tmp_path))
 
 
-@patch("eufy_sync.cli.shared._notify")
+@patch("eufy_sync.platform_support.notify")
 def test_headless_first_run_refuses_wizard(mock_notify, tmp_path):
     """A headless run with no config must never call input() - it should
     print guidance, notify, and exit 1 instead of hanging in the wizard."""
@@ -729,7 +779,7 @@ def test_headless_first_run_refuses_wizard(mock_notify, tmp_path):
     mock_notify.assert_called()
 
 
-@patch("eufy_sync.cli.shared._notify")
+@patch("eufy_sync.platform_support.notify")
 def test_startup_failure_before_harness_notifies_and_exits(mock_notify, tmp_path):
     """A load_config failure (e.g. missing keychain entry -> ValueError) that
     happens before the sync try/except harness must still notify and exit 1,
@@ -752,7 +802,7 @@ def test_startup_failure_before_harness_notifies_and_exits(mock_notify, tmp_path
     mock_notify.assert_called()
 
 
-@patch("eufy_sync.cli.shared._notify")
+@patch("eufy_sync.platform_support.notify")
 @patch("eufy_sync.cli.updater._check_for_updates")
 @patch("eufy_sync.cli.setup._show_upgrade_notice")
 @patch("eufy_sync.cli.setup._migrate_config_passwords")
@@ -788,7 +838,7 @@ def test_dry_run_does_not_notify_and_prints_preview_summary(
 
 
 @patch("eufy_sync.cli.status._print_summary")
-@patch("eufy_sync.cli.shared._notify")
+@patch("eufy_sync.platform_support.notify")
 @patch("eufy_sync.cli.updater._check_for_updates")
 @patch("eufy_sync.cli.setup._show_upgrade_notice")
 @patch("eufy_sync.cli.setup._migrate_config_passwords")
@@ -827,7 +877,7 @@ def test_headless_transient_failure_silent_until_threshold(
 
 
 @patch("eufy_sync.cli.status._print_summary")
-@patch("eufy_sync.cli.shared._notify")
+@patch("eufy_sync.platform_support.notify")
 @patch("eufy_sync.cli.updater._check_for_updates")
 @patch("eufy_sync.cli.setup._show_upgrade_notice")
 @patch("eufy_sync.cli.setup._migrate_config_passwords")
@@ -861,7 +911,7 @@ def test_headless_success_clears_network_streak(
 
 
 @patch("eufy_sync.cli.status._print_summary")
-@patch("eufy_sync.cli.shared._notify")
+@patch("eufy_sync.platform_support.notify")
 @patch("eufy_sync.cli.updater._check_for_updates")
 @patch("eufy_sync.cli.setup._show_upgrade_notice")
 @patch("eufy_sync.cli.setup._migrate_config_passwords")
@@ -892,7 +942,7 @@ def test_interactive_transient_failure_notifies_immediately(
 
 
 @patch("eufy_sync.cli.status._print_summary")
-@patch("eufy_sync.cli.shared._notify")
+@patch("eufy_sync.platform_support.notify")
 @patch("eufy_sync.cli.updater._check_for_updates")
 @patch("eufy_sync.cli.setup._show_upgrade_notice")
 @patch("eufy_sync.cli.setup._migrate_config_passwords")
@@ -933,7 +983,7 @@ def test_interactive_ambiguous_profile_resolves_and_syncs(
 
 
 @patch("eufy_sync.cli.status._print_summary")
-@patch("eufy_sync.cli.shared._notify")
+@patch("eufy_sync.platform_support.notify")
 @patch("eufy_sync.cli.updater._check_for_updates")
 @patch("eufy_sync.cli.setup._show_upgrade_notice")
 @patch("eufy_sync.cli.setup._migrate_config_passwords")

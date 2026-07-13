@@ -5,19 +5,20 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from eufy_sync.cli import shared
+from eufy_sync.platform_support import macos
 
-# conftest's autouse _mute_notifications fixture replaces shared._notify with
-# a MagicMock so tests never fire real notifications. These tests exercise the
-# real function, captured here at import time, with subprocess.run mocked out.
-_real_notify = shared._notify
+# conftest's autouse _mute_notifications fixture replaces platform_support.notify
+# with a MagicMock so tests never fire real notifications. These tests exercise
+# the real macOS function, captured here at import time, with subprocess.run
+# mocked out.
+_real_notify = macos._notify
 
 
 def _run_notify(which_return, command=None):
     run = MagicMock()
-    with patch("eufy_sync.cli.shared.shutil.which", return_value=which_return), \
-         patch("eufy_sync.cli.shared.os.path.exists", return_value=False), \
-         patch("eufy_sync.cli.shared.subprocess.run", run):
+    with patch("eufy_sync.platform_support.macos.shutil.which", return_value=which_return), \
+         patch("eufy_sync.platform_support.macos.os.path.exists", return_value=False), \
+         patch("eufy_sync.platform_support.macos.subprocess.run", run):
         _real_notify("eufy-sync: re-login needed", "Run: eufy-sync --reauth garmin", command=command)
     return run
 
@@ -52,10 +53,10 @@ def test_homebrew_path_is_checked_when_which_misses():
     """launchd runs with a minimal PATH that excludes Homebrew, so the
     lookup must also try the standard install locations directly."""
     run = MagicMock()
-    with patch("eufy_sync.cli.shared.shutil.which", return_value=None), \
-         patch("eufy_sync.cli.shared.os.path.exists",
+    with patch("eufy_sync.platform_support.macos.shutil.which", return_value=None), \
+         patch("eufy_sync.platform_support.macos.os.path.exists",
                side_effect=lambda p: p == "/opt/homebrew/bin/terminal-notifier"), \
-         patch("eufy_sync.cli.shared.subprocess.run", run):
+         patch("eufy_sync.platform_support.macos.subprocess.run", run):
         _real_notify("t", "m", command="eufy-sync --update")
 
     argv = run.call_args.args[0]
@@ -63,5 +64,5 @@ def test_homebrew_path_is_checked_when_which_misses():
 
 
 def test_notify_still_fails_silently():
-    with patch("eufy_sync.cli.shared.shutil.which", side_effect=RuntimeError("boom")):
+    with patch("eufy_sync.platform_support.macos.shutil.which", side_effect=RuntimeError("boom")):
         _real_notify("t", "m", command="eufy-sync --update")  # must not raise

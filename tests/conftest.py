@@ -25,7 +25,7 @@ def _hermetic_machine(tmp_path, monkeypatch):
     monkeypatch.setattr("eufy_sync.cli.shared.DEFAULT_DB", data_dir / "state.db")
     monkeypatch.setattr("eufy_sync.cli.shared.LOG_FILE", data_dir / "sync.log")
     monkeypatch.setattr(
-        "eufy_sync.cli.shared.LAUNCH_AGENT_PATH",
+        "eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH",
         tmp_path / "LaunchAgents" / "com.sturimcode.eufy-garmin-sync.plist",
     )
     # setup.py captures shared.DATA_DIR at import time into this module-level
@@ -57,11 +57,11 @@ def _hermetic_machine(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _mute_notifications(monkeypatch):
-    """Stub the macOS notifier for every test.
+    """Stub the notifier for every test.
 
-    _notify shells out to osascript, so an unmocked call from any code path
-    fires a real notification on the machine running the suite. Tests that
-    assert on notifications patch eufy_sync.cli.shared._notify themselves; that
-    patch layers over this stub and restores it on exit.
+    notify shells out to osascript on macOS, so an unmocked call from any code
+    path fires a real notification on the machine running the suite. Tests that
+    assert on notifications patch eufy_sync.platform_support.notify themselves;
+    that patch layers over this stub and restores it on exit.
     """
-    monkeypatch.setattr("eufy_sync.cli.shared._notify", MagicMock())
+    monkeypatch.setattr("eufy_sync.platform_support.notify", MagicMock())
