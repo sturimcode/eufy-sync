@@ -15,7 +15,7 @@ from pathlib import Path
 
 import httpx
 
-from garminconnect import Garmin
+from garminconnect import Garmin, GarminConnectAuthenticationError
 
 logger = logging.getLogger(__name__)
 
@@ -206,8 +206,21 @@ def _ensure_chromium() -> None:
             )
 
 
+class GarminLoginCancelled(Exception):
+    """The user backed out of the interactive login (empty MFA code or Ctrl+C)."""
+
+
 def _mfa_prompt() -> str:
-    return input("Garmin MFA code (check your email): ").strip()
+    print("Garmin emailed a security code to your account address.")
+    print("No email after a minute? The stored password is likely wrong; press Enter to cancel.")
+    try:
+        code = input("Garmin MFA code: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print("")
+        raise GarminLoginCancelled("cancelled at the MFA prompt") from None
+    if not code:
+        raise GarminLoginCancelled("no MFA code entered")
+    return code
 
 
 class GarminAuth:
@@ -255,10 +268,24 @@ class GarminAuth:
         return garmin
 
     def _fresh_login(self, garmin: Garmin) -> None:
-        """Try the browser-free login; fall back to the browser on any failure."""
+        """Try the browser-free login; fall back to the browser on any failure.
+
+        Two failures skip the fallback: a cancelled MFA prompt (the user chose
+        to stop) and definitively rejected credentials (the browser would
+        autofill the same bad password and fail minutes later)."""
+        from eufy_sync.sync import PermanentSyncError
         try:
             garmin.login()
             return
+        except GarminLoginCancelled as e:
+            raise PermanentSyncError(
+                "Garmin login cancelled. If the MFA email never arrived, the "
+                "stored password is likely wrong; run: eufy-sync --update-password"
+            ) from e
+        except GarminConnectAuthenticationError as e:
+            raise PermanentSyncError(
+                "Garmin rejected the email or password. Run: eufy-sync --update-password"
+            ) from e
         except Exception as e:
             logger.warning(
                 "Browser-free Garmin login failed (%s); opening browser fallback", e

@@ -32,6 +32,31 @@ def pin_macos_impl(monkeypatch):
     monkeypatch.setattr(platform_support, "_active", macos)
 
 
+def test_main_ctrl_c_exits_cleanly(capsys):
+    from eufy_sync.cli import app
+    with patch.object(app, "_main", side_effect=KeyboardInterrupt):
+        with pytest.raises(SystemExit) as exc_info:
+            app.main()
+    assert exc_info.value.code == 130
+    assert "Cancelled" in capsys.readouterr().out
+
+
+def test_update_password_path_configures_logging(monkeypatch, tmp_path: Path):
+    # --update-password reaches a Garmin login, so main() must configure
+    # logging first or garminconnect's per-strategy 429 warnings leak through
+    # logging's last-resort handler.
+    import sys as _sys
+    from eufy_sync.cli import app, shared
+    calls = []
+    monkeypatch.setattr(shared, "_configure_logging", lambda v: calls.append(v))
+    missing_config = tmp_path / "missing.yaml"
+    monkeypatch.setattr(_sys, "argv",
+                        ["eufy-sync", "--update-password", "--config", str(missing_config)])
+    with pytest.raises(SystemExit):
+        app.main()
+    assert calls == [False]
+
+
 def test_write_config_creates_file_with_restricted_permissions(tmp_path: Path):
     config_path = tmp_path / "subdir" / "config.yaml"
     config = {"users": [{"name": "test"}]}
