@@ -251,7 +251,7 @@ class GarminAuth:
 
         if not interactive:
             from eufy_sync.sync import PermanentSyncError
-            raise PermanentSyncError("Garmin login needed; run: eufy-sync --reauth")
+            raise PermanentSyncError("Garmin login needed; run: eufy-sync --reauth garmin")
 
         self._fresh_login(garmin)
         self._save_token(garmin)
