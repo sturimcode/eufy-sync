@@ -107,7 +107,7 @@ def _show_status(state, users: list) -> None:
             if status["state"] == "valid":
                 print("Garmin auth: valid (auto-refreshes; re-login only if it expires)")
             else:
-                print("Garmin auth: not connected - run: eufy-sync --reauth")
+                print("Garmin auth: not connected - run: eufy-sync --reauth garmin")
 
         # Strava token health
         if user.strava:

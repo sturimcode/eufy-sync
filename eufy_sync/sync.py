@@ -11,6 +11,7 @@ from garminconnect import GarminConnectTooManyRequestsError
 
 from eufy_sync.config import UserConfig
 from eufy_sync.eufy_client import AmbiguousProfileError, EufyClient
+from eufy_sync import state as state_module
 from eufy_sync.state import SyncState
 from eufy_sync.transform import transform
 
@@ -101,25 +102,24 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
             # GarminConnectTooManyRequestsError) still work.
             raise first_exception
 
-        # Determine how far back to fetch
-        after_timestamp: int | None = None
+        # Determine how far back to fetch: from the OLDEST per-target cursor,
+        # not a shared one. If one target was down (auth failing) while
+        # another kept syncing, a shared cursor would advance past the outage
+        # window and the recovered target would silently never receive those
+        # measurements. Re-fetched ones are cheap: the up-to-date target
+        # skips them via is_synced. A target with no syncs yet (first run or
+        # newly added) backfills 7 days.
         if backfill_days:
             after_timestamp = int(time.time()) - (backfill_days * 86400)
         else:
-            # Check if any target is newly added (no syncs yet)
-            new_target = any(
-                not state.has_any_syncs(user.name, name) for name, _ in targets
-            )
-            if new_target:
-                # New target added - backfill 7 days so existing measurements sync
-                after_timestamp = int(time.time()) - (7 * 86400)
-                logger.info("New sync target detected for %s, backfilling 7 days", user.name)
-            else:
-                after_timestamp = state.get_latest_sync_timestamp(user.name)
-                if after_timestamp is None:
-                    # First run - default to last 7 days
-                    after_timestamp = int(time.time()) - (7 * 86400)
-                    logger.info("First run for %s, defaulting to 7-day backfill", user.name)
+            default_cursor = int(time.time()) - (7 * 86400)
+            cursors = []
+            for name, _ in targets:
+                ts = state.get_latest_sync_timestamp(user.name, name)
+                if ts is None:
+                    logger.info("No prior syncs to %s for %s, backfilling 7 days", name, user.name)
+                cursors.append(ts if ts is not None else default_cursor)
+            after_timestamp = min(cursors)
 
         measurements = _retry(
             lambda: eufy.fetch_measurements(after_timestamp=after_timestamp),
@@ -192,7 +192,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                         weight_kg=m.weight_kg,
                         synced_at=datetime.now(timezone.utc).isoformat(),
                         target="garmin",
-                        response='{"skipped": "already_in_garmin"}',
+                        response=state_module.SKIPPED_IN_GARMIN_RESPONSE,
                     )
                     continue
 
@@ -210,13 +210,12 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                         lambda: client.upload_body_composition(body_comp),
                         f"Garmin upload ({m.measurement_id})",
                     )
-                    response_str = json.dumps(result) if result else None
                 else:
                     result = _retry(
                         lambda: client.update_weight(m.weight_kg),
                         f"Strava upload ({m.measurement_id})",
                     )
-                    response_str = json.dumps(result) if result else None
+                response_str = json.dumps(result) if result else None
 
                 if not synced_already:
                     state.record_sync(

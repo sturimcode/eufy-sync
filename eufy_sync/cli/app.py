@@ -1,11 +1,28 @@
 """The eufy-sync command line entry point and sync driver."""
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
 from eufy_sync import platform_support
 from eufy_sync.cli import doctor, maintenance, profiles, setup, shared, status, updater
+
+logger = logging.getLogger("eufy_sync")
+
+
+def _target_label(total_counts: dict[str, int]) -> str:
+    """Human label for the targets that received data, e.g. "Garmin and Strava"."""
+    return " and ".join(n.capitalize() for n in total_counts if total_counts[n] > 0)
+
+
+def _tally_run(user, counts: dict[str, int], errors: dict[str, str], total_counts: dict[str, int], failures: list) -> None:
+    """Fold one sync_user result into the run totals."""
+    for target_name, count in counts.items():
+        total_counts[target_name] = total_counts.get(target_name, 0) + count
+    for target_name, err in errors.items():
+        failures.append((f"{user.name}/{target_name}", err))
+    logger.info("User %s: synced %s", user.name, counts)
 
 
 def main() -> None:
@@ -91,8 +108,13 @@ def _main() -> None:
         print("Credentials moved into the system keychain.")
         sys.exit(0)
 
-    # Handle Launch Agent install/uninstall
+    # Handle Launch Agent install/uninstall. Installing needs a config first:
+    # a scheduled agent on an unconfigured machine would just fail (and
+    # notify) every few hours.
     if args.install_agent:
+        if not config_path.exists():
+            print("No config found. Run eufy-sync first to set up.")
+            sys.exit(1)
         maintenance._install_launch_agent()
         return
 
@@ -189,12 +211,9 @@ def _main() -> None:
         return
 
     # Run sync
-    import logging
     from eufy_sync.sync import sync_user
     from eufy_sync.state import SyncState
     from eufy_sync.eufy_client import AmbiguousProfileError
-
-    logger = logging.getLogger("eufy_sync")
 
     updater._check_for_updates()
 
@@ -216,11 +235,7 @@ def _main() -> None:
         for user in config.users:
             try:
                 counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
-                for target_name, count in counts.items():
-                    total_counts[target_name] = total_counts.get(target_name, 0) + count
-                for target_name, err in errors.items():
-                    failures.append((f"{user.name}/{target_name}", err))
-                logger.info("User %s: synced %s", user.name, counts)
+                _tally_run(user, counts, errors, total_counts, failures)
             except AmbiguousProfileError as e:
                 interactive = not args.headless and sys.stdin.isatty()
                 if interactive:
@@ -231,11 +246,7 @@ def _main() -> None:
                     print("Saved. Syncing your profile now...")
                     try:
                         counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
-                        for target_name, count in counts.items():
-                            total_counts[target_name] = total_counts.get(target_name, 0) + count
-                        for target_name, err in errors.items():
-                            failures.append((f"{user.name}/{target_name}", err))
-                        logger.info("User %s: synced %s", user.name, counts)
+                        _tally_run(user, counts, errors, total_counts, failures)
                     except Exception as retry_error:
                         logger.exception("Failed to sync user %s after profile selection", user.name)
                         failures.append((user.name, str(retry_error)))
@@ -291,7 +302,7 @@ def _main() -> None:
             failure_notify.clear_network_failures()
 
         if args.dry_run:
-            target_label = " and ".join(n.capitalize() for n in total_counts if total_counts[n] > 0)
+            target_label = _target_label(total_counts)
             if total > 0:
                 print(f"[DRY RUN] Would sync {total} measurement{'s' if total != 1 else ''} to {target_label}.")
             else:
@@ -299,7 +310,7 @@ def _main() -> None:
             sys.exit(1 if failures else 0)
 
         if total > 0:
-            target_label = " and ".join(n.capitalize() for n in total_counts if total_counts[n] > 0)
+            target_label = _target_label(total_counts)
             platform_support.notify("eufy-sync", f"Synced {total} measurement{'s' if total != 1 else ''} to {target_label}")
 
         if first_run:
@@ -308,7 +319,7 @@ def _main() -> None:
                 print("First sync failed. Fix the issue above, then run eufy-sync again.")
             else:
                 if total > 0:
-                    target_label = " and ".join(n.capitalize() for n in total_counts if total_counts[n] > 0)
+                    target_label = _target_label(total_counts)
                     print("")
                     print(f"Synced {total} measurements to {target_label}.")
                 maintenance._offer_launch_agent()
