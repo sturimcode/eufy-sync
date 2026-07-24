@@ -682,3 +682,154 @@ def test_skipped_raw_record_is_not_marked_upgradable(tmp_path: Path):
     fake_garmin_2.delete_weight_entry.assert_not_called()
 
     state.close()
+
+
+# ---------------------------------------------------------------------------
+# Per-target fetch cursor: one target's progress must not hide measurements
+# another target missed while its auth was down
+# ---------------------------------------------------------------------------
+
+
+def test_recovered_target_refetches_outage_window(tmp_path: Path):
+    """Garmin was down (auth failing) while Strava kept syncing and advancing
+    its cursor. Once Garmin recovers, the fetch must reach back to GARMIN's
+    own cursor, so the outage-window measurement still lands in Garmin, while
+    Strava skips it as already synced."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_and_strava_user()
+
+    # Before the outage both targets synced m1. During the outage only
+    # Strava synced m2.
+    state.record_sync("default", "m1", "2026-05-01T08:00:00+00:00", 85.0, "2026-05-01T08:01:00+00:00", target="garmin")
+    state.record_sync("default", "m1", "2026-05-01T08:00:00+00:00", 85.0, "2026-05-01T08:01:00+00:00", target="strava")
+    outage = _measurement(84.5, datetime(2026, 5, 5, 8, 0, tzinfo=timezone.utc))
+    state.record_sync("default", outage.measurement_id, outage.timestamp.isoformat(), 84.5, "2026-05-05T08:01:00+00:00", target="strava")
+
+    fake_eufy = MagicMock()
+    fake_eufy.authenticate.return_value = None
+    fake_eufy.fetch_measurements.return_value = [outage]
+    fake_eufy.close.return_value = None
+
+    fake_garmin = MagicMock()
+    fake_garmin.authenticate.return_value = None
+    fake_garmin.has_weight_on_date.return_value = False
+    fake_garmin.upload_body_composition.return_value = {"ok": True}
+    fake_garmin.close.return_value = None
+
+    fake_strava = MagicMock()
+    fake_strava.authenticate.return_value = None
+    fake_strava.close.return_value = None
+
+    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=fake_garmin), \
+         patch("eufy_sync.strava_client.StravaClient", return_value=fake_strava), \
+         patch("eufy_sync.sync.time.sleep"):
+        counts, errors = sync_user(user, state)
+
+    # The fetch reached back to Garmin's cursor (m1), not Strava's (m2).
+    garmin_cursor = int(datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc).timestamp())
+    fake_eufy.fetch_measurements.assert_called_once_with(after_timestamp=garmin_cursor)
+
+    # Garmin received the outage-window measurement; Strava skipped it.
+    assert counts["garmin"] == 1
+    assert counts["strava"] == 0
+    fake_garmin.upload_body_composition.assert_called_once()
+    fake_strava.update_weight.assert_not_called()
+    assert errors == {}
+
+    state.close()
+
+
+def test_newly_added_target_still_backfills_seven_days(tmp_path: Path):
+    """A target with no syncs yet pulls the fetch window back to 7 days even
+    when the other target's cursor is current."""
+    import time as time_module
+
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_and_strava_user()
+
+    # Garmin synced moments ago; Strava is brand new (no rows).
+    now = datetime.now(timezone.utc)
+    state.record_sync("default", "m1", now.isoformat(), 85.0, now.isoformat(), target="garmin")
+
+    fake_eufy = MagicMock()
+    fake_eufy.authenticate.return_value = None
+    fake_eufy.fetch_measurements.return_value = []
+    fake_eufy.close.return_value = None
+
+    fake_garmin = MagicMock()
+    fake_garmin.authenticate.return_value = None
+    fake_garmin.close.return_value = None
+
+    fake_strava = MagicMock()
+    fake_strava.authenticate.return_value = None
+    fake_strava.close.return_value = None
+
+    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=fake_garmin), \
+         patch("eufy_sync.strava_client.StravaClient", return_value=fake_strava), \
+         patch("eufy_sync.sync.time.sleep"):
+        sync_user(user, state)
+
+    after = fake_eufy.fetch_measurements.call_args.kwargs["after_timestamp"]
+    seven_days_ago = int(time_module.time()) - 7 * 86400
+    assert abs(after - seven_days_ago) < 60  # 7-day backfill, not garmin's fresh cursor
+
+    state.close()
+
+
+def test_latest_sync_timestamp_filters_by_target(tmp_path: Path):
+    state = SyncState(tmp_path / "test.db")
+
+    state.record_sync("user1", "m1", "2024-04-01T12:00:00+00:00", 86.2, "2024-04-01T12:01:00+00:00", target="garmin")
+    state.record_sync("user1", "m2", "2024-04-02T08:00:00+00:00", 85.9, "2024-04-02T08:01:00+00:00", target="strava")
+
+    garmin_ts = state.get_latest_sync_timestamp("user1", "garmin")
+    strava_ts = state.get_latest_sync_timestamp("user1", "strava")
+    assert garmin_ts == int(datetime(2024, 4, 1, 12, 0, tzinfo=timezone.utc).timestamp())
+    assert strava_ts == int(datetime(2024, 4, 2, 8, 0, tzinfo=timezone.utc).timestamp())
+    assert state.get_latest_sync_timestamp("user1") == strava_ts  # no target: global max
+    assert state.get_latest_sync_timestamp("user1", "zwift") is None
+
+    state.close()
+
+
+# ---------------------------------------------------------------------------
+# Same-date guard: a skipped-because-already-in-Garmin row must not disable
+# the guard for a second measurement on the same day
+# ---------------------------------------------------------------------------
+
+
+def test_has_synced_on_date_ignores_skipped_rows(tmp_path: Path):
+    from eufy_sync.state import SKIPPED_IN_GARMIN_RESPONSE
+    from datetime import date
+
+    state = SyncState(tmp_path / "test.db")
+    d = date(2026, 5, 10)
+
+    state.record_sync("user1", "m1", "2026-05-10T08:00:00+00:00", 85.0, "2026-05-10T08:01:00+00:00", target="garmin", response=SKIPPED_IN_GARMIN_RESPONSE)
+    assert not state.has_synced_on_date("user1", "garmin", d)
+
+    state.record_sync("user1", "m2", "2026-05-10T09:00:00+00:00", 84.8, "2026-05-10T09:01:00+00:00", target="garmin", response='{"ok": true}')
+    assert state.has_synced_on_date("user1", "garmin", d)
+
+    state.close()
+
+
+def test_second_same_day_measurement_is_also_skipped(tmp_path: Path):
+    """Garmin holds an external entry for the date and one run carries two
+    Eufy measurements for that same day. The first records a skip; that skip
+    must not flip the guard off and let the second upload a duplicate."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+
+    first = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+    second = _measurement(84.8, datetime(2026, 5, 10, 9, 0, tzinfo=timezone.utc))
+
+    fake_garmin = _run_garmin_sync(user, state, [first, second], has_weight_on_date_return=True)
+
+    fake_garmin.upload_body_composition.assert_not_called()
+    assert state.is_synced(user.name, first.measurement_id, "garmin")
+    assert state.is_synced(user.name, second.measurement_id, "garmin")
+
+    state.close()

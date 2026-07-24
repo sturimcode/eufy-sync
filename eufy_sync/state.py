@@ -1,8 +1,21 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
+
+# Response recorded when an upload is skipped because Garmin already holds an
+# entry for that date from another source. Such rows dedup the measurement
+# (is_synced) but do not count as "we uploaded on this date".
+SKIPPED_IN_GARMIN_RESPONSE = '{"skipped": "already_in_garmin"}'
+
+
+def _date_window(local_date: date) -> tuple[str, str]:
+    """ISO-string bounds that contain every timestamp whose local date could
+    be local_date. Offsets are under a day, so the string's date part differs
+    from the local date by at most one; ISO strings compare lexicographically.
+    """
+    return (local_date - timedelta(days=1)).isoformat(), (local_date + timedelta(days=2)).isoformat()
 
 
 class SyncState:
@@ -83,14 +96,6 @@ class SyncState:
                 "ALTER TABLE sync_log ADD COLUMN weight_only INTEGER NOT NULL DEFAULT 0"
             )
 
-    def has_any_syncs(self, user_name: str, target: str) -> bool:
-        """Check if a target has ever been synced to."""
-        cursor = self._conn.execute(
-            "SELECT 1 FROM sync_log WHERE user_name = ? AND target = ? LIMIT 1",
-            (user_name, target),
-        )
-        return cursor.fetchone() is not None
-
     def is_synced(self, user_name: str, measurement_id: str, target: str) -> bool:
         cursor = self._conn.execute(
             "SELECT 1 FROM sync_log WHERE user_name = ? AND eufy_measurement_id = ? AND target = ?",
@@ -99,16 +104,22 @@ class SyncState:
         return cursor.fetchone() is not None
 
     def has_synced_on_date(self, user_name: str, target: str, local_date: date) -> bool:
-        """Whether WE have already synced something to target for this local
+        """Whether WE have already uploaded something to target for this local
         calendar date. Used to tell "our own earlier upload today" apart from
         "another source already has this date in Garmin" (see the same-date
-        guard in sync.py). The table is small, so the date comparison is done
-        in Python rather than as date math against mixed-tz ISO strings in
-        SQL.
+        guard in sync.py). Skipped-because-already-in-Garmin rows do not
+        count: treating them as uploads would disable the guard for a second
+        measurement on the same day and create the very duplicate the guard
+        exists to prevent. SQL narrows to a two-day window; the exact check
+        against mixed-tz ISO strings stays in Python.
         """
+        lo, hi = _date_window(local_date)
         cursor = self._conn.execute(
-            "SELECT measurement_timestamp FROM sync_log WHERE user_name = ? AND target = ?",
-            (user_name, target),
+            "SELECT measurement_timestamp FROM sync_log"
+            " WHERE user_name = ? AND target = ?"
+            " AND measurement_timestamp >= ? AND measurement_timestamp < ?"
+            " AND (response IS NULL OR response != ?)",
+            (user_name, target, lo, hi, SKIPPED_IN_GARMIN_RESPONSE),
         )
         for (ts,) in cursor.fetchall():
             if datetime.fromisoformat(ts).astimezone().date() == local_date:
@@ -137,13 +148,15 @@ class SyncState:
     def weight_only_syncs_on_date(self, user_name: str, target: str, local_date: date) -> list[dict]:
         """Weight-only (raw Wi-Fi) syncs for a local calendar date that have
         not been upgraded to a full record yet. Each dict carries
-        measurement_id, measurement_timestamp, and weight_kg. Date comparison
-        happens in Python for the same reason as has_synced_on_date."""
+        measurement_id, measurement_timestamp, and weight_kg. Windowed in SQL,
+        exact date check in Python, as in has_synced_on_date."""
+        lo, hi = _date_window(local_date)
         cursor = self._conn.execute(
             """SELECT eufy_measurement_id, measurement_timestamp, weight_kg
                FROM sync_log
-               WHERE user_name = ? AND target = ? AND weight_only = 1""",
-            (user_name, target),
+               WHERE user_name = ? AND target = ? AND weight_only = 1
+                 AND measurement_timestamp >= ? AND measurement_timestamp < ?""",
+            (user_name, target, lo, hi),
         )
         return [
             {"measurement_id": mid, "measurement_timestamp": ts, "weight_kg": kg}
@@ -162,17 +175,20 @@ class SyncState:
         )
         self._conn.commit()
 
-    def get_latest_sync_timestamp(self, user_name: str) -> int | None:
-        """Return the unix timestamp of the most recent synced measurement, or None."""
-        cursor = self._conn.execute(
-            "SELECT MAX(measurement_timestamp) FROM sync_log WHERE user_name = ?",
-            (user_name,),
-        )
-        row = cursor.fetchone()
+    def get_latest_sync_timestamp(self, user_name: str, target: str | None = None) -> int | None:
+        """Return the unix timestamp of the most recent synced measurement,
+        or None. With target, only that target's rows count - each target
+        keeps its own fetch cursor so one target's progress cannot hide
+        measurements another target missed while it was down.
+        """
+        query = "SELECT MAX(measurement_timestamp) FROM sync_log WHERE user_name = ?"
+        params: tuple = (user_name,)
+        if target is not None:
+            query += " AND target = ?"
+            params = (user_name, target)
+        row = self._conn.execute(query, params).fetchone()
         if row and row[0]:
-            from datetime import datetime
-            dt = datetime.fromisoformat(row[0])
-            return int(dt.timestamp())
+            return int(datetime.fromisoformat(row[0]).timestamp())
         return None
 
     def get_history(self, user_name: str, limit: int = 14) -> list[dict]:

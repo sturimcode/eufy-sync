@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eufy-sync"
-version = "1.8.0"
+version = "1.8.1"
 description = "Sync Eufy smart scale body composition data to Garmin Connect and Strava"
 readme = "README.md"
 license = "MIT"
@@ -43,8 +43,10 @@ dependencies = [
 eufy-sync = "eufy_sync.cli:main"
 
 [project.urls]
+Homepage = "https://github.com/sturimcode/eufy-sync"
 Repository = "https://github.com/sturimcode/eufy-sync"
 Issues = "https://github.com/sturimcode/eufy-sync/issues"
+Funding = "https://ko-fi.com/sturim"
 
 [tool.setuptools.packages.find]
 include = ["eufy_sync*"]

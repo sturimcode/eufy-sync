@@ -222,18 +222,20 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
         except Exception:
             print("Note: could not clear keychain entries (the keychain may be locked).")
 
-    # Remove data directory (preserving DB if requested)
+    # Remove data directory. A kept DB at a custom --db path lives outside
+    # data_dir, so only the default location needs the selective sweep.
+    preserve_default_db = keep_db and db_path == default_db_path and db_path.exists()
     if data_dir.exists():
-        if keep_db and db_path.exists() and db_path == default_db_path:
-            # Remove everything except state.db
-            for item in data_dir.iterdir():
-                if item.name != "state.db":
-                    if item.is_dir():
-                        shutil.rmtree(item)
-                    else:
-                        item.unlink()
-        else:
+        if not preserve_default_db:
             shutil.rmtree(data_dir)
+        else:
+            for item in data_dir.iterdir():
+                if item.name == "state.db":
+                    continue
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
 
     # A custom --config/--db path lives outside data_dir, so it survives the
     # rmtree above and must be removed explicitly.
