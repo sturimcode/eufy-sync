@@ -55,7 +55,7 @@ def _retry(fn, description: str):
             time.sleep(delay)
 
 
-def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False) -> tuple[dict[str, int], dict[str, str]]:
+def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False, repair_days: int | None = None) -> tuple[dict[str, int], dict[str, str]]:
     """Sync one user's Eufy data to configured targets.
 
     Returns (counts, errors): counts maps target name to the number of
@@ -63,7 +63,12 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
     any target whose authenticate() call failed. The two dicts are disjoint
     over target names - a target with an error was dropped from the run and
     has no count.
+
+    repair_days re-syncs the last N days even for measurements our state
+    already calls synced (issue #58): the target can have lost data we
+    recorded as delivered, and only the target knows that.
     """
+    repair = repair_days is not None
     eufy = EufyClient(user.eufy)
 
     all_targets: list[tuple[str, object]] = []
@@ -109,7 +114,10 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
         # measurements. Re-fetched ones are cheap: the up-to-date target
         # skips them via is_synced. A target with no syncs yet (first run or
         # newly added) backfills 7 days.
-        if backfill_days:
+        if repair:
+            after_timestamp = int(time.time()) - (repair_days * 86400)
+            logger.info("Repair: re-syncing the last %d days regardless of recorded state", repair_days)
+        elif backfill_days:
             after_timestamp = int(time.time()) - (backfill_days * 86400)
         else:
             default_cursor = int(time.time()) - (7 * 86400)
@@ -130,6 +138,16 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
         measurements.sort(key=lambda m: m.timestamp)
         logger.info("Found %d measurements for %s", len(measurements), user.name)
 
+        # Strava keeps a single current weight, so a repair run only has to
+        # land the newest measurement in the window; re-putting the rest would
+        # spend the rate limit (100 non-upload calls per 15 minutes) to arrive
+        # at the same value.
+        strava_repair_id = None
+        if repair:
+            valid = [m for m in measurements if transform(m) is not None]
+            if valid:
+                strava_repair_id = valid[-1].measurement_id
+
         counts = {name: 0 for name, _ in targets}
         for m in measurements:
             body_comp = transform(m)
@@ -138,6 +156,12 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 continue
 
             for target_name, client in targets:
+                if repair and target_name == "strava" and m.measurement_id != strava_repair_id:
+                    continue
+
+                # Still consulted in repair mode: it decides whether the sync
+                # is recorded below, since re-uploading a known id must not
+                # insert a second row (UNIQUE on user/measurement/target).
                 synced_already = state.is_synced(user.name, m.measurement_id, target_name)
 
                 # Issue #48: a full record can arrive for a weigh-in we
@@ -154,7 +178,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                         upgrade_row = next(
                             (r for r in candidates if r["measurement_id"] == m.measurement_id), None
                         )
-                        if upgrade_row is None:
+                        if upgrade_row is None and not repair:
                             logger.debug("Already synced to %s: %s", target_name, m.measurement_id)
                             continue
                     elif candidates:
@@ -162,7 +186,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                             candidates,
                             key=lambda r: abs(datetime.fromisoformat(r["measurement_timestamp"]) - m.timestamp),
                         )
-                elif synced_already:
+                elif synced_already and not repair:
                     logger.debug("Already synced to %s: %s", target_name, m.measurement_id)
                     continue
 
@@ -185,15 +209,16 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     and client.has_weight_on_date(m.timestamp)
                 ):
                     logger.debug("Garmin already has data for %s, skipping", m.timestamp.date())
-                    state.record_sync(
-                        user_name=user.name,
-                        measurement_id=m.measurement_id,
-                        measurement_timestamp=m.timestamp.isoformat(),
-                        weight_kg=m.weight_kg,
-                        synced_at=datetime.now(timezone.utc).isoformat(),
-                        target="garmin",
-                        response=state_module.SKIPPED_IN_GARMIN_RESPONSE,
-                    )
+                    if not synced_already:
+                        state.record_sync(
+                            user_name=user.name,
+                            measurement_id=m.measurement_id,
+                            measurement_timestamp=m.timestamp.isoformat(),
+                            weight_kg=m.weight_kg,
+                            synced_at=datetime.now(timezone.utc).isoformat(),
+                            target="garmin",
+                            response=state_module.SKIPPED_IN_GARMIN_RESPONSE,
+                        )
                     continue
 
                 if target_name == "garmin":

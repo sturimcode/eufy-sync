@@ -56,6 +56,8 @@ def _main() -> None:
     parser.add_argument("--history", nargs="?", const=14, type=int, default=None, metavar="N",
                         help="Show recent sync history, last N entries (default: 14)")
     parser.add_argument("--backfill-days", type=int, default=None, help="Sync last N days")
+    parser.add_argument("--repair-days", type=int, default=None,
+                        help="Re-sync the last N days even if records are already marked as synced")
     parser.add_argument("--dry-run", action="store_true", help="Preview without uploading")
     parser.add_argument("--headless", action="store_true", help="Never prompt; fail with a reauth message if login is needed (for scheduled runs)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed sync logs")
@@ -67,6 +69,12 @@ def _main() -> None:
     parser.add_argument("--config", type=Path, default=None, help="Config path (default: ~/.garmin-sync/config.yaml)")
     parser.add_argument("--db", type=Path, default=None, help="Database path (default: ~/.garmin-sync/state.db)")
     args = parser.parse_args()
+
+    # Both set the fetch window, from opposite intents (fill in what is
+    # missing vs. re-send what is there), so honoring one silently would be a
+    # coin flip on which the user meant.
+    if args.repair_days is not None and args.backfill_days is not None:
+        parser.error("--repair-days and --backfill-days cannot be used together")
 
     config_path = args.config or shared.DEFAULT_CONFIG
     db_path = args.db or shared.DEFAULT_DB
@@ -234,7 +242,7 @@ def _main() -> None:
         failures = []
         for user in config.users:
             try:
-                counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                counts, errors = sync_user(user, state, backfill_days=backfill, repair_days=args.repair_days, headless=args.headless, dry_run=args.dry_run)
                 _tally_run(user, counts, errors, total_counts, failures)
             except AmbiguousProfileError as e:
                 interactive = not args.headless and sys.stdin.isatty()
@@ -245,7 +253,7 @@ def _main() -> None:
                     user.eufy.customer_id = customer_id
                     print("Saved. Syncing your profile now...")
                     try:
-                        counts, errors = sync_user(user, state, backfill_days=backfill, headless=args.headless, dry_run=args.dry_run)
+                        counts, errors = sync_user(user, state, backfill_days=backfill, repair_days=args.repair_days, headless=args.headless, dry_run=args.dry_run)
                         _tally_run(user, counts, errors, total_counts, failures)
                     except Exception as retry_error:
                         logger.exception("Failed to sync user %s after profile selection", user.name)
