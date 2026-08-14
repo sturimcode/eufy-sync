@@ -157,6 +157,8 @@ If a login expires later, the sync fails with a message naming the `--reauth` co
 
 If Garmin is already set up and you want Strava:
 
+Since June 2026, Strava only lets paid subscribers use its API, so step 1 needs an active Strava subscription on your account. That is [Strava's requirement](https://developers.strava.com/docs/getting-started/), not this tool's, and Garmin sync works fine without it.
+
 1. Create a Strava API app at https://www.strava.com/settings/api
 2. Set "Authorization Callback Domain" to `localhost`
 3. Run `eufy-sync --setup-strava` and enter your Client ID and Secret
@@ -200,6 +202,10 @@ The Eufy cloud only returns a weigh-in after the Eufy app has processed it. If y
 If more than one person uses the same Eufy account, setup asks which profile is yours, so only your weigh-ins sync. Until you choose, a sync that sees several profiles stops and lists them rather than guessing. Set it up before this existed? Run `eufy-sync --select-profile` once, then `eufy-sync --backfill-days 30` to pull any of your weigh-ins an earlier version skipped.
 
 The Eufy cloud reports weight at about 0.05 kg resolution, so it can differ from the Eufy app, which may read Bluetooth at higher precision. Most days match within 0.1 lb; some can be off by up to ~0.5 lb, and the kg-to-lb conversion on Garmin adds a little rounding.
+
+Garmin login failing over and over with rate-limit or Cloudflare errors, while the Garmin app works fine? Before assuming Garmin changed something, run `eufy-sync --reauth garmin`. Stale saved tokens produce exactly those errors, and a fresh login clears them.
+
+On old Windows builds (reported on Windows Server 2016), the `uv` installer download fails because the system does not trust Let's Encrypt certificates. Update the OS root certificates, or install on a current Windows machine and copy the folder over.
 
 ## Tests
 
