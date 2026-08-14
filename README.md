@@ -94,6 +94,7 @@ eufy-sync --headless           # never prompt; fail with a reauth message instea
 # maintenance
 eufy-sync --update             # update to the latest version
 eufy-sync --backfill-days 30   # sync the last 30 days
+eufy-sync --repair-days 30     # re-sync the last 30 days, even what is already marked synced
 eufy-sync --use-file-store     # store credentials in a 0o600 file, no keychain prompts
 eufy-sync --use-keychain       # move credentials back into the system keychain
 eufy-sync --uninstall          # remove all data and clean up
@@ -102,6 +103,12 @@ eufy-sync --uninstall          # remove all data and clean up
 `eufy-sync --help` lists the rest (`--version`, `--config`, `--db`).
 
 eufy-sync checks PyPI weekly and says so when a new version is out; `eufy-sync --update` installs it, whichever installer you used.
+
+### Getting data back after it goes missing
+
+`--backfill-days` only sends what the local record says was never synced, so it cannot help when the record and the target disagree. If you deleted weigh-ins in Garmin Connect, or a version before 1.9.0 filed them under the wrong date, run `eufy-sync --repair-days 30` (or however many days cover the damage). It re-sends every measurement in that window, whatever the local record says. Dates it never uploaded itself, and that Garmin already holds from another source, are still left alone.
+
+Delete any wrong-dated entries in Garmin Connect first. eufy-sync never deletes data it did not just replace, so it cannot clear those for you, and they would otherwise sit next to the corrected ones.
 
 ## Automatic sync
 
