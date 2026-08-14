@@ -1023,6 +1023,48 @@ def test_noninteractive_ambiguous_profile_bails(
     )
 
 
+@patch("eufy_sync.cli.status._print_summary")
+@patch("eufy_sync.platform_support.notify")
+@patch("eufy_sync.cli.updater._check_for_updates")
+@patch("eufy_sync.cli.setup._show_upgrade_notice")
+@patch("eufy_sync.cli.setup._migrate_config_passwords")
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_repair_days_reaches_sync_user(
+    _keyring, _migrate, _notice, _updates, _notify, _summary, tmp_path
+):
+    from eufy_sync.cli.app import main
+
+    config_path = _write_synced_config(tmp_path)
+    db_path = tmp_path / "state.db"
+    seen = {}
+
+    def fake_sync_user(user, state, **kwargs):
+        seen.update(kwargs)
+        return {"garmin": 3}, {}
+
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path), "--repair-days", "14"]
+    with patch("eufy_sync.sync.sync_user", side_effect=fake_sync_user), \
+         patch("sys.argv", argv), \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 0
+    assert seen["repair_days"] == 14
+
+
+def test_repair_days_with_backfill_days_is_rejected(tmp_path, capsys):
+    """The two set the same fetch window from different intents; taking both
+    would silently honor one of them."""
+    from eufy_sync.cli.app import main
+
+    argv = ["eufy-sync", "--repair-days", "14", "--backfill-days", "30"]
+    with patch("sys.argv", argv), pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 2
+    assert "--repair-days and --backfill-days cannot be used together" in capsys.readouterr().err
+
+
 def test_dunder_version_matches_pyproject():
     """The version lives in two places (pyproject.toml for packaging,
     eufy_sync.__version__ for --version and the update checker). 1.7.20

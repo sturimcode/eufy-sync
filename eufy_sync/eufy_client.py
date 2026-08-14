@@ -30,7 +30,7 @@ COMMON_HEADERS = {
 
 @dataclass
 class EufyMeasurement:
-    measurement_id: str  # customer_id + update_time as unique key
+    measurement_id: str  # customer_id + weigh-in unix time as unique key
     customer_id: str
     device_id: str
     timestamp: datetime
@@ -382,15 +382,19 @@ class EufyClient:
             return None
 
         weight_kg = raw_weight / 10.0  # Eufy returns weight in 0.1 kg units
-        update_time = record.get("update_time", record.get("create_time", 0))
+        # create_time is the weigh-in; update_time is when the record was last
+        # touched server-side. Eufy rewrites update_time in bulk on some
+        # accounts (issue #56), which filed a whole backfill under one date.
+        # create_time survives those rewrites, so ids stay stable too.
+        weighed_at = record.get("create_time") or record.get("update_time", 0)
         customer_id = record.get("customer_id", "unknown")
-        measurement_id = f"{customer_id}_{update_time}"
+        measurement_id = f"{customer_id}_{weighed_at}"
 
         return EufyMeasurement(
             measurement_id=measurement_id,
             customer_id=customer_id,
             device_id=record.get("device_id", "unknown"),
-            timestamp=datetime.fromtimestamp(update_time, tz=timezone.utc),
+            timestamp=datetime.fromtimestamp(weighed_at, tz=timezone.utc),
             weight_kg=weight_kg,
             body_fat_pct=scale_data.get("body_fat"),
             muscle_mass_kg=scale_data.get("muscle_mass"),

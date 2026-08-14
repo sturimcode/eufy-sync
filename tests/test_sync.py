@@ -310,7 +310,7 @@ def _garmin_user() -> UserConfig:
     )
 
 
-def _run_garmin_sync(user, state, measurements, has_weight_on_date_return):
+def _run_garmin_sync(user, state, measurements, has_weight_on_date_return, repair_days=None, dry_run=False):
     fake_eufy = MagicMock()
     fake_eufy.authenticate.return_value = None
     fake_eufy.fetch_measurements.return_value = measurements
@@ -322,10 +322,11 @@ def _run_garmin_sync(user, state, measurements, has_weight_on_date_return):
     fake_garmin.upload_body_composition.return_value = {"ok": True}
     fake_garmin.close.return_value = None
 
+    kwargs = {"repair_days": repair_days} if repair_days else {"backfill_days": 7}
     with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
          patch("eufy_sync.garmin_client.GarminClient", return_value=fake_garmin), \
          patch("eufy_sync.sync.time.sleep"):
-        sync_user(user, state, backfill_days=7)  # returns (counts, errors); not needed here
+        sync_user(user, state, dry_run=dry_run, **kwargs)  # returns (counts, errors); not needed here
 
     return fake_garmin
 
@@ -812,6 +813,193 @@ def test_has_synced_on_date_ignores_skipped_rows(tmp_path: Path):
 
     state.record_sync("user1", "m2", "2026-05-10T09:00:00+00:00", 84.8, "2026-05-10T09:01:00+00:00", target="garmin", response='{"ok": true}')
     assert state.has_synced_on_date("user1", "garmin", d)
+
+    state.close()
+
+
+def _garmin_rows(state, measurement_id: str) -> int:
+    cursor = state._conn.execute(
+        "SELECT COUNT(*) FROM sync_log WHERE eufy_measurement_id = ? AND target = ?",
+        (measurement_id, "garmin"),
+    )
+    return cursor.fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# Issue #58: --repair-days re-syncs a window regardless of recorded state, for
+# when the target lost data our state still calls synced
+# ---------------------------------------------------------------------------
+
+
+def test_repair_reuploads_already_synced_measurement(tmp_path: Path):
+    """The point of repair mode: state says synced, the entry is gone from
+    Garmin, so it must upload again. The existing state row must not gain a
+    duplicate (the UNIQUE constraint would raise)."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    m = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+
+    _run_garmin_sync(user, state, [m], has_weight_on_date_return=False)
+    assert state.is_synced(user.name, m.measurement_id, "garmin")
+
+    # The user deleted the entry in Garmin; a normal run would skip it.
+    normal = _run_garmin_sync(user, state, [m], has_weight_on_date_return=False)
+    normal.upload_body_composition.assert_not_called()
+
+    repair = _run_garmin_sync(user, state, [m], has_weight_on_date_return=False, repair_days=7)
+    repair.upload_body_composition.assert_called_once()
+    assert _garmin_rows(state, m.measurement_id) == 1
+
+    state.close()
+
+
+def test_repair_uses_its_own_fetch_window(tmp_path: Path):
+    import time as time_module
+
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+
+    fake_eufy = MagicMock()
+    fake_eufy.authenticate.return_value = None
+    fake_eufy.fetch_measurements.return_value = []
+    fake_eufy.close.return_value = None
+
+    fake_garmin = MagicMock()
+    fake_garmin.authenticate.return_value = None
+    fake_garmin.close.return_value = None
+
+    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=fake_garmin), \
+         patch("eufy_sync.sync.time.sleep"):
+        sync_user(user, state, repair_days=30)
+
+    after = fake_eufy.fetch_measurements.call_args.kwargs["after_timestamp"]
+    assert abs(after - (int(time_module.time()) - 30 * 86400)) < 60
+
+    state.close()
+
+
+def test_repair_still_upgrades_a_weight_only_row(tmp_path: Path):
+    """Repair must not flatten the issue #48 upgrade: a full record arriving
+    for a weigh-in we synced weight-only still replaces the Garmin entry
+    rather than uploading a second one beside it."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    dt = datetime(2026, 5, 10, 7, 0, tzinfo=timezone.utc)
+
+    raw = _raw_measurement(85.0, dt)
+    _run_garmin_sync(user, state, [raw], has_weight_on_date_return=False)
+
+    full = _full_measurement(85.0, dt)  # same id: same customer + timestamp
+    assert full.measurement_id == raw.measurement_id
+    repair = _run_garmin_sync(user, state, [full], has_weight_on_date_return=True, repair_days=7)
+
+    repair.delete_weight_entry.assert_called_once()
+    repair.upload_body_composition.assert_called_once()
+    assert state.weight_only_syncs_on_date(user.name, "garmin", dt.astimezone().date()) == []
+
+    state.close()
+
+
+def test_repair_sends_only_the_newest_measurement_to_strava(tmp_path: Path):
+    """Strava holds a single current weight, so repeating history there would
+    spend the rate limit to land the same value. Garmin gets the whole
+    window."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_and_strava_user()
+
+    older = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+    middle = _measurement(85.5, datetime(2026, 5, 11, 8, 0, tzinfo=timezone.utc))
+    newest = _measurement(86.0, datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc))
+
+    for m in (older, middle, newest):
+        for target in ("garmin", "strava"):
+            state.record_sync("default", m.measurement_id, m.timestamp.isoformat(),
+                              m.weight_kg, "2026-05-12T09:00:00+00:00", target=target)
+
+    fake_eufy = MagicMock()
+    fake_eufy.authenticate.return_value = None
+    fake_eufy.fetch_measurements.return_value = [newest, middle, older]  # newest-first, as Eufy returns
+    fake_eufy.close.return_value = None
+
+    fake_garmin = MagicMock()
+    fake_garmin.authenticate.return_value = None
+    fake_garmin.has_weight_on_date.return_value = False
+    fake_garmin.upload_body_composition.return_value = {"ok": True}
+    fake_garmin.close.return_value = None
+
+    fake_strava = MagicMock()
+    fake_strava.authenticate.return_value = None
+    fake_strava.update_weight.return_value = {"weight": None}
+    fake_strava.close.return_value = None
+
+    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=fake_garmin), \
+         patch("eufy_sync.strava_client.StravaClient", return_value=fake_strava), \
+         patch("eufy_sync.sync.time.sleep"):
+        counts, errors = sync_user(user, state, repair_days=30)
+
+    assert errors == {}
+    assert counts["garmin"] == 3
+    assert counts["strava"] == 1
+    assert [c.args[0] for c in fake_strava.update_weight.call_args_list] == [86.0]
+
+    state.close()
+
+
+def test_repair_still_skips_a_foreign_same_date_entry(tmp_path: Path):
+    """The same-date guard protects entries another source put in Garmin. We
+    never uploaded this date ourselves, so repair must leave it alone."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    m = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+
+    fake_garmin = _run_garmin_sync(user, state, [m], has_weight_on_date_return=True, repair_days=7)
+
+    fake_garmin.upload_body_composition.assert_not_called()
+    cursor = state._conn.execute(
+        "SELECT response FROM sync_log WHERE eufy_measurement_id = ?",
+        (m.measurement_id,),
+    )
+    assert cursor.fetchone()[0] == '{"skipped": "already_in_garmin"}'
+
+    state.close()
+
+
+def test_repair_over_an_already_skipped_date_does_not_double_record(tmp_path: Path):
+    """A skipped-because-already-in-Garmin row does not count as "we uploaded
+    on this date", so repair reaches the guard again for the same measurement.
+    Recording that skip a second time would break the UNIQUE constraint."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    m = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+
+    _run_garmin_sync(user, state, [m], has_weight_on_date_return=True)
+    assert state.is_synced(user.name, m.measurement_id, "garmin")
+
+    fake_garmin = _run_garmin_sync(user, state, [m], has_weight_on_date_return=True, repair_days=7)
+
+    fake_garmin.upload_body_composition.assert_not_called()
+    assert _garmin_rows(state, m.measurement_id) == 1
+
+    state.close()
+
+
+def test_repair_dry_run_previews_without_uploading(tmp_path: Path, capsys):
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    m = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+
+    _run_garmin_sync(user, state, [m], has_weight_on_date_return=False)
+    capsys.readouterr()
+
+    fake_garmin = _run_garmin_sync(
+        user, state, [m], has_weight_on_date_return=False, repair_days=7, dry_run=True,
+    )
+
+    fake_garmin.upload_body_composition.assert_not_called()
+    assert capsys.readouterr().out.count("[DRY RUN] Would sync") == 1
+    assert _garmin_rows(state, m.measurement_id) == 1
 
     state.close()
 
