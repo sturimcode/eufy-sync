@@ -36,6 +36,50 @@ def test_parse_record_basic():
     assert m.timestamp == datetime(2024, 3, 31, 15, 46, 40, tzinfo=timezone.utc)
 
 
+# ---------------------------------------------------------------------------
+# Issue #56: Eufy rewrites update_time server-side in bulk, which collapsed a
+# whole backfill onto one date. create_time survives those rewrites.
+# ---------------------------------------------------------------------------
+
+def test_parse_record_prefers_create_time_over_update_time():
+    client = EufyClient.__new__(EufyClient)
+    record = {
+        "customer_id": "abc123",
+        "device_id": "dev789",
+        "create_time": 1711900000,   # the weigh-in
+        "update_time": 1750000000,   # a later server-side rewrite
+        "scale_data": {"weight": 862},
+    }
+    m = client._parse_record(record)
+    assert m.timestamp == datetime(2024, 3, 31, 15, 46, 40, tzinfo=timezone.utc)
+    assert m.measurement_id == "abc123_1711900000"
+
+
+def test_parse_record_falls_back_to_update_time_when_create_time_missing():
+    client = EufyClient.__new__(EufyClient)
+    record = {
+        "customer_id": "abc123",
+        "update_time": 1711900000,
+        "scale_data": {"weight": 862},
+    }
+    m = client._parse_record(record)
+    assert m.timestamp == datetime(2024, 3, 31, 15, 46, 40, tzinfo=timezone.utc)
+    assert m.measurement_id == "abc123_1711900000"
+
+
+def test_parse_record_falls_back_to_update_time_when_create_time_is_zero():
+    client = EufyClient.__new__(EufyClient)
+    record = {
+        "customer_id": "abc123",
+        "create_time": 0,
+        "update_time": 1711900000,
+        "scale_data": {"weight": 862},
+    }
+    m = client._parse_record(record)
+    assert m.timestamp == datetime(2024, 3, 31, 15, 46, 40, tzinfo=timezone.utc)
+    assert m.measurement_id == "abc123_1711900000"
+
+
 def test_parse_record_missing_scale_data():
     client = EufyClient.__new__(EufyClient)
     record = {"customer_id": "abc", "update_time": 100}
@@ -140,6 +184,31 @@ def test_fetch_single_profile_windowed_by_after_timestamp():
         measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
     assert len(measurements) == 1
     assert measurements[0].weight_kg == 81.0
+
+
+def test_fetch_window_selects_by_weigh_in_time_not_update_time():
+    """The client-side cutoff filters on the measurement timestamp, which is
+    create_time (issue #56). A years-old weigh-in that Eufy rewrote yesterday
+    must stay outside a recent window, so --backfill-days and --repair-days
+    cover the dates the user means."""
+    c = _client()
+    rewritten = {
+        "customer_id": "a",
+        "device_id": "d",
+        "create_time": 1_000_000_000,   # year 2001 weigh-in
+        "update_time": 2_000_000_000,   # rewritten in 2033
+        "scale_data": {"weight": 800},
+    }
+    recent = {
+        "customer_id": "a",
+        "device_id": "d",
+        "create_time": 1_900_000_000,
+        "update_time": 2_000_000_000,
+        "scale_data": {"weight": 810},
+    }
+    with patch.object(c, "_get_records", return_value=[rewritten, recent]):
+        measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert [m.weight_kg for m in measurements] == [81.0]
 
 
 def test_fetch_configured_profile_forwards_after_timestamp():
