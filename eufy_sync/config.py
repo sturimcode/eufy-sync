@@ -84,6 +84,29 @@ def _get_password(user_name: str, service: str, email: str, yaml_password: str |
     )
 
 
+def _get_strava_secret(user_name: str, yaml_secret: str | None) -> str:
+    """Resolve the Strava API client secret: credential store first, then the
+    YAML fallback for configs not yet migrated.
+
+    Its own function rather than _get_password's `service` argument because
+    the fix is a different command: --update-password prompts for the Eufy and
+    Garmin account passwords, never for a Strava app secret.
+    """
+    from eufy_sync.credentials import get_password
+
+    stored = get_password(f"{user_name}:strava")
+    if stored:
+        return stored
+
+    if yaml_secret:
+        return yaml_secret
+
+    raise ValueError(
+        f"No Strava client secret found for user '{user_name}'. "
+        f"Run: eufy-sync --setup-strava"
+    )
+
+
 def load_config(path: Path) -> AppConfig:
     with open(path) as f:
         raw = yaml.safe_load(f)
@@ -121,7 +144,7 @@ def load_config(path: Path) -> AppConfig:
         if "strava" in u:
             strava = StravaConfig(
                 client_id=str(u["strava"]["client_id"]),
-                client_secret=u["strava"]["client_secret"],
+                client_secret=_get_strava_secret(name, u["strava"].get("client_secret")),
             )
 
         if not garmin and not strava:

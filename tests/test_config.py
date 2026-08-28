@@ -121,3 +121,69 @@ def test_load_config_rejects_shapeless_document(_keyring, tmp_path: Path, conten
     assert "eufy-sync" in message
 
 
+# --- Strava client secret ----------------------------------------------------
+#
+# The Strava API app's client secret used to live in plain text in config.yaml,
+# unlike every other secret. It now resolves from the credential store, with
+# the YAML value still honored for configs that have not been migrated yet.
+
+
+def _strava_config(secret: str | None) -> dict:
+    strava: dict = {"client_id": "12345"}
+    if secret is not None:
+        strava["client_secret"] = secret
+    return {
+        "users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com", "password": "pw"},
+            "strava": strava,
+        }],
+    }
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_load_config_resolves_strava_secret_from_vault(_keyring, tmp_path: Path):
+    from eufy_sync.credentials import store_password
+
+    store_password("default:strava", "vault-secret")
+    path = tmp_path / "config.yaml"
+    _write(path, _strava_config(None))
+
+    cfg = load_config(path)
+    assert cfg.users[0].strava.client_secret == "vault-secret"
+    assert cfg.users[0].strava.client_id == "12345"
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_load_config_falls_back_to_yaml_strava_secret(_keyring, tmp_path: Path):
+    """A config that has not been migrated yet must keep working."""
+    path = tmp_path / "config.yaml"
+    _write(path, _strava_config("yaml-secret"))
+
+    cfg = load_config(path)
+    assert cfg.users[0].strava.client_secret == "yaml-secret"
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_load_config_prefers_vault_strava_secret_over_yaml(_keyring, tmp_path: Path):
+    from eufy_sync.credentials import store_password
+
+    store_password("default:strava", "vault-secret")
+    path = tmp_path / "config.yaml"
+    _write(path, _strava_config("yaml-secret"))
+
+    cfg = load_config(path)
+    assert cfg.users[0].strava.client_secret == "vault-secret"
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_load_config_missing_strava_secret_names_setup_strava(_keyring, tmp_path: Path):
+    """--update-password prompts for the Eufy and Garmin account passwords and
+    would never fix this, so the message must name --setup-strava instead."""
+    path = tmp_path / "config.yaml"
+    _write(path, _strava_config(None))
+
+    with pytest.raises(ValueError, match="--setup-strava"):
+        load_config(path)
+
+

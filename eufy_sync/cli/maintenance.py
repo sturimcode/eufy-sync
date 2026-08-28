@@ -120,11 +120,11 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
                 sys.exit(1)
 
     if do_strava:
-        from eufy_sync.config import StravaConfig
+        from eufy_sync.config import StravaConfig, _get_strava_secret
         from eufy_sync.strava_client import authorize_strava
         strava_cfg = StravaConfig(
             client_id=str(user["strava"]["client_id"]),
-            client_secret=user["strava"]["client_secret"],
+            client_secret=_get_strava_secret(user_name, user["strava"].get("client_secret")),
         )
         try:
             authorize_strava(strava_cfg)
@@ -214,7 +214,9 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
         # rmtree still erases a file-backed vault under data_dir.
         try:
             for name in user_names:
-                for suffix in ["eufy", "garmin"]:
+                # "strava" here is the API app's client secret, not an account
+                # password; it moved into the vault alongside the other two.
+                for suffix in ["eufy", "garmin", "strava"]:
                     delete_password(f"{name}:{suffix}")
             delete_token("eufy")
             delete_token("garmin")
