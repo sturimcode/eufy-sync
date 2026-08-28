@@ -2,7 +2,9 @@
 
 The library logs in with curl_cffi TLS impersonation, handles MFA via a
 callback, auto-refreshes the access token, and uploads body composition.
-We persist its token blob to the system keychain so logins are rare.
+We persist its token blob to the system keychain after a login and again at
+the end of every run, because the library's own refresh can hand back a new
+refresh token that otherwise dies with the process.
 """
 from __future__ import annotations
 
@@ -334,6 +336,29 @@ class GarminAuth:
             return data if isinstance(data.get("di_token"), str) else None
         except Exception:
             return None
+
+    def save_if_changed(self, garmin: Garmin) -> None:
+        """Store the client's current token blob if it differs from the saved one.
+
+        A refresh during the run can rotate the DI refresh token, and the
+        library keeps the new one in memory only. Without this the stored blob
+        keeps the retired token, goes stale, and eventually 401s into a re-auth
+        prompt. Nothing here escapes: a failed save costs one rotation, not the
+        sync.
+        """
+        try:
+            blob = json.loads(garmin.client.dumps())
+            # Same shape rule _load_token enforces on the way in - storing
+            # anything else would leave a blob the next run refuses to restore.
+            if not isinstance(blob.get("di_token"), str):
+                return
+            from eufy_sync.credentials import get_token, store_token
+            if blob == get_token("garmin"):
+                return
+            store_token("garmin", blob)
+            logger.info("Saved refreshed Garmin token")
+        except Exception as e:
+            logger.debug("Could not save the refreshed Garmin token: %s", e)
 
     def _save_token(self, garmin: Garmin) -> None:
         blob = json.loads(garmin.client.dumps())

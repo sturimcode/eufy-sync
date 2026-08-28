@@ -195,6 +195,36 @@ def test_upload_propagates_rate_limit_without_reauth():
 
 
 # ---------------------------------------------------------------------------
+# close() persists whatever the library rotated during the run
+# ---------------------------------------------------------------------------
+
+
+def test_close_saves_a_token_rotated_during_the_run():
+    fake = MagicMock()
+    client = _client_with_fake_garmin(fake)
+    with patch.object(client._auth, "save_if_changed") as save:
+        client.close()
+    save.assert_called_once_with(fake)
+    assert client._garmin is None
+
+
+def test_close_without_a_session_saves_nothing():
+    # sync_user closes every client it built, including ones whose
+    # authenticate() failed and never set _garmin.
+    client = GarminClient(GarminConfig(email="g@example.com", password="pw"))
+    with patch.object(client._auth, "save_if_changed") as save:
+        client.close()
+    save.assert_not_called()
+
+
+def test_close_survives_a_failing_save():
+    client = _client_with_fake_garmin(MagicMock())
+    with patch.object(client._auth, "save_if_changed", side_effect=RuntimeError("keychain locked")):
+        client.close()   # must not raise
+    assert client._garmin is None
+
+
+# ---------------------------------------------------------------------------
 # Issue #48: deleting our weight-only entry so the full record replaces it
 # ---------------------------------------------------------------------------
 

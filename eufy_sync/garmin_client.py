@@ -183,4 +183,14 @@ class GarminClient:
         return result if isinstance(result, dict) else {"status": "ok"}
 
     def close(self) -> None:
+        # Last chance to keep whatever the library rotated mid-run: its refresh
+        # can hand back a new refresh token that lives in memory only. sync_user
+        # closes every client it constructed, including ones whose authenticate()
+        # never ran or failed, so _garmin is often None here.
+        if self._garmin is not None:
+            try:
+                self._auth.save_if_changed(self._garmin)
+            except Exception as e:
+                # Closing must not be the thing that fails a finished run.
+                logger.debug("Garmin token save on close failed: %s", e)
         self._garmin = None
