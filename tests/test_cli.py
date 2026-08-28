@@ -697,6 +697,58 @@ def test_migration_skips_env_var_reference_strava_secret(_keyring, tmp_path):
 
 
 @patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_migration_survives_a_bare_eufy_section(_keyring, tmp_path):
+    """A hand-edited `eufy:` with nothing indented under it parses to None,
+    and the {} default in user.get(service, {}) only covers a missing key. The
+    migration runs on every command, so an AttributeError here took the whole
+    tool down at startup."""
+    from eufy_sync.cli.setup import _migrate_config_passwords
+    from eufy_sync.credentials import get_password
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "users:\n"
+        "  - name: default\n"
+        "    eufy:\n"
+        "    garmin:\n"
+        "      email: g@example.com\n"
+        "      password: pw\n"
+    )
+
+    _migrate_config_passwords(config_path)
+
+    # The rest of the user migrated normally, and the bare section is left as
+    # the user wrote it.
+    assert get_password("default:garmin") == "pw"
+    written = yaml.safe_load(config_path.read_text())
+    assert written["users"][0]["eufy"] is None
+    assert "password" not in written["users"][0]["garmin"]
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_migration_survives_a_bare_strava_section(_keyring, tmp_path):
+    """Same shape on the newer Strava client-secret lookup."""
+    from eufy_sync.cli.setup import _migrate_config_passwords
+
+    config_path = tmp_path / "config.yaml"
+    original = (
+        "users:\n"
+        "  - name: default\n"
+        "    eufy:\n"
+        "      email: e@example.com\n"
+        "    strava:\n"
+    )
+    config_path.write_text(original)
+
+    with patch("eufy_sync.credentials.store_password") as mock_store:
+        _migrate_config_passwords(config_path)
+
+    # Nothing to move, so nothing is stored and the file is not rewritten.
+    mock_store.assert_not_called()
+    assert config_path.read_text() == original
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
 def test_setup_strava_stores_secret_in_vault_and_strips_yaml_key(_keyring, tmp_path):
     """--setup-strava writes only the client id to the YAML, and clears any
     secret an earlier version already wrote there."""
