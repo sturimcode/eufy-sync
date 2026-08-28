@@ -39,12 +39,31 @@ def test_login_fresh_when_no_blob_and_interactive(monkeypatch):
     assert saved.get("called") is True
 
 
-def test_login_raises_when_no_blob_and_not_interactive(monkeypatch):
+def test_login_headless_logs_in_from_the_stored_password(monkeypatch):
+    # No blob and nobody watching: the password login normally needs no input,
+    # so the run heals itself instead of asking for --reauth.
     auth = _auth()
     monkeypatch.setattr(auth, "_load_token", lambda: None)
-    with patch("eufy_sync.garmin_auth.Garmin", return_value=MagicMock()):
-        with pytest.raises(PermanentSyncError):
-            auth.login(interactive=False)
+    saved = {}
+    monkeypatch.setattr(auth, "_save_token", lambda g: saved.setdefault("called", True))
+    fake = MagicMock()
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        result = auth.login(interactive=False)
+    fake.login.assert_called_once()
+    assert result is fake
+    assert saved.get("called") is True
+
+
+def test_login_headless_heals_an_unusable_blob(monkeypatch):
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: dict(BLOB))
+    monkeypatch.setattr(auth, "_save_token", lambda g: None)
+    fake = MagicMock()
+    fake.client.loads.side_effect = ValueError("corrupt")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        result = auth.login(interactive=False)
+    fake.login.assert_called_once()
+    assert result is fake
 
 
 def test_token_status_valid_with_blob(monkeypatch):
@@ -193,16 +212,121 @@ def test_mfa_prompt_returns_stripped_code(monkeypatch):
     assert _mfa_prompt() == "123456"
 
 
+def _fail_on_browser(monkeypatch):
+    """Make either half of the browser fallback fail the test outright. A hidden
+    scheduled run must never put a Chromium window on screen."""
+    def _opened(*args):
+        raise AssertionError("browser fallback opened in a headless run")
+    monkeypatch.setattr("eufy_sync.garmin_auth._ensure_chromium", _opened)
+    monkeypatch.setattr("eufy_sync.garmin_auth.browser_login", _opened)
+
+
 def test_login_headless_never_opens_browser(monkeypatch):
     auth = _auth()
     monkeypatch.setattr(auth, "_load_token", lambda: None)
-    browser_calls = []
-    monkeypatch.setattr("eufy_sync.garmin_auth.browser_login",
-                        lambda e, p: browser_calls.append(1) or "ticket")
-    with patch("eufy_sync.garmin_auth.Garmin", return_value=MagicMock()):
-        with pytest.raises(PermanentSyncError):
+    monkeypatch.setattr(auth, "_save_token", lambda g: None)
+    _fail_on_browser(monkeypatch)
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=MagicMock()) as ctor:
+        auth.login(interactive=False)
+    # The headless MFA callback, not the interactive one that calls input().
+    from eufy_sync.garmin_auth import _headless_mfa_prompt
+    assert ctor.call_args.kwargs["prompt_mfa"] is _headless_mfa_prompt
+
+
+def test_login_headless_mfa_demand_names_reauth(monkeypatch):
+    # The library calls prompt_mfa only when Garmin wants a code; headless that
+    # raises straight back out of garmin.login().
+    from eufy_sync.garmin_auth import GarminLoginCancelled
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: None)
+    _fail_on_browser(monkeypatch)
+    fake = MagicMock()
+    fake.login.side_effect = GarminLoginCancelled("mfa")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        with pytest.raises(PermanentSyncError) as exc_info:
             auth.login(interactive=False)
-    assert browser_calls == []
+    assert "--reauth garmin" in str(exc_info.value)
+
+
+def test_login_headless_bad_credentials_names_update_password(monkeypatch):
+    from garminconnect import GarminConnectAuthenticationError
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: None)
+    _fail_on_browser(monkeypatch)
+    fake = MagicMock()
+    fake.login.side_effect = GarminConnectAuthenticationError("bad")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        with pytest.raises(PermanentSyncError) as exc_info:
+            auth.login(interactive=False)
+    message = str(exc_info.value)
+    assert "--update-password" in message
+    # app.py checks for "--reauth" first, so this message must not carry it or
+    # the notification would name the wrong fix.
+    assert "--reauth" not in message
+
+
+def test_login_headless_rate_limit_keeps_its_type(monkeypatch):
+    # sync._is_permanent and the quiet-429 handling both switch on the type, so
+    # a 429 must not come back wrapped in a PermanentSyncError.
+    from garminconnect import GarminConnectTooManyRequestsError
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: None)
+    _fail_on_browser(monkeypatch)
+    fake = MagicMock()
+    fake.login.side_effect = GarminConnectTooManyRequestsError("429")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        with pytest.raises(GarminConnectTooManyRequestsError):
+            auth.login(interactive=False)
+
+
+def test_login_headless_propagates_a_network_failure_unchanged(monkeypatch):
+    # Upstream classifies transient network trouble by the message text, so the
+    # original exception has to survive intact.
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: None)
+    _fail_on_browser(monkeypatch)
+    fake = MagicMock()
+    fake.login.side_effect = ConnectionError("Temporary failure in name resolution")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        with pytest.raises(ConnectionError, match="name resolution"):
+            auth.login(interactive=False)
+
+
+def test_headless_mfa_prompt_cancels_without_reading_input(monkeypatch):
+    from eufy_sync.garmin_auth import GarminLoginCancelled, _headless_mfa_prompt
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": (_ for _ in ()).throw(AssertionError("prompted a headless run")),
+    )
+    with pytest.raises(GarminLoginCancelled):
+        _headless_mfa_prompt()
+
+
+def test_silent_reauth_clears_token_logs_in_and_saves(monkeypatch):
+    auth = _auth()
+    calls = []
+    monkeypatch.setattr(auth, "_clear_token", lambda: calls.append("clear"))
+    monkeypatch.setattr(auth, "_save_token", lambda g: calls.append("save"))
+    _fail_on_browser(monkeypatch)
+    fake = MagicMock()
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        result = auth.silent_reauth()
+    assert result is fake
+    fake.login.assert_called_once()
+    assert calls == ["clear", "save"]
+
+
+def test_silent_reauth_mfa_demand_names_reauth(monkeypatch):
+    from eufy_sync.garmin_auth import GarminLoginCancelled
+    auth = _auth()
+    monkeypatch.setattr(auth, "_clear_token", lambda: None)
+    _fail_on_browser(monkeypatch)
+    fake = MagicMock()
+    fake.login.side_effect = GarminLoginCancelled("mfa")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        with pytest.raises(PermanentSyncError) as exc_info:
+            auth.silent_reauth()
+    assert "--reauth garmin" in str(exc_info.value)
 
 
 def test_force_reauth_falls_back_to_browser(monkeypatch):

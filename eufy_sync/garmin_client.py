@@ -169,12 +169,16 @@ class GarminClient:
                 raise  # transient connection error; let _retry handle it
             # Restored session is dead (token expired or revoked, seen as a 401).
             if not self._allow_interactive:
-                from eufy_sync.sync import PermanentSyncError
-                raise PermanentSyncError(
-                    "Garmin session expired. Re-authenticate: run eufy-sync --reauth garmin"
-                ) from e
-            logger.info("Garmin session expired; re-authenticating")
-            self._garmin = self._auth.force_reauth()
+                # Nobody to prompt, but a password login usually needs no input
+                # at all, so try it once rather than ending the run on a
+                # re-auth nag the run could have fixed itself. If it cannot
+                # (MFA demanded, password wrong), that error already names the
+                # command to run and travels to the caller unchanged.
+                logger.info("Garmin session expired; re-authenticating without prompts")
+                self._garmin = self._auth.silent_reauth()
+            else:
+                logger.info("Garmin session expired; re-authenticating")
+                self._garmin = self._auth.force_reauth()
             result = self._add_body_composition(body_comp)
         logger.info(
             "Uploaded body comp to Garmin: %.1f kg at %s",

@@ -116,7 +116,29 @@ def test_upload_reauths_and_retries_on_auth_error_when_interactive():
     assert client._garmin is fresh
 
 
-def test_upload_raises_permanent_on_auth_error_when_headless():
+def test_upload_relogs_in_silently_and_retries_when_headless():
+    # A scheduled run has nobody to prompt, but the stored password normally
+    # logs straight back in, so the run heals itself instead of nagging.
+    from garminconnect import GarminConnectAuthenticationError
+    client = GarminClient(GarminConfig(email="g@example.com", password="pw"))
+    dead = MagicMock()
+    dead.add_body_composition.side_effect = GarminConnectAuthenticationError("dead")
+    fresh = MagicMock()
+    fresh.add_body_composition.return_value = {"ok": True}
+    client._garmin = dead
+    client._allow_interactive = False
+    bc = GarminBodyComposition(timestamp="2026-06-10T08:00:00+00:00", weight=80.0)
+    with patch.object(client._auth, "silent_reauth", return_value=fresh) as reauth:
+        with patch.object(client._auth, "force_reauth") as interactive_reauth:
+            result = client.upload_body_composition(bc)
+    reauth.assert_called_once()
+    interactive_reauth.assert_not_called()   # never the prompting path
+    fresh.add_body_composition.assert_called_once()
+    assert client._garmin is fresh
+    assert result == {"ok": True}
+
+
+def test_upload_propagates_a_silent_relogin_that_needs_mfa():
     from garminconnect import GarminConnectAuthenticationError
     from eufy_sync.sync import PermanentSyncError
     client = GarminClient(GarminConfig(email="g@example.com", password="pw"))
@@ -125,8 +147,14 @@ def test_upload_raises_permanent_on_auth_error_when_headless():
     client._garmin = dead
     client._allow_interactive = False
     bc = GarminBodyComposition(timestamp="2026-06-10T08:00:00+00:00", weight=80.0)
-    with pytest.raises(PermanentSyncError):
-        client.upload_body_composition(bc)
+    with patch.object(
+        client._auth, "silent_reauth",
+        side_effect=PermanentSyncError("Garmin wants an MFA code... Run: eufy-sync --reauth garmin"),
+    ):
+        with pytest.raises(PermanentSyncError) as exc:
+            client.upload_body_composition(bc)
+    # The hint reaches app.py's notification classifier unchanged.
+    assert "--reauth garmin" in str(exc.value)
 
 
 def test_upload_reauths_on_401_connection_error_when_interactive():
@@ -148,18 +176,39 @@ def test_upload_reauths_on_401_connection_error_when_interactive():
     assert client._garmin is fresh
 
 
-def test_upload_raises_permanent_with_reauth_hint_on_401_when_headless():
+def test_upload_relogs_in_silently_on_401_when_headless():
+    # The 401 flavor of a dead session takes the same silent recovery.
     from garminconnect import GarminConnectConnectionError
-    from eufy_sync.sync import PermanentSyncError
     client = GarminClient(GarminConfig(email="g@example.com", password="pw"))
     dead = MagicMock()
     dead.add_body_composition.side_effect = GarminConnectConnectionError("API Error 401 - ")
+    fresh = MagicMock()
+    fresh.add_body_composition.return_value = {"ok": True}
     client._garmin = dead
     client._allow_interactive = False
     bc = GarminBodyComposition(timestamp="2026-06-10T08:00:00+00:00", weight=80.0)
-    with pytest.raises(PermanentSyncError) as exc:
+    with patch.object(client._auth, "silent_reauth", return_value=fresh) as reauth:
         client.upload_body_composition(bc)
-    assert "--reauth" in str(exc.value)  # actionable message the CLI notification keys on
+    reauth.assert_called_once()
+    fresh.add_body_composition.assert_called_once()
+
+
+def test_upload_propagates_a_failed_retry_after_a_silent_relogin():
+    # The re-login worked, the retried upload did not. That error is the run's
+    # real problem and must not be masked by anything here.
+    from garminconnect import GarminConnectAuthenticationError, GarminConnectConnectionError
+    client = GarminClient(GarminConfig(email="g@example.com", password="pw"))
+    dead = MagicMock()
+    dead.add_body_composition.side_effect = GarminConnectAuthenticationError("dead")
+    fresh = MagicMock()
+    fresh.add_body_composition.side_effect = GarminConnectConnectionError("API Error 500 - ")
+    client._garmin = dead
+    client._allow_interactive = False
+    bc = GarminBodyComposition(timestamp="2026-06-10T08:00:00+00:00", weight=80.0)
+    with patch.object(client._auth, "silent_reauth", return_value=fresh):
+        with pytest.raises(GarminConnectConnectionError):
+            client.upload_body_composition(bc)
+    fresh.add_body_composition.assert_called_once()   # retried once, not looped
 
 
 def test_upload_propagates_non_auth_connection_error():

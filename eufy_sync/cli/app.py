@@ -59,7 +59,7 @@ def _main() -> None:
     parser.add_argument("--repair-days", type=int, default=None,
                         help="Re-sync the last N days even if records are already marked as synced")
     parser.add_argument("--dry-run", action="store_true", help="Preview without uploading")
-    parser.add_argument("--headless", action="store_true", help="Never prompt; fail with a reauth message if login is needed (for scheduled runs)")
+    parser.add_argument("--headless", action="store_true", help="Never prompt; log back in on its own if the session died (for scheduled runs)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed sync logs")
     parser.add_argument("--install-agent", action="store_true", help="Set up automatic sync every 4 hours")
     parser.add_argument("--uninstall-agent", action="store_true", help="Remove automatic sync")

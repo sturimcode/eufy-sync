@@ -1123,7 +1123,7 @@ def test_per_target_upload_error_still_reaches_the_classifier(
 
     def fake_sync_user(user, state, **kwargs):
         return {"strava": 2}, {
-            "garmin": "Garmin session expired. Re-authenticate: run eufy-sync --reauth garmin",
+            "garmin": "Garmin wants an MFA code and no one is here to type it. Run: eufy-sync --reauth garmin",
         }
 
     argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path), "--headless"]

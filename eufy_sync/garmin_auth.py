@@ -5,6 +5,10 @@ callback, auto-refreshes the access token, and uploads body composition.
 We persist its token blob to the system keychain after a login and again at
 the end of every run, because the library's own refresh can hand back a new
 refresh token that otherwise dies with the process.
+
+A scheduled run that finds no usable blob logs in again from the stored
+password on its own. It only gives up when Garmin demands an MFA code or
+rejects the password - the two cases a person has to be present for.
 """
 from __future__ import annotations
 
@@ -225,6 +229,16 @@ def _mfa_prompt() -> str:
     return code
 
 
+def _headless_mfa_prompt() -> str:
+    """Stand-in for _mfa_prompt when no one is at the keyboard.
+
+    The library calls prompt_mfa only when Garmin actually asks for a code, and
+    an exception from it comes back out of garmin.login(). Raising immediately
+    is therefore how a scheduled run learns that this login is the one case it
+    cannot finish by itself."""
+    raise GarminLoginCancelled("Garmin asked for an MFA code with nobody to enter it")
+
+
 class GarminAuth:
     """Manages a garminconnect.Garmin client and its persisted token blob."""
 
@@ -236,10 +250,16 @@ class GarminAuth:
     def login(self, interactive: bool = True) -> Garmin:
         """Return an authenticated Garmin client.
 
-        Restores the saved token blob if present; otherwise does a fresh
-        login (prompting for MFA) when interactive, or raises when not.
+        Restores the saved token blob if present. With no usable blob an
+        interactive run does a fresh login, prompting for MFA and falling back
+        to the browser; a scheduled one logs in from the stored password
+        without prompting anyone.
         """
-        garmin = Garmin(self.email, self.password, prompt_mfa=_mfa_prompt)
+        garmin = Garmin(
+            self.email,
+            self.password,
+            prompt_mfa=_mfa_prompt if interactive else _headless_mfa_prompt,
+        )
 
         blob = self._load_token()
         if blob is not None:
@@ -251,11 +271,10 @@ class GarminAuth:
             except Exception as e:
                 logger.warning("Saved Garmin token unusable (%s); re-logging in", e)
 
-        if not interactive:
-            from eufy_sync.sync import PermanentSyncError
-            raise PermanentSyncError("Garmin login needed; run: eufy-sync --reauth garmin")
-
-        self._fresh_login(garmin)
+        if interactive:
+            self._fresh_login(garmin)
+        else:
+            self._silent_login(garmin)
         self._save_token(garmin)
         logger.info("Authenticated to Garmin as %s", self.email)
         return garmin
@@ -267,6 +286,19 @@ class GarminAuth:
         self._fresh_login(garmin)
         self._save_token(garmin)
         logger.info("Re-authenticated to Garmin as %s", self.email)
+        return garmin
+
+    def silent_reauth(self) -> Garmin:
+        """Clear the stored token and log in again with nobody watching.
+
+        The scheduled counterpart to force_reauth: same recovery from a session
+        Garmin has stopped honoring, but it never prompts and never opens a
+        browser."""
+        self._clear_token()
+        garmin = Garmin(self.email, self.password, prompt_mfa=_headless_mfa_prompt)
+        self._silent_login(garmin)
+        self._save_token(garmin)
+        logger.info("Re-authenticated to Garmin as %s without prompting", self.email)
         return garmin
 
     def _fresh_login(self, garmin: Garmin) -> None:
@@ -293,6 +325,32 @@ class GarminAuth:
                 "Browser-free Garmin login failed (%s); opening browser fallback", e
             )
         self._browser_fallback(garmin)
+
+    def _silent_login(self, garmin: Garmin) -> None:
+        """Log in from the stored password with nobody present.
+
+        A password login normally needs no input at all, so a scheduled run can
+        replace a dead session by itself instead of nagging for --reauth. The
+        browser fallback is deliberately absent: a hidden run must not put a
+        Chromium window on screen with no one expecting it.
+
+        Only two failures get translated, and both name the command that fixes
+        them. Everything else leaves as it arrived, on purpose: a
+        GarminConnectTooManyRequestsError has to keep its type for
+        sync._is_permanent, and upstream classifies transient network trouble by
+        the message text. Nothing here may grow a catch-all."""
+        from eufy_sync.sync import PermanentSyncError
+        try:
+            garmin.login()
+        except GarminLoginCancelled as e:
+            raise PermanentSyncError(
+                "Garmin wants an MFA code and no one is here to type it. "
+                "Run: eufy-sync --reauth garmin"
+            ) from e
+        except GarminConnectAuthenticationError as e:
+            raise PermanentSyncError(
+                "Garmin rejected the email or password. Run: eufy-sync --update-password"
+            ) from e
 
     def _browser_fallback(self, garmin: Garmin) -> None:
         """Log in via the Playwright browser and inject the tokens into the session."""
