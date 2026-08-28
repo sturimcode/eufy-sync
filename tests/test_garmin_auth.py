@@ -222,6 +222,58 @@ def test_force_reauth_falls_back_to_browser(monkeypatch):
     assert result is fake
 
 
+# ---------------------------------------------------------------------------
+# Persisting tokens the library rotated during the run
+# ---------------------------------------------------------------------------
+
+
+def _dumping(blob) -> MagicMock:
+    """A fake Garmin whose client.dumps() returns the given blob as JSON."""
+    fake = MagicMock()
+    fake.client.dumps.return_value = json.dumps(blob)
+    return fake
+
+
+def test_save_if_changed_stores_a_rotated_blob(monkeypatch):
+    rotated = dict(BLOB, di_refresh_token="rotated")
+    stored = {}
+    monkeypatch.setattr("eufy_sync.credentials.get_token", lambda name: dict(BLOB))
+    monkeypatch.setattr("eufy_sync.credentials.store_token",
+                        lambda name, data: stored.update({name: data}))
+    _auth().save_if_changed(_dumping(rotated))
+    assert stored == {"garmin": rotated}
+
+
+def test_save_if_changed_skips_an_identical_blob(monkeypatch):
+    calls = []
+    monkeypatch.setattr("eufy_sync.credentials.get_token", lambda name: dict(BLOB))
+    monkeypatch.setattr("eufy_sync.credentials.store_token",
+                        lambda name, data: calls.append(name))
+    _auth().save_if_changed(_dumping(dict(BLOB)))
+    assert calls == []   # nothing rotated, nothing written
+
+
+def test_save_if_changed_rejects_a_blob_load_token_would_refuse(monkeypatch):
+    # di_token as a dict is the old Playwright shape; storing it would leave a
+    # blob the next run refuses to restore.
+    calls = []
+    monkeypatch.setattr("eufy_sync.credentials.get_token", lambda name: None)
+    monkeypatch.setattr("eufy_sync.credentials.store_token",
+                        lambda name, data: calls.append(name))
+    _auth().save_if_changed(_dumping({"di_token": {"access_token": "x"}}))
+    assert calls == []
+
+
+def test_save_if_changed_swallows_a_dumps_failure(monkeypatch):
+    calls = []
+    monkeypatch.setattr("eufy_sync.credentials.store_token",
+                        lambda name, data: calls.append(name))
+    fake = MagicMock()
+    fake.client.dumps.side_effect = RuntimeError("no session")
+    _auth().save_if_changed(fake)   # must not raise
+    assert calls == []
+
+
 def test_exchange_ticket_returns_tokens_and_client_id():
     from eufy_sync.garmin_auth import _exchange_ticket_for_tokens
     resp = MagicMock(status_code=200)
