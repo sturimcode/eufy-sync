@@ -142,6 +142,36 @@ def test_write_run_script_creates_executable_wrapper(tmp_path):
         assert oct(script.stat().st_mode)[-3:] == "755"
 
 
+def test_write_run_script_rotates_the_log_before_exec(tmp_path):
+    # launchd appends to StandardOutPath forever and never rotates, so the
+    # wrapper does it: past 1 MB, sync.log moves onto sync.log.1.
+    from eufy_sync.cli import shared
+    from eufy_sync.platform_support.macos import _write_run_script
+    with patch("eufy_sync.cli.shared.DATA_DIR", tmp_path):
+        content = _write_run_script("/home/user/.local/bin/eufy-sync").read_text()
+
+    assert f'log="{shared.LOG_FILE}"' in content
+    # BSD stat; this script only ever runs on macOS.
+    assert '[ "$(stat -f%z "$log" 2>/dev/null || echo 0)" -gt 1048576 ]' in content
+    assert 'mv -f "$log" "$log.1"' in content
+    # Rotation happens while nothing new has been written, and the exec is
+    # outside the if, so a skipped roll still starts the sync.
+    assert content.index("mv -f") < content.index("\nfi\n") < content.index("exec ")
+
+
+def test_write_run_script_rotation_cannot_stop_the_sync(tmp_path):
+    # Every step of the roll is best-effort: an unreadable size falls back to 0
+    # (no rotation) and a failed move is swallowed, so neither ends the run
+    # before the sync starts.
+    from eufy_sync.platform_support.macos import _write_run_script
+    with patch("eufy_sync.cli.shared.DATA_DIR", tmp_path):
+        content = _write_run_script("/home/user/.local/bin/eufy-sync").read_text()
+
+    assert "|| echo 0" in content
+    assert 'mv -f "$log" "$log.1" 2>/dev/null || true' in content
+    assert content.rstrip().endswith('exec "/home/user/.local/bin/eufy-sync" --headless')
+
+
 def test_write_run_script_is_byte_stable_across_installs(tmp_path):
     # macOS re-announces background items when the registered file changes;
     # a second install with the same binary must not rewrite the script.
