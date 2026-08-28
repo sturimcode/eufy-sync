@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -198,31 +198,130 @@ def test_upload_propagates_rate_limit_without_reauth():
 # Issue #48: deleting our weight-only entry so the full record replaces it
 # ---------------------------------------------------------------------------
 
-def test_delete_weight_entry_matches_by_weight_and_deletes():
+UPLOADED_AT = datetime(2026, 7, 9, 7, 0, tzinfo=timezone.utc)
+DATE_STR = UPLOADED_AT.astimezone().strftime("%Y-%m-%d")
+
+
+def _millis(dt: datetime) -> int:
+    """Garmin reports weigh-in timestamps as epoch milliseconds."""
+    return int(dt.timestamp() * 1000)
+
+
+def _weigh_ins(*entries):
     fake = MagicMock()
-    fake.get_daily_weigh_ins.return_value = {"dateWeightList": [
+    fake.get_daily_weigh_ins.return_value = {"dateWeightList": list(entries)}
+    return fake
+
+
+def test_delete_weight_entry_matches_by_weight_and_deletes():
+    """Garmin returning no timestamps at all leaves weight as the only
+    evidence; a single match still stands on its own."""
+    fake = _weigh_ins(
         {"samplePk": 111, "weight": 92500.0},   # someone else's 92.5 kg entry
         {"samplePk": 222, "weight": 85000.0},   # our 85.0 kg weight-only upload
-    ]}
+    )
     client = _client_with_fake_garmin(fake)
 
-    dt = datetime(2026, 7, 9, 7, 0, tzinfo=timezone.utc)
-    assert client.delete_weight_entry(dt, 85.0) is True
+    assert client.delete_weight_entry(UPLOADED_AT, 85.0) is True
 
-    date_str = dt.astimezone().strftime("%Y-%m-%d")
-    fake.get_daily_weigh_ins.assert_called_once_with(date_str)
-    fake.delete_weigh_in.assert_called_once_with(222, date_str)
+    fake.get_daily_weigh_ins.assert_called_once_with(DATE_STR)
+    fake.delete_weigh_in.assert_called_once_with(222, DATE_STR)
 
 
 def test_delete_weight_entry_no_match_deletes_nothing():
-    fake = MagicMock()
-    fake.get_daily_weigh_ins.return_value = {"dateWeightList": [
-        {"samplePk": 111, "weight": 92500.0},
-    ]}
+    fake = _weigh_ins({"samplePk": 111, "weight": 92500.0})
     client = _client_with_fake_garmin(fake)
 
-    assert client.delete_weight_entry(datetime(2026, 7, 9, 7, 0, tzinfo=timezone.utc), 85.0) is False
+    assert client.delete_weight_entry(UPLOADED_AT, 85.0) is False
     fake.delete_weigh_in.assert_not_called()
+
+
+def test_delete_weight_entry_matches_on_weight_and_timestamp():
+    fake = _weigh_ins(
+        {"samplePk": 111, "weight": 92500.0, "timestampGMT": _millis(UPLOADED_AT)},
+        {"samplePk": 222, "weight": 85000.0, "timestampGMT": _millis(UPLOADED_AT)},
+    )
+    client = _client_with_fake_garmin(fake)
+
+    assert client.delete_weight_entry(UPLOADED_AT, 85.0) is True
+    fake.delete_weigh_in.assert_called_once_with(222, DATE_STR)
+
+
+def test_delete_weight_entry_picks_the_entry_stamped_at_our_upload():
+    """Two entries within the weight window on the same day: only the one
+    stamped at the instant we uploaded is ours. Matching on weight alone used
+    to delete whichever came first in the list, which could be a manual
+    weigh-in at a similar weight."""
+    manual = UPLOADED_AT + timedelta(hours=5)
+    fake = _weigh_ins(
+        {"samplePk": 111, "weight": 85030.0, "timestampGMT": _millis(manual)},
+        {"samplePk": 222, "weight": 85000.0, "timestampGMT": _millis(UPLOADED_AT)},
+    )
+    client = _client_with_fake_garmin(fake)
+
+    assert client.delete_weight_entry(UPLOADED_AT, 85.0) is True
+    fake.delete_weigh_in.assert_called_once_with(222, DATE_STR)
+
+
+def test_delete_weight_entry_spares_a_manual_weigh_in_at_another_time():
+    """The single entry near our weight is stamped hours away, so it is not
+    the one we uploaded. Nothing is deleted; the caller uploads anyway."""
+    fake = _weigh_ins(
+        {"samplePk": 111, "weight": 85000.0,
+         "timestampGMT": _millis(UPLOADED_AT + timedelta(hours=6))},
+    )
+    client = _client_with_fake_garmin(fake)
+
+    assert client.delete_weight_entry(UPLOADED_AT, 85.0) is False
+    fake.delete_weigh_in.assert_not_called()
+
+
+def test_delete_weight_entry_leaves_two_close_timestamps_alone():
+    """Both entries fall inside the weight and time windows, so neither can be
+    identified as ours. Fail open to the duplicate rather than guess."""
+    fake = _weigh_ins(
+        {"samplePk": 111, "weight": 85000.0,
+         "timestampGMT": _millis(UPLOADED_AT + timedelta(seconds=30))},
+        {"samplePk": 222, "weight": 85020.0, "timestampGMT": _millis(UPLOADED_AT)},
+    )
+    client = _client_with_fake_garmin(fake)
+
+    assert client.delete_weight_entry(UPLOADED_AT, 85.0) is False
+    fake.delete_weigh_in.assert_not_called()
+
+
+def test_delete_weight_entry_leaves_untimed_duplicates_alone():
+    """No timestamps and two entries in the weight window: still ambiguous."""
+    fake = _weigh_ins(
+        {"samplePk": 111, "weight": 85030.0},
+        {"samplePk": 222, "weight": 85000.0},
+    )
+    client = _client_with_fake_garmin(fake)
+
+    assert client.delete_weight_entry(UPLOADED_AT, 85.0) is False
+    fake.delete_weigh_in.assert_not_called()
+
+
+def test_delete_weight_entry_accepts_the_date_field_as_the_instant():
+    """Garmin's timestampGMT and date differ by the device's UTC offset and
+    are not consistent about which carries the true instant, so a match on
+    either counts."""
+    fake = _weigh_ins({"samplePk": 222, "weight": 85000.0, "date": _millis(UPLOADED_AT)})
+    client = _client_with_fake_garmin(fake)
+
+    assert client.delete_weight_entry(UPLOADED_AT, 85.0) is True
+    fake.delete_weigh_in.assert_called_once_with(222, DATE_STR)
+
+
+def test_delete_weight_entry_ignores_unusable_timestamp_fields():
+    """A null or non-numeric timestamp is no timestamp; the entry falls back
+    to the weight-only path instead of failing to parse."""
+    fake = _weigh_ins({"samplePk": 222, "weight": 85000.0,
+                       "timestampGMT": None, "date": "2026-07-09"})
+    client = _client_with_fake_garmin(fake)
+
+    assert client.delete_weight_entry(UPLOADED_AT, 85.0) is True
+    fake.delete_weigh_in.assert_called_once_with(222, DATE_STR)
 
 
 def test_delete_weight_entry_fails_open_on_api_error():
