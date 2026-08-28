@@ -444,6 +444,127 @@ def test_all_targets_auth_failure_raises(tmp_path: Path):
     state.close()
 
 
+def _run_dual_sync(user, state, measurements, garmin_upload=None, strava_upload=None):
+    """Run sync_user with both targets faked. garmin_upload/strava_upload are
+    passed straight to the upload mocks as side_effect, so a test can make one
+    or both give up. Returns (counts, errors, fake_garmin, fake_strava)."""
+    fake_eufy = MagicMock()
+    fake_eufy.authenticate.return_value = None
+    fake_eufy.fetch_measurements.return_value = measurements
+    fake_eufy.close.return_value = None
+
+    fake_garmin = MagicMock()
+    fake_garmin.authenticate.return_value = None
+    fake_garmin.has_weight_on_date.return_value = False
+    fake_garmin.upload_body_composition.side_effect = garmin_upload
+    if garmin_upload is None:
+        fake_garmin.upload_body_composition.return_value = {"ok": True}
+    fake_garmin.close.return_value = None
+
+    fake_strava = MagicMock()
+    fake_strava.authenticate.return_value = None
+    fake_strava.update_weight.side_effect = strava_upload
+    if strava_upload is None:
+        fake_strava.update_weight.return_value = {"weight": None}
+    fake_strava.close.return_value = None
+
+    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=fake_garmin), \
+         patch("eufy_sync.strava_client.StravaClient", return_value=fake_strava), \
+         patch("eufy_sync.sync.time.sleep"):
+        counts, errors = sync_user(user, state, backfill_days=7, headless=True)
+
+    return counts, errors, fake_garmin, fake_strava
+
+
+def test_garmin_upload_failure_does_not_stop_strava(tmp_path: Path):
+    """A session that dies mid-run must drop Garmin alone. Before the fix the
+    PermanentSyncError escaped sync_user and Strava - which was healthy - lost
+    the rest of the run too. The reauth hint must come back in errors, intact
+    enough for the CLI to key its notification off."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_and_strava_user()
+
+    first = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+    second = _measurement(84.7, datetime(2026, 5, 11, 8, 0, tzinfo=timezone.utc))
+
+    from eufy_sync.sync import PermanentSyncError
+    dead_session = PermanentSyncError(
+        "Garmin session expired. Re-authenticate: run eufy-sync --reauth garmin"
+    )
+
+    counts, errors, fake_garmin, fake_strava = _run_dual_sync(
+        user, state, [first, second], garmin_upload=dead_session,
+    )
+
+    assert "--reauth" in errors["garmin"]
+    assert "strava" not in errors
+    assert counts["strava"] == 2
+    assert counts["garmin"] == 0
+
+    # Garmin is dropped after the first failure, not retried per measurement.
+    assert fake_garmin.upload_body_composition.call_count == 1
+    weights = [call.args[0] for call in fake_strava.update_weight.call_args_list]
+    assert weights == [85.0, 84.7]
+
+    # Nothing is recorded for the upload that failed.
+    assert not state.is_synced(user.name, first.measurement_id, "garmin")
+    assert state.is_synced(user.name, first.measurement_id, "strava")
+    assert state.is_synced(user.name, second.measurement_id, "strava")
+
+    state.close()
+
+
+def test_all_upload_failures_return_errors_without_raising(tmp_path: Path):
+    """With every target dropped there is nothing left to sync, but sync_user
+    still returns: the caller turns a non-empty errors dict into failures and
+    exit code 1."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_and_strava_user()
+
+    first = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+    second = _measurement(84.7, datetime(2026, 5, 11, 8, 0, tzinfo=timezone.utc))
+
+    from eufy_sync.sync import PermanentSyncError
+
+    counts, errors, fake_garmin, fake_strava = _run_dual_sync(
+        user, state, [first, second],
+        garmin_upload=PermanentSyncError("Garmin session expired. Re-authenticate: run eufy-sync --reauth garmin"),
+        strava_upload=PermanentSyncError("Strava token rejected"),
+    )
+
+    assert set(errors) == {"garmin", "strava"}
+    assert counts == {"garmin": 0, "strava": 0}
+    # Both dropped on the first measurement; the second is never attempted.
+    assert fake_garmin.upload_body_composition.call_count == 1
+    assert fake_strava.update_weight.call_count == 1
+
+    state.close()
+
+
+def test_exhausted_retries_drop_only_the_failing_target(tmp_path: Path):
+    """The containment is not limited to permanent errors: a transient failure
+    that outlives MAX_RETRIES drops that target too, and the other keeps
+    syncing."""
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_and_strava_user()
+
+    measurement = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
+
+    counts, errors, fake_garmin, fake_strava = _run_dual_sync(
+        user, state, [measurement],
+        strava_upload=RuntimeError("all connection attempts failed"),
+    )
+
+    assert "all connection attempts failed" in errors["strava"]
+    assert "garmin" not in errors
+    assert counts["garmin"] == 1
+    from eufy_sync.sync import MAX_RETRIES
+    assert fake_strava.update_weight.call_count == MAX_RETRIES
+
+    state.close()
+
+
 def test_other_source_same_day_entry_is_still_skipped(tmp_path: Path):
     """When Garmin already has an entry for the date but WE never synced
     anything for that local date ourselves (e.g. another source/device
