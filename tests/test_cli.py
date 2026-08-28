@@ -97,6 +97,24 @@ def test_write_config_overwrites_existing(tmp_path: Path):
     assert loaded["version"] == 2
 
 
+def test_interrupted_config_write_keeps_previous_file(tmp_path: Path):
+    """config.yaml is replaced atomically: a write that dies partway through
+    must leave the previous contents intact instead of truncating the file in
+    place and stranding the user with an empty config."""
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {"users": [{"name": "default"}]})
+    before = config_path.read_bytes()
+
+    with patch("eufy_sync.cli.shared.yaml.dump", side_effect=RuntimeError("disk full")), \
+         pytest.raises(RuntimeError):
+        _write_config(config_path, {"users": [{"name": "replacement"}]})
+
+    assert config_path.read_bytes() == before
+    # No partial temp file left behind (the temp name carries the writer pid).
+    leftovers = list(config_path.parent.glob(config_path.name + ".*.tmp"))
+    assert leftovers == []
+
+
 # --- Launch Agent tests ---
 
 
