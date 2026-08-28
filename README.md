@@ -89,7 +89,7 @@ eufy-sync --update-password    # change stored passwords
 # automation
 eufy-sync --install-agent      # turn automatic sync on
 eufy-sync --uninstall-agent    # turn automatic sync off
-eufy-sync --headless           # never prompt; fail with a reauth message instead (for scheduled runs)
+eufy-sync --headless           # never prompt; log back in on its own if the session died (for scheduled runs)
 
 # maintenance
 eufy-sync --update             # update to the latest version
@@ -151,7 +151,7 @@ WantedBy=timers.target
 systemctl --user enable --now eufy-sync.timer
 ```
 
-If a login expires later, the sync fails with a message naming the `--reauth` command; run it over SSH the same way. The one Eufy quirk hits hardest here: the cloud only has data after the phone app has processed the weigh-in (see Known quirks).
+If a login expires later, the scheduled run logs back in from the stored password without asking. It only stops when Garmin demands a security code or the password is wrong, and the message then names the command to run over SSH. The one Eufy quirk hits hardest here: the cloud only has data after the phone app has processed the weigh-in (see Known quirks).
 
 ## Adding Strava
 

@@ -490,7 +490,7 @@ def test_garmin_upload_failure_does_not_stop_strava(tmp_path: Path):
 
     from eufy_sync.sync import PermanentSyncError
     dead_session = PermanentSyncError(
-        "Garmin session expired. Re-authenticate: run eufy-sync --reauth garmin"
+        "Garmin wants an MFA code and no one is here to type it. Run: eufy-sync --reauth garmin"
     )
 
     counts, errors, fake_garmin, fake_strava = _run_dual_sync(
@@ -529,7 +529,7 @@ def test_all_upload_failures_return_errors_without_raising(tmp_path: Path):
 
     counts, errors, fake_garmin, fake_strava = _run_dual_sync(
         user, state, [first, second],
-        garmin_upload=PermanentSyncError("Garmin session expired. Re-authenticate: run eufy-sync --reauth garmin"),
+        garmin_upload=PermanentSyncError("Garmin wants an MFA code and no one is here to type it. Run: eufy-sync --reauth garmin"),
         strava_upload=PermanentSyncError("Strava token rejected"),
     )
 
