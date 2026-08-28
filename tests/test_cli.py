@@ -319,6 +319,9 @@ def test_uninstall_clears_keychain_for_configured_user_name(
         f"_uninstall should clear keychain for the configured username, got {deleted_accounts}"
     )
     assert "elias:garmin" in deleted_accounts
+    # The Strava client secret lives in the vault too, so --uninstall has to
+    # name it as well or it survives the uninstall.
+    assert "elias:strava" in deleted_accounts
 
 
 @patch("eufy_sync.platform_support.macos.LAUNCH_AGENT_PATH")
@@ -617,6 +620,126 @@ def test_migration_skips_env_var_reference_passwords(_keyring, tmp_path):
 
     written = yaml.safe_load(config_path.read_text())
     assert written["users"][0]["eufy"]["password"] == "${EUFY_PASSWORD}"
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_first_run_setup_keeps_the_strava_secret_out_of_the_yaml(_keyring, tmp_path):
+    """A fresh install must never write the client secret to config.yaml -
+    otherwise new users land in exactly the state the migration exists to
+    clean up."""
+    from eufy_sync.cli.setup import _first_run_setup
+    from eufy_sync.credentials import get_password
+
+    config_path = tmp_path / "config.yaml"
+    answers = ["e@example.com", "n", "y", "12345", "sekrit"]
+
+    with patch("builtins.input", side_effect=answers), \
+         patch("getpass.getpass", return_value="eufy-pw"), \
+         patch("eufy_sync.eufy_client.EufyClient", side_effect=RuntimeError("offline")), \
+         patch("eufy_sync.strava_client.authorize_strava", return_value={}):
+        _first_run_setup(config_path)
+
+    assert get_password("default:strava") == "sekrit"
+    assert get_password("default:eufy") == "eufy-pw"
+    written = yaml.safe_load(config_path.read_text())
+    assert written["users"][0]["strava"] == {"client_id": "12345"}
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_migration_moves_strava_client_secret_to_the_vault(_keyring, tmp_path):
+    """The Strava API client secret used to be the one secret left in plain
+    text in config.yaml. The migration must move it into the credential store
+    and delete the key, the same as the account passwords."""
+    from eufy_sync.cli.setup import _migrate_config_passwords
+    from eufy_sync.credentials import get_password
+
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {
+        "users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com"},
+            "strava": {"client_id": "12345", "client_secret": "s3cr3t"},
+        }],
+    })
+
+    _migrate_config_passwords(config_path)
+
+    assert get_password("default:strava") == "s3cr3t"
+    written = yaml.safe_load(config_path.read_text())
+    assert "client_secret" not in written["users"][0]["strava"]
+    # The public client id stays in the YAML.
+    assert written["users"][0]["strava"]["client_id"] == "12345"
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=True)
+def test_migration_skips_env_var_reference_strava_secret(_keyring, tmp_path):
+    """A ${VAR} client secret is a deliberate env-var reference, resolved by
+    config.py's interpolation. Storing the literal placeholder would win over
+    the YAML from then on and break the setup."""
+    from eufy_sync.cli.setup import _migrate_config_passwords
+
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {
+        "users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com"},
+            "strava": {"client_id": "12345", "client_secret": "${STRAVA_SECRET}"},
+        }],
+    })
+
+    with patch("eufy_sync.credentials.store_password") as mock_store:
+        _migrate_config_passwords(config_path)
+
+    mock_store.assert_not_called()
+
+    written = yaml.safe_load(config_path.read_text())
+    assert written["users"][0]["strava"]["client_secret"] == "${STRAVA_SECRET}"
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_setup_strava_stores_secret_in_vault_and_strips_yaml_key(_keyring, tmp_path):
+    """--setup-strava writes only the client id to the YAML, and clears any
+    secret an earlier version already wrote there."""
+    from eufy_sync.cli.setup import _setup_strava
+    from eufy_sync.credentials import get_password
+
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {
+        "users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com"},
+            "strava": {"client_id": "old-id", "client_secret": "old-plaintext"},
+        }],
+    })
+
+    with patch("builtins.input", side_effect=["12345", "new-secret"]), \
+         patch("eufy_sync.strava_client.authorize_strava", return_value={}):
+        _setup_strava(config_path)
+
+    assert get_password("default:strava") == "new-secret"
+    written = yaml.safe_load(config_path.read_text())
+    assert written["users"][0]["strava"] == {"client_id": "12345"}
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_reauth_strava_resolves_secret_from_vault(_keyring, tmp_path):
+    """_reauth built StravaConfig straight from the YAML, so after the
+    migration removed the key it would have raised KeyError."""
+    from eufy_sync.cli.maintenance import _reauth
+    from eufy_sync.credentials import store_password
+
+    store_password("default:strava", "vault-secret")
+    config = {
+        "users": [{
+            "name": "default",
+            "strava": {"client_id": "12345"},
+        }],
+    }
+
+    with patch("eufy_sync.strava_client.authorize_strava") as mock_auth:
+        _reauth(tmp_path / "config.yaml", config=config, target="strava")
+
+    assert mock_auth.call_args.args[0].client_secret == "vault-secret"
 
 
 def test_setup_strava_exits_cleanly_on_oauth_failure(tmp_path, capsys):

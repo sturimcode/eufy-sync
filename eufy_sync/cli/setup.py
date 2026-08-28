@@ -73,10 +73,12 @@ def _first_run_setup(config_path: Path) -> None:
     # 0o600 file when there is no keychain) - never into config.yaml.
     _store_passwords(user_name, eufy_password, garmin_password)
 
-    from eufy_sync.credentials import active_store_label
+    from eufy_sync.credentials import active_store_label, store_password
+    if strava_config:
+        store_password(f"{user_name}:strava", strava_config["client_secret"])
     print(f"Passwords saved to the {active_store_label()}.")
 
-    # Config YAML stores only emails, never passwords.
+    # Config YAML stores only emails and the public client id, never secrets.
     user_config: dict = {
         "name": user_name,
         "eufy": {"email": eufy_email},
@@ -84,7 +86,7 @@ def _first_run_setup(config_path: Path) -> None:
     if garmin_email:
         user_config["garmin"] = {"email": garmin_email}
     if strava_config:
-        user_config["strava"] = strava_config
+        user_config["strava"] = {"client_id": strava_config["client_id"]}
 
     # On a shared account, pick the right person before the first sync.
     try:
@@ -160,7 +162,14 @@ def _setup_strava(config_path: Path) -> None:
     strava_config = _prompt_strava_credentials()
 
     user = config["users"][0]
-    user["strava"] = strava_config
+    user_name = user.get("name", "default")
+
+    from eufy_sync.credentials import store_password
+    store_password(f"{user_name}:strava", strava_config["client_secret"])
+
+    # Only the public client id belongs in the YAML. Drop a secret an earlier
+    # version wrote there, or it would linger in plaintext beside the new one.
+    user["strava"] = {"client_id": strava_config["client_id"]}
     shared._write_config(config_path, config)
 
     print("Strava credentials saved. Starting authorization...")
@@ -209,6 +218,16 @@ def _migrate_config_passwords(config_path: Path) -> None:
                 store_password(key, pw)
                 del user[service]["password"]
                 changed = True
+
+        # The Strava API client secret is a secret like any other, but it sat
+        # in the YAML until now. Same env-reference rule: a ${VAR} placeholder
+        # is a deliberate indirection, and storing it literally would win over
+        # the YAML forever and break the setup.
+        secret = user.get("strava", {}).get("client_secret")
+        if secret and not re.fullmatch(r"\$\{\w+\}", secret):
+            store_password(f"{name}:strava", secret)
+            del user["strava"]["client_secret"]
+            changed = True
 
     if changed:
         shared._write_config(config_path, config)
