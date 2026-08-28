@@ -23,6 +23,8 @@ import httpx
 
 from garminconnect import Garmin, GarminConnectAuthenticationError
 
+from eufy_sync.prompt import PROMPT_TIMEOUT_SECONDS, input_with_timeout
+
 logger = logging.getLogger(__name__)
 
 # Garmin OAuth2 / SSO endpoints (public app identifiers, not per-user secrets)
@@ -220,10 +222,18 @@ def _mfa_prompt() -> str:
     print("Garmin emailed a security code to your account address.")
     print("No email after a minute? The stored password is likely wrong; press Enter to cancel.")
     try:
-        code = input("Garmin MFA code: ").strip()
+        print("Garmin MFA code: ", end="", flush=True)
+        answer = input_with_timeout("", PROMPT_TIMEOUT_SECONDS)
     except (KeyboardInterrupt, EOFError):
         print("")
         raise GarminLoginCancelled("cancelled at the MFA prompt") from None
+    if answer is None:
+        # A login started from a failure toast can be left half-finished. Give
+        # up rather than hold the process open on a read nobody will answer;
+        # the caller turns this into the "run --update-password" advice.
+        print("")
+        raise GarminLoginCancelled("no MFA code entered within 5 minutes")
+    code = answer.strip()
     if not code:
         raise GarminLoginCancelled("no MFA code entered")
     return code

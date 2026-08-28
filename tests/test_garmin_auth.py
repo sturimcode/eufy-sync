@@ -212,6 +212,18 @@ def test_mfa_prompt_returns_stripped_code(monkeypatch):
     assert _mfa_prompt() == "123456"
 
 
+def test_mfa_prompt_cancels_when_nobody_answers(monkeypatch):
+    """An MFA prompt left unanswered used to hold the process open for as long
+    as the window stayed on screen. Cancelling routes it into the existing
+    "the stored password is likely wrong" advice instead."""
+    from eufy_sync.garmin_auth import GarminLoginCancelled, _mfa_prompt
+    monkeypatch.setattr("eufy_sync.garmin_auth.input_with_timeout",
+                        lambda *args: None)
+    with pytest.raises(GarminLoginCancelled) as exc_info:
+        _mfa_prompt()
+    assert "5 minutes" in str(exc_info.value)
+
+
 def _fail_on_browser(monkeypatch):
     """Make either half of the browser fallback fail the test outright. A hidden
     scheduled run must never put a Chromium window on screen."""
