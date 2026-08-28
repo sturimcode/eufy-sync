@@ -73,9 +73,55 @@ def test_install_writes_wrapper_with_doubled_quote_escaping(data_dir):
     # bracketed by four quotes on the left and two on the right. A wrong quote
     # level here silently breaks the hidden-window run, so pin the exact bytes.
     assert content.startswith('Set shell = CreateObject("WScript.Shell")\r\n')
-    assert 'shell.Run "cmd /c """"' in content
+    assert 'shell.Run("cmd /c """"' in content
     assert f'""""{binary}""' in content
-    assert content.endswith(', 0, False\r\n')
+    assert content.endswith(', 0, True)\r\n')
+
+
+def test_wrapper_waits_and_exits_with_the_sync_exit_code(data_dir):
+    """Task Scheduler reads LastTaskResult off wscript's exit code. A
+    fire-and-forget Run hands back 0 the instant the sync starts, so every run
+    records success whatever the sync did - which is how 24 days of failing
+    runs went unnoticed on a real install. Run must wait, and its return value
+    must become wscript's."""
+    binary = "C:\\Tools\\eufy-sync.exe"
+    content = windows._wrapper_content(binary)
+
+    assert "WScript.Quit shell.Run(" in content
+    # bWaitOnReturn True, window style still 0 so no console flashes.
+    assert content.endswith(", 0, True)\r\n")
+    assert ", 0, False" not in content
+
+
+def test_wrapper_rotates_the_log_past_one_megabyte(data_dir):
+    """The log is appended to on every run and nothing else trims it, so the
+    wrapper rolls it over past 1 MB and keeps one previous generation."""
+    binary = "C:\\Tools\\eufy-sync.exe"
+    log = str(data_dir / "sync.log")
+    content = windows._wrapper_content(binary)
+
+    assert 'Set fso = CreateObject("Scripting.FileSystemObject")\r\n' in content
+    assert f'If fso.FileExists("{log}") Then\r\n' in content
+    assert f'If fso.GetFile("{log}").Size > 1048576 Then\r\n' in content
+    # The previous generation is dropped before the move: MoveFile refuses to
+    # overwrite an existing destination.
+    assert f'If fso.FileExists("{log}.1") Then fso.DeleteFile "{log}.1"\r\n' in content
+    assert f'fso.MoveFile "{log}", "{log}.1"\r\n' in content
+
+
+def test_only_the_rotation_is_wrapped_in_resume_next(data_dir):
+    """A rotation that fails (a stray lock, a full disk) must cost us the log
+    roll and nothing else. The error guard covers the rotation block alone; the
+    launch sits outside it and keeps reporting its own failures."""
+    content = windows._wrapper_content("C:\\Tools\\eufy-sync.exe")
+
+    assert content.count("On Error Resume Next") == 1
+    before, rest = content.split("On Error Resume Next", 1)
+    guarded, after = rest.split("On Error GoTo 0", 1)
+
+    assert "fso.MoveFile" in guarded
+    assert "WScript.Quit" not in guarded
+    assert "WScript.Quit shell.Run(" in after
 
 
 def test_unchanged_wrapper_is_not_rewritten(data_dir):
