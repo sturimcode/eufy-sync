@@ -55,13 +55,44 @@ def _wrapper_content(binary_path: str) -> str:
     The inner command already contains quotes (around the binary path and the
     log path), so every one of them is doubled before it is embedded in the
     Run string literal.
+
+    Run is called with bWaitOnReturn True and its return value goes straight to
+    WScript.Quit, so wscript exits with the sync's own exit code. Launched
+    fire-and-forget, wscript returns 0 the moment it hands the command off and
+    Task Scheduler's LastTaskResult reads 0 forever, whatever the sync did -
+    which is how 24 days of failing runs went unnoticed on a real install.
+
+    Rotation belongs here, ahead of the launch, and not in Python: this is the
+    only moment when nothing holds the log open. Once the run starts, cmd's
+    `>>` keeps a handle on the file in a sharing mode that refuses the rename.
     """
     log = str(shared.LOG_FILE)
+    rotated = f"{log}.1"
     inner = f'cmd /c ""{binary_path}" --headless >> "{log}" 2>&1"'
     escaped = inner.replace('"', '""')
+    # The rotation block spells the paths out as standalone VBScript string
+    # literals, so the same doubling rule applies to them. A Windows filename
+    # cannot hold a double quote, so this never fires in practice; it is here so
+    # no path can turn the generated script into something that will not parse.
+    log_lit = log.replace('"', '""')
+    rotated_lit = rotated.replace('"', '""')
     return (
         'Set shell = CreateObject("WScript.Shell")\r\n'
-        f'shell.Run "{escaped}", 0, False\r\n'
+        'Set fso = CreateObject("Scripting.FileSystemObject")\r\n'
+        # Roll the log over past 1 MB and keep one previous generation, so an
+        # unattended install cannot grow sync.log without bound. A failed
+        # rotation (a stray lock, a full disk) must never cost us the sync, so
+        # errors are swallowed across this block and only this block: the launch
+        # below stays outside the guard and keeps reporting its own failures.
+        'On Error Resume Next\r\n'
+        f'If fso.FileExists("{log_lit}") Then\r\n'
+        f'  If fso.GetFile("{log_lit}").Size > 1048576 Then\r\n'
+        f'    If fso.FileExists("{rotated_lit}") Then fso.DeleteFile "{rotated_lit}"\r\n'
+        f'    fso.MoveFile "{log_lit}", "{rotated_lit}"\r\n'
+        '  End If\r\n'
+        'End If\r\n'
+        'On Error GoTo 0\r\n'
+        f'WScript.Quit shell.Run("{escaped}", 0, True)\r\n'
     )
 
 
