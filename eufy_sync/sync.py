@@ -60,9 +60,10 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
 
     Returns (counts, errors): counts maps target name to the number of
     measurements synced; errors maps target name to a failure message for
-    any target whose authenticate() call failed. The two dicts are disjoint
-    over target names - a target with an error was dropped from the run and
-    has no count.
+    any target that failed to authenticate or whose upload gave up. Either
+    failure drops that target from the rest of the run, so the other target
+    keeps syncing. A target that uploaded some measurements before its upload
+    failed appears in both dicts: the count is what actually landed.
 
     repair_days re-syncs the last N days even for measurements our state
     already calls synced (issue #58): the target can have lost data we
@@ -155,7 +156,8 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 logger.warning("Skipping invalid measurement: %s (%.1f kg)", m.measurement_id, m.weight_kg)
                 continue
 
-            for target_name, client in targets:
+            # Snapshot: a failing upload rebuilds `targets` mid-loop.
+            for target_name, client in list(targets):
                 if repair and target_name == "strava" and m.measurement_id != strava_repair_id:
                     continue
 
@@ -221,41 +223,56 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                         )
                     continue
 
-                if target_name == "garmin":
-                    if upgrade_row is not None:
-                        # Fail-open (returns False, never raises): if the old
-                        # entry can't be removed, upload anyway - the worst
-                        # case is the duplicate this fix exists to prevent,
-                        # while the body comp still arrives.
-                        client.delete_weight_entry(
-                            datetime.fromisoformat(upgrade_row["measurement_timestamp"]),
-                            upgrade_row["weight_kg"],
+                # An upload that _retry gives up on (permanent, or retries
+                # exhausted) kills this target only. A dead Garmin session
+                # used to abort sync_user and take Strava down with it, even
+                # though Strava was fine. Same containment the auth loop above
+                # already has: record the message, drop the target, keep going.
+                try:
+                    if target_name == "garmin":
+                        if upgrade_row is not None:
+                            # Fail-open (returns False, never raises): if the old
+                            # entry can't be removed, upload anyway - the worst
+                            # case is the duplicate this fix exists to prevent,
+                            # while the body comp still arrives.
+                            client.delete_weight_entry(
+                                datetime.fromisoformat(upgrade_row["measurement_timestamp"]),
+                                upgrade_row["weight_kg"],
+                            )
+                        result = _retry(
+                            lambda: client.upload_body_composition(body_comp),
+                            f"Garmin upload ({m.measurement_id})",
                         )
-                    result = _retry(
-                        lambda: client.upload_body_composition(body_comp),
-                        f"Garmin upload ({m.measurement_id})",
-                    )
-                else:
-                    result = _retry(
-                        lambda: client.update_weight(m.weight_kg),
-                        f"Strava upload ({m.measurement_id})",
-                    )
-                response_str = json.dumps(result) if result else None
+                    else:
+                        result = _retry(
+                            lambda: client.update_weight(m.weight_kg),
+                            f"Strava upload ({m.measurement_id})",
+                        )
+                    response_str = json.dumps(result) if result else None
 
-                if not synced_already:
-                    state.record_sync(
-                        user_name=user.name,
-                        measurement_id=m.measurement_id,
-                        measurement_timestamp=m.timestamp.isoformat(),
-                        weight_kg=m.weight_kg,
-                        synced_at=datetime.now(timezone.utc).isoformat(),
-                        target=target_name,
-                        response=response_str,
-                        weight_only=m.weight_only,
-                    )
-                if upgrade_row is not None:
-                    state.mark_upgraded(user.name, upgrade_row["measurement_id"], "garmin")
-                    logger.info("Upgraded weight-only entry to full body comp for %s", m.timestamp.date())
+                    if not synced_already:
+                        state.record_sync(
+                            user_name=user.name,
+                            measurement_id=m.measurement_id,
+                            measurement_timestamp=m.timestamp.isoformat(),
+                            weight_kg=m.weight_kg,
+                            synced_at=datetime.now(timezone.utc).isoformat(),
+                            target=target_name,
+                            response=response_str,
+                            weight_only=m.weight_only,
+                        )
+                    if upgrade_row is not None:
+                        state.mark_upgraded(user.name, upgrade_row["measurement_id"], "garmin")
+                        logger.info("Upgraded weight-only entry to full body comp for %s", m.timestamp.date())
+                except Exception as e:
+                    logger.error("Upload to %s failed for %s: %s", target_name, user.name, e)
+                    # str(e) carries the actionable text the CLI keys its
+                    # notification off (e.g. the "--reauth" hint), so it must
+                    # reach the caller unwrapped.
+                    errors[target_name] = str(e)
+                    targets = [t for t in targets if t[0] != target_name]
+                    continue
+
                 counts[target_name] += 1
                 lb = m.weight_kg * 2.20462
                 detail = "full body comp" if target_name == "garmin" else "weight only"
@@ -263,6 +280,11 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
 
                 # Small delay between uploads to avoid rate limiting
                 time.sleep(1 if target_name == "garmin" else 0.5)
+
+            if not targets:
+                # Every target dropped out; the remaining measurements have
+                # nowhere to go.
+                break
 
         return counts, errors
 

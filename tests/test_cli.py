@@ -916,6 +916,42 @@ def test_headless_success_clears_network_streak(
 @patch("eufy_sync.cli.setup._show_upgrade_notice")
 @patch("eufy_sync.cli.setup._migrate_config_passwords")
 @patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_per_target_upload_error_still_reaches_the_classifier(
+    _keyring, _migrate, _notice, _updates, mock_notify, _summary, tmp_path
+):
+    """A dead Garmin session mid-upload is now contained inside sync_user and
+    reported through the errors dict instead of raising. The message text must
+    survive that trip, or the run ends on the generic 'failed' toast instead of
+    the actionable re-login one."""
+    from eufy_sync.cli.app import main
+
+    config_path = _write_synced_config(tmp_path)
+    db_path = tmp_path / "state.db"
+
+    def fake_sync_user(user, state, **kwargs):
+        return {"strava": 2}, {
+            "garmin": "Garmin session expired. Re-authenticate: run eufy-sync --reauth garmin",
+        }
+
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path), "--headless"]
+    with patch("eufy_sync.sync.sync_user", side_effect=fake_sync_user), \
+         patch("sys.argv", argv), \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    mock_notify.assert_any_call(
+        "eufy-sync: re-login needed", "Run: eufy-sync --reauth garmin",
+        command="eufy-sync --reauth garmin",
+    )
+
+
+@patch("eufy_sync.cli.status._print_summary")
+@patch("eufy_sync.platform_support.notify")
+@patch("eufy_sync.cli.updater._check_for_updates")
+@patch("eufy_sync.cli.setup._show_upgrade_notice")
+@patch("eufy_sync.cli.setup._migrate_config_passwords")
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
 @patch("eufy_sync.cli.app.sys.stdin")
 def test_interactive_transient_failure_notifies_immediately(
     mock_stdin, _keyring, _migrate, _notice, _updates, mock_notify, _summary, tmp_path
