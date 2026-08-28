@@ -88,6 +88,16 @@ def load_config(path: Path) -> AppConfig:
     with open(path) as f:
         raw = yaml.safe_load(f)
 
+    # An empty file parses to None and a stray top-level list parses to a list;
+    # both used to reach raw.get("users") and die on AttributeError, and a
+    # missing or empty users list died on a bare KeyError. None of those name
+    # the file or say what to do about it.
+    if not isinstance(raw, dict) or not isinstance(raw.get("users"), list) or not raw["users"]:
+        raise ValueError(
+            f"No users found in {path}. The file is empty or malformed. "
+            f"Restore it from a backup, or delete it and run eufy-sync to set up again."
+        )
+
     raw = _walk_and_interpolate(raw)
 
     if len(raw.get("users", [])) > 1:
