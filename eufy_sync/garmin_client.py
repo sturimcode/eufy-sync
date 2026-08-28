@@ -4,7 +4,7 @@ python-garminconnect; keeps a same-date duplicate check.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from garminconnect import GarminConnectAuthenticationError, GarminConnectConnectionError
 
@@ -13,6 +13,58 @@ from eufy_sync.garmin_auth import GarminAuth
 from eufy_sync.transform import GarminBodyComposition
 
 logger = logging.getLogger(__name__)
+
+# A Garmin entry counts as the weigh-in we uploaded when its weight is within
+# this much of ours and its own timestamp is within this many seconds of the
+# instant we sent. The weight window absorbs the gram/kg rounding; the time
+# window absorbs Garmin re-stamping an upload by a few seconds, while staying
+# far short of a separate weigh-in.
+_WEIGHT_TOLERANCE_KG = 0.1
+_TIMESTAMP_TOLERANCE_SECONDS = 120
+
+
+def _entry_instants(entry: dict) -> list[datetime]:
+    """The instants a weigh-in entry could stand for.
+
+    Garmin returns timestampGMT and date as epoch milliseconds, and the two
+    differ by the recording device's UTC offset. Which one carries the true
+    instant is not consistent across sources, so both are treated as
+    candidates: matching either identifies our own upload, and a spurious
+    extra match only makes the delete ambiguous, which fails open to the
+    duplicate rather than removing someone else's entry.
+    """
+    instants = []
+    for field in ("timestampGMT", "date"):
+        millis = entry.get(field)
+        if isinstance(millis, bool) or not isinstance(millis, (int, float)):
+            continue
+        try:
+            instants.append(datetime.fromtimestamp(millis / 1000.0, timezone.utc))
+        except (OSError, OverflowError, ValueError):
+            continue
+    return instants
+
+
+def _match_uploaded_entry(entries: list[dict], uploaded_at: datetime) -> dict | None:
+    """Pick the one entry we uploaded at uploaded_at, or None when the answer
+    is not unique. Weight alone is not enough: a manual weigh-in on the same
+    day within the weight window would match too, and deleting it would throw
+    away data eufy-sync never created. Entries that carry a timestamp must
+    therefore match on it. Only when Garmin returns no timestamps at all does
+    a single weight match stand on its own - one response carries the same
+    fields for every entry, so the two cases do not mix in practice."""
+    timestamped = [e for e in entries if _entry_instants(e)]
+    if timestamped:
+        matches = [
+            e for e in timestamped
+            if any(
+                abs((instant - uploaded_at).total_seconds()) <= _TIMESTAMP_TOLERANCE_SECONDS
+                for instant in _entry_instants(e)
+            )
+        ]
+    else:
+        matches = entries
+    return matches[0] if len(matches) == 1 else None
 
 
 def _is_garmin_auth_failure(exc: Exception) -> bool:
@@ -53,24 +105,42 @@ class GarminClient:
             return False
 
     def delete_weight_entry(self, dt: datetime, weight_kg: float) -> bool:
-        """Delete the weigh-in we uploaded on dt's local date, matched by
-        weight. Used to replace a weight-only (raw Wi-Fi) upload once the
-        full body-comp record for the same weigh-in arrives (issue #48).
-        Fail-open: returns False when nothing matched or the API errored, and
-        the caller uploads anyway - the worst case is the duplicate we would
-        have had without this method."""
-        date_str = dt.astimezone().strftime("%Y-%m-%d")
+        """Delete the weigh-in we uploaded at dt, matched by weight and by the
+        entry's own timestamp. Used to replace a weight-only (raw Wi-Fi)
+        upload once the full body-comp record for the same weigh-in arrives
+        (issue #48).
+
+        dt is the instant that was uploaded (the stored
+        measurement_timestamp), not just any time on the right day - it is
+        what tells our entry apart from a manual weigh-in that happens to sit
+        within the weight window.
+
+        Fail-open: returns False when nothing matched, when the match was not
+        unique, or when the API errored, and the caller uploads anyway - the
+        worst case is the duplicate we would have had without this method,
+        which beats deleting an entry eufy-sync did not create."""
+        uploaded_at = dt if dt.tzinfo else dt.astimezone()
+        date_str = uploaded_at.astimezone().strftime("%Y-%m-%d")
         try:
             data = self._garmin.get_daily_weigh_ins(date_str)
-            for entry in data.get("dateWeightList", []):
-                entry_kg = entry.get("weight", 0) / 1000.0  # Garmin stores grams
-                if abs(entry_kg - weight_kg) <= 0.1:
-                    self._garmin.delete_weigh_in(entry["samplePk"], date_str)
-                    logger.info("Deleted weight-only entry (%.1f kg on %s) ahead of full body comp",
-                                weight_kg, date_str)
-                    return True
-            logger.warning("No weight entry near %.1f kg found on %s to replace", weight_kg, date_str)
-            return False
+            near = [
+                entry for entry in data.get("dateWeightList", [])
+                if abs(entry.get("weight", 0) / 1000.0 - weight_kg) <= _WEIGHT_TOLERANCE_KG
+            ]  # Garmin stores grams
+            match = _match_uploaded_entry(near, uploaded_at)
+            if match is None:
+                if near:
+                    logger.warning(
+                        "%d entries near %.1f kg on %s, none uniquely ours; leaving them alone",
+                        len(near), weight_kg, date_str,
+                    )
+                else:
+                    logger.warning("No weight entry near %.1f kg found on %s to replace", weight_kg, date_str)
+                return False
+            self._garmin.delete_weigh_in(match["samplePk"], date_str)
+            logger.info("Deleted weight-only entry (%.1f kg on %s) ahead of full body comp",
+                        weight_kg, date_str)
+            return True
         except Exception as e:
             logger.warning("Could not delete weight entry on %s: %s", date_str, e)
             return False
