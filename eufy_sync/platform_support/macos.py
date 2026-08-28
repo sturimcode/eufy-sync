@@ -92,9 +92,31 @@ def _write_run_script(binary_path: str) -> Path:
     once per release. Skipping the rewrite when content is unchanged is what
     keeps the file's identity stable. The filename is what macOS shows in that
     announcement, so it is a recognizable "eufy-sync-agent", not an opaque one.
+
+    The script also rotates the log, which nothing else does on macOS: the
+    agent hands both output streams to launchd via StandardOutPath /
+    StandardErrorPath, and launchd appends to that file for the life of the
+    install. stat -f%z is BSD syntax, which is all this script ever runs on.
     """
     script_path = shared.DATA_DIR / LAUNCH_WRAPPER_NAME
-    content = f'#!/bin/sh\nexec "{binary_path}" --headless\n'
+    log = str(shared.LOG_FILE)
+    content = (
+        "#!/bin/sh\n"
+        f'log="{log}"\n'
+        # Roll past 1 MB and keep one previous generation. launchd opens the log
+        # BEFORE this script starts, so our own stdout/stderr fd already points
+        # at it; a POSIX rename leaves that fd valid, which means THIS run's
+        # output follows the file into sync.log.1 and the fresh sync.log begins
+        # with the NEXT run. That one-run lag is accepted - copy-truncate would
+        # fight the handle launchd holds and buy nothing.
+        #
+        # Every step is best-effort and none of them gate the exec: an
+        # unreadable size or a failed move costs the roll, never the sync.
+        'if [ -f "$log" ] && [ "$(stat -f%z "$log" 2>/dev/null || echo 0)" -gt 1048576 ]; then\n'
+        '  mv -f "$log" "$log.1" 2>/dev/null || true\n'
+        "fi\n"
+        f'exec "{binary_path}" --headless\n'
+    )
     if script_path.exists() and script_path.read_text() == content:
         return script_path
     script_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
