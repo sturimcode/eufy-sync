@@ -419,6 +419,15 @@ def use_file_store() -> None:
             keyring.delete_password(SERVICE_NAME, VAULT_ACCOUNT)
         except Exception:
             pass
+        # An oversized vault also left numbered "vault:i" entries behind, each
+        # holding a slice of the same plaintext secrets. Deleting only the
+        # header hides them from every reader but leaves full copies in the
+        # keychain the user just opted out of. Best-effort: the file already
+        # holds the merged vault, so a failure here must not fail the switch.
+        try:
+            _delete_stale_chunks(1)
+        except Exception:
+            pass
 
 
 def use_keychain_store() -> None:

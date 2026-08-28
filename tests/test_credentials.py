@@ -805,6 +805,50 @@ def test_chunk_read_failure_raises_friendly_error(fake_keyring, cred_file, monke
         get_token("garmin")
 
 
+def test_use_file_store_deletes_chunk_entries_not_just_the_header(fake_keyring, cred_file):
+    """Leaving the keychain must take the numbered chunk entries with it.
+    Deleting only the header makes the leftovers invisible to every reader
+    while each one still holds a slice of the plaintext vault in the keychain
+    the user just opted out of."""
+    from eufy_sync.credentials import use_file_store, get_token, _active_backend
+
+    store_token("garmin", _big_token(3 * CHUNK_LIMIT))
+    header = json.loads(fake_keyring.get_password(SERVICE_NAME, VAULT_ACCOUNT))
+    n = header["__chunks__"]
+    assert n >= 3
+
+    use_file_store()
+
+    assert fake_keyring.get_password(SERVICE_NAME, VAULT_ACCOUNT) is None
+    for i in range(1, n + 1):
+        assert fake_keyring.get_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:{i}") is None
+
+    on_disk = json.loads(cred_file.read_text())
+    assert on_disk["explicit"] is True
+    assert on_disk["tokens"]["garmin"] == _big_token(3 * CHUNK_LIMIT)
+    assert _active_backend() == "file"
+    assert get_token("garmin") == _big_token(3 * CHUNK_LIMIT)
+
+
+def test_use_file_store_survives_a_failing_chunk_delete(fake_keyring, cred_file, monkeypatch):
+    """The file already holds the merged vault by the time the chunks are
+    cleaned up, so a keychain that refuses the delete must not fail the
+    switch and leave the user on neither store."""
+    from eufy_sync.credentials import use_file_store, get_token, _active_backend
+
+    store_token("garmin", _big_token(3 * CHUNK_LIMIT))
+
+    def boom(service, account):
+        raise OSError("keychain locked")
+
+    monkeypatch.setattr("keyring.delete_password", boom)
+
+    use_file_store()  # must not raise
+
+    assert _active_backend() == "file"
+    assert get_token("garmin") == _big_token(3 * CHUNK_LIMIT)
+
+
 def test_vault_exactly_at_chunk_limit_stays_single_entry(fake_keyring):
     """The chunking boundary is inclusive: a serialized vault whose length is
     exactly CHUNK_LIMIT still fits in one entry (the split only triggers above
