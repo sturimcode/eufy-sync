@@ -202,7 +202,11 @@ def _migrate_config_passwords(config_path: Path) -> None:
     for user in config.get("users", []):
         name = user.get("name", "default")
         for service in ["eufy", "garmin"]:
-            pw = user.get(service, {}).get("password")
+            # A hand-edited `eufy:` with nothing under it parses to None, not to
+            # a mapping, and the default in .get only applies to a missing key.
+            # Reading .get("password") off that None crashed every command that
+            # runs the migration, which is all of them.
+            pw = (user.get(service) or {}).get("password")
             if pw:
                 if re.fullmatch(r"\$\{\w+\}", pw):
                     # A deliberate ${VAR} env-var reference, not a literal
@@ -223,7 +227,7 @@ def _migrate_config_passwords(config_path: Path) -> None:
         # in the YAML until now. Same env-reference rule: a ${VAR} placeholder
         # is a deliberate indirection, and storing it literally would win over
         # the YAML forever and break the setup.
-        secret = user.get("strava", {}).get("client_secret")
+        secret = (user.get("strava") or {}).get("client_secret")
         if secret and not re.fullmatch(r"\$\{\w+\}", secret):
             store_password(f"{name}:strava", secret)
             del user["strava"]["client_secret"]
