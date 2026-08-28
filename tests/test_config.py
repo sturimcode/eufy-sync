@@ -91,3 +91,33 @@ def test_load_config_customer_id_coerced_to_str(_keyring, tmp_path: Path):
     assert cfg.users[0].eufy.customer_id == "12345"
 
 
+# --- Empty or shapeless config -----------------------------------------------
+#
+# A config that is not a mapping with a non-empty users list used to die on
+# AttributeError ('NoneType' object has no attribute 'get') or a bare KeyError.
+# Both callers print the exception text, so the message has to name the file
+# and the way out.
+
+
+@pytest.mark.parametrize("content", [
+    "",
+    "   \n\n   \n",
+    "- one\n- two\n",
+    "sync_interval_minutes: 15\n",
+    "users: []\n",
+    "users:\n",
+    "users: not-a-list\n",
+])
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_load_config_rejects_shapeless_document(_keyring, tmp_path: Path, content: str):
+    path = tmp_path / "config.yaml"
+    path.write_text(content)
+
+    with pytest.raises(ValueError) as exc:
+        load_config(path)
+
+    message = str(exc.value)
+    assert str(path) in message
+    assert "eufy-sync" in message
+
+
