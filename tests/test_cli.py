@@ -9,6 +9,7 @@ import yaml
 
 from eufy_sync.cli.shared import _write_config
 from eufy_sync.platform_support.macos import LAUNCH_AGENT_LABEL, LAUNCH_AGENT_PATH, _generate_plist
+from eufy_sync.prompt import PROMPT_TIMEOUT_SECONDS
 from eufy_sync.cli.maintenance import (
     _install_launch_agent,
     _uninstall,
@@ -895,6 +896,60 @@ def test_reauth_confirmation_on_non_tty_defaults_to_no():
         _reauth(Path("/nonexistent"), config=config, force=True)
 
     mock_auth.force_reauth.assert_not_called()
+
+
+def test_reauth_confirmation_timeout_keeps_the_current_login(capsys):
+    """An unanswered [y/N] once held this process (and a file lock on its own
+    tool venv) open for over two hours. The prompt now expires and takes the
+    documented default, No, so the run ends instead of parking."""
+    from eufy_sync.cli.maintenance import _reauth
+
+    config = {
+        "users": [{
+            "name": "default",
+            "garmin": {"email": "g@example.com"},
+        }],
+    }
+
+    mock_auth = MagicMock()
+    mock_auth.token_status.return_value = {"state": "valid"}
+
+    with patch("eufy_sync.garmin_auth.GarminAuth", return_value=mock_auth), \
+         patch("eufy_sync.config._get_password", return_value="pw"), \
+         patch("eufy_sync.cli.maintenance.input_with_timeout",
+               return_value=None) as mock_prompt, \
+         patch("eufy_sync.cli.maintenance.sys.stdin") as mock_stdin:
+        mock_stdin.isatty.return_value = True
+        _reauth(Path("/nonexistent"), config=config, force=True)
+
+    mock_auth.force_reauth.assert_not_called()
+    assert mock_prompt.call_args.args[1] == PROMPT_TIMEOUT_SECONDS
+    assert "No answer after 5 minutes" in capsys.readouterr().out
+
+
+def test_reauth_confirmation_still_honors_a_typed_yes():
+    """The timeout must not have changed what a present user gets: a "y" still
+    forces the re-auth the flag asked for."""
+    from eufy_sync.cli.maintenance import _reauth
+
+    config = {
+        "users": [{
+            "name": "default",
+            "garmin": {"email": "g@example.com"},
+        }],
+    }
+
+    mock_auth = MagicMock()
+    mock_auth.token_status.return_value = {"state": "valid"}
+
+    with patch("eufy_sync.garmin_auth.GarminAuth", return_value=mock_auth), \
+         patch("eufy_sync.config._get_password", return_value="pw"), \
+         patch("eufy_sync.cli.maintenance.input_with_timeout", return_value=" y "), \
+         patch("eufy_sync.cli.maintenance.sys.stdin") as mock_stdin:
+        mock_stdin.isatty.return_value = True
+        _reauth(Path("/nonexistent"), config=config, force=True)
+
+    mock_auth.force_reauth.assert_called_once()
 
 
 def test_status_with_no_config_exits_without_wizard(tmp_path, capsys):

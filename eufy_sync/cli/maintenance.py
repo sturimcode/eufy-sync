@@ -10,6 +10,7 @@ import yaml
 
 from eufy_sync import platform_support
 from eufy_sync.cli import shared
+from eufy_sync.prompt import PROMPT_TIMEOUT_SECONDS, input_with_timeout
 
 
 def _update_password(config_path: Path) -> None:
@@ -104,9 +105,17 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
                     print("Garmin re-auth skipped (already connected; run interactively to force).")
                     do_garmin = False
                 else:
-                    print("Garmin is already connected. Re-authenticate anyway? [y/N] ", end="")
-                    answer = input().strip()
-                    if not answer.lower().startswith("y"):
+                    print("Garmin is already connected. Re-authenticate anyway? [y/N] ", end="", flush=True)
+                    answer = input_with_timeout("", PROMPT_TIMEOUT_SECONDS)
+                    if answer is None:
+                        # This prompt is reached from a failure toast, so the
+                        # window can sit open with nobody reading it. Waiting
+                        # forever once kept the process (and its lock on the
+                        # tool venv) alive for hours; the default is No anyway.
+                        print("")
+                        print("No answer after 5 minutes; keeping the current Garmin login.")
+                        do_garmin = False
+                    elif not answer.strip().lower().startswith("y"):
                         print("Garmin re-auth skipped.")
                         do_garmin = False
 
