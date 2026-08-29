@@ -244,6 +244,59 @@ def test_upload_propagates_rate_limit_without_reauth():
 
 
 # ---------------------------------------------------------------------------
+# The duplicate check heals a dead session the same way upload does
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_check_relogs_in_silently_and_retries_when_headless():
+    # The duplicate check is the run's first Garmin call, so a token that
+    # expired between runs used to surface here as a warning on every
+    # scheduled sync. It must heal and answer instead.
+    from garminconnect import GarminConnectConnectionError
+    client = GarminClient(GarminConfig(email="g@example.com", password="pw"))
+    dead = MagicMock()
+    dead.get_body_composition.side_effect = GarminConnectConnectionError("API Error 401 - ")
+    fresh = MagicMock()
+    fresh.get_body_composition.return_value = {"dateWeightList": [{"weight": 86000}]}
+    client._garmin = dead
+    client._allow_interactive = False
+    with patch.object(client._auth, "silent_reauth", return_value=fresh) as reauth:
+        assert client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc)) is True
+    reauth.assert_called_once()
+    assert client._garmin is fresh   # later calls ride the healed session
+
+
+def test_duplicate_check_reauths_on_auth_error_when_interactive():
+    from garminconnect import GarminConnectAuthenticationError
+    client = GarminClient(GarminConfig(email="g@example.com", password="pw"))
+    dead = MagicMock()
+    dead.get_body_composition.side_effect = GarminConnectAuthenticationError("dead")
+    fresh = MagicMock()
+    fresh.get_body_composition.return_value = {"dateWeightList": []}
+    client._garmin = dead
+    client._allow_interactive = True
+    with patch.object(client._auth, "force_reauth", return_value=fresh) as reauth:
+        assert client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc)) is False
+    reauth.assert_called_once()
+
+
+def test_duplicate_check_fails_open_when_the_relogin_fails():
+    # A relogin that wants MFA must not end the run inside the duplicate
+    # check: fail open, and let the upload raise the error that carries the
+    # fix-it hint.
+    from garminconnect import GarminConnectConnectionError
+    from eufy_sync.sync import PermanentSyncError
+    client = GarminClient(GarminConfig(email="g@example.com", password="pw"))
+    dead = MagicMock()
+    dead.get_body_composition.side_effect = GarminConnectConnectionError("API Error 401 - ")
+    client._garmin = dead
+    client._allow_interactive = False
+    with patch.object(client._auth, "silent_reauth",
+                      side_effect=PermanentSyncError("Garmin wants an MFA code")):
+        assert client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc)) is False
+
+
+# ---------------------------------------------------------------------------
 # close() persists whatever the library rotated during the run
 # ---------------------------------------------------------------------------
 
@@ -411,3 +464,32 @@ def test_delete_weight_entry_fails_open_on_api_error():
     client = _client_with_fake_garmin(fake)
 
     assert client.delete_weight_entry(datetime(2026, 7, 9, 7, 0, tzinfo=timezone.utc), 85.0) is False
+
+
+def test_delete_weight_entry_relogs_in_and_retries_on_401():
+    """A dead session at delete time used to fail open and hand back the very
+    duplicate this method exists to prevent (issue #48). Heal and retry."""
+    from garminconnect import GarminConnectConnectionError
+    dead = MagicMock()
+    dead.get_daily_weigh_ins.side_effect = GarminConnectConnectionError("API Error 401 - ")
+    fresh = _weigh_ins({"samplePk": 222, "weight": 85000.0})
+    client = _client_with_fake_garmin(dead)
+    client._allow_interactive = False
+
+    with patch.object(client._auth, "silent_reauth", return_value=fresh) as reauth:
+        assert client.delete_weight_entry(UPLOADED_AT, 85.0) is True
+    reauth.assert_called_once()
+    fresh.delete_weigh_in.assert_called_once_with(222, DATE_STR)
+
+
+def test_delete_weight_entry_fails_open_when_the_relogin_fails():
+    from garminconnect import GarminConnectConnectionError
+    from eufy_sync.sync import PermanentSyncError
+    dead = MagicMock()
+    dead.get_daily_weigh_ins.side_effect = GarminConnectConnectionError("API Error 401 - ")
+    client = _client_with_fake_garmin(dead)
+    client._allow_interactive = False
+
+    with patch.object(client._auth, "silent_reauth",
+                      side_effect=PermanentSyncError("Garmin wants an MFA code")):
+        assert client.delete_weight_entry(UPLOADED_AT, 85.0) is False

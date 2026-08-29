@@ -90,15 +90,48 @@ class GarminClient:
         self._garmin = self._auth.login(interactive=allow_interactive)
         logger.info("Authenticated to Garmin Connect as %s", self.config.email)
 
+    def _reauth(self) -> None:
+        """Replace a dead session with a fresh login, prompting when a person
+        is present. A scheduled run has nobody to prompt, but a password login
+        usually needs no input at all, so it tries once silently rather than
+        ending the run on a re-auth nag the run could have fixed itself. When
+        even that cannot proceed (MFA demanded, password wrong), the error
+        already names the command to run and travels to the caller unchanged."""
+        if not self._allow_interactive:
+            logger.info("Garmin session expired; re-authenticating without prompts")
+            self._garmin = self._auth.silent_reauth()
+        else:
+            logger.info("Garmin session expired; re-authenticating")
+            self._garmin = self._auth.force_reauth()
+
+    def _call_with_reauth(self, call):
+        """Run a Garmin call, re-logging in once when the session is dead.
+
+        The duplicate check is the run's first Garmin call, so a token that
+        expired between runs used to fail here on every scheduled sync before
+        upload's own healing could kick in. Non-auth errors, and anything the
+        relogin or the retry raises, travel to the caller unchanged."""
+        try:
+            return call()
+        except (GarminConnectAuthenticationError, GarminConnectConnectionError) as e:
+            if not _is_garmin_auth_failure(e):
+                raise
+            self._reauth()
+            return call()
+
     def has_weight_on_date(self, dt: datetime) -> bool:
         """Whether Garmin already has a weight entry for the date."""
         # Query by LOCAL calendar date: uploads are now filed under the local
         # date (see transform.py), so the duplicate check must match that.
         date_str = dt.astimezone().strftime("%Y-%m-%d")
-        try:
+
+        def read() -> bool:
             data = self._garmin.get_body_composition(date_str, date_str)
             entries = data.get("dateWeightList", data.get("dailyWeightSummaries", []))
             return len(entries) > 0
+
+        try:
+            return self._call_with_reauth(read)
         except Exception as e:
             # Fail open: let the upload proceed; Garmin de-dupes by timestamp.
             logger.warning("Garmin duplicate-check failed for %s: %s", date_str, e)
@@ -121,7 +154,10 @@ class GarminClient:
         which beats deleting an entry eufy-sync did not create."""
         uploaded_at = dt if dt.tzinfo else dt.astimezone()
         date_str = uploaded_at.astimezone().strftime("%Y-%m-%d")
-        try:
+
+        def find_and_delete() -> bool:
+            # Safe to retry whole after a relogin: a dead session fails on the
+            # lookup, before anything was deleted.
             data = self._garmin.get_daily_weigh_ins(date_str)
             near = [
                 entry for entry in data.get("dateWeightList", [])
@@ -141,6 +177,9 @@ class GarminClient:
             logger.info("Deleted weight-only entry (%.1f kg on %s) ahead of full body comp",
                         weight_kg, date_str)
             return True
+
+        try:
+            return self._call_with_reauth(find_and_delete)
         except Exception as e:
             logger.warning("Could not delete weight entry on %s: %s", date_str, e)
             return False
@@ -162,24 +201,9 @@ class GarminClient:
         )
 
     def upload_body_composition(self, body_comp: GarminBodyComposition) -> dict:
-        try:
-            result = self._add_body_composition(body_comp)
-        except (GarminConnectAuthenticationError, GarminConnectConnectionError) as e:
-            if not _is_garmin_auth_failure(e):
-                raise  # transient connection error; let _retry handle it
-            # Restored session is dead (token expired or revoked, seen as a 401).
-            if not self._allow_interactive:
-                # Nobody to prompt, but a password login usually needs no input
-                # at all, so try it once rather than ending the run on a
-                # re-auth nag the run could have fixed itself. If it cannot
-                # (MFA demanded, password wrong), that error already names the
-                # command to run and travels to the caller unchanged.
-                logger.info("Garmin session expired; re-authenticating without prompts")
-                self._garmin = self._auth.silent_reauth()
-            else:
-                logger.info("Garmin session expired; re-authenticating")
-                self._garmin = self._auth.force_reauth()
-            result = self._add_body_composition(body_comp)
+        # Transient connection errors propagate to _retry; only a dead session
+        # (token expired or revoked, seen as a 401) heals and retries here.
+        result = self._call_with_reauth(lambda: self._add_body_composition(body_comp))
         logger.info(
             "Uploaded body comp to Garmin: %.1f kg at %s",
             body_comp.weight, body_comp.timestamp,
