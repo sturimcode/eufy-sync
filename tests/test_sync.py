@@ -72,7 +72,7 @@ def test_duplicate_insert_rejected(tmp_path: Path):
 
     try:
         state.record_sync("user1", "m1", "2024-04-01T12:00:00+00:00", 86.2, "2024-04-01T12:02:00+00:00", target="garmin")
-        assert False, "Should have raised"
+        raise AssertionError("Should have raised")
     except sqlite3.IntegrityError:
         pass
 
@@ -291,14 +291,15 @@ def test_latest_timestamp_is_target_agnostic(tmp_path: Path):
 
 
 def test_ambiguous_profile_error_is_permanent():
-    from eufy_sync.sync import _is_permanent
     from eufy_sync.eufy_client import AmbiguousProfileError
+    from eufy_sync.sync import _is_permanent
     assert _is_permanent(AmbiguousProfileError([])) is True
 
 
 def test_rate_limit_error_is_permanent():
-    from eufy_sync.sync import _is_permanent
     from garminconnect import GarminConnectTooManyRequestsError
+
+    from eufy_sync.sync import _is_permanent
     assert _is_permanent(GarminConnectTooManyRequestsError("429")) is True
 
 
@@ -437,7 +438,7 @@ def test_all_targets_auth_failure_raises(tmp_path: Path):
          patch("eufy_sync.sync.time.sleep"):
         try:
             sync_user(user, state, backfill_days=7)
-            assert False, "Should have raised"
+            raise AssertionError("Should have raised")
         except RuntimeError as e:
             assert "Garmin dead token" in str(e)
 
@@ -923,8 +924,9 @@ def test_latest_sync_timestamp_filters_by_target(tmp_path: Path):
 
 
 def test_has_synced_on_date_ignores_skipped_rows(tmp_path: Path):
-    from eufy_sync.state import SKIPPED_IN_GARMIN_RESPONSE
     from datetime import date
+
+    from eufy_sync.state import SKIPPED_IN_GARMIN_RESPONSE
 
     state = SyncState(tmp_path / "test.db")
     d = date(2026, 5, 10)

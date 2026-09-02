@@ -13,7 +13,4 @@ venv/
 dist/
 build/
 *.plist
-CLAUDE.md
-.claude/
 uv.lock
-.superpowers/

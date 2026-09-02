@@ -1,10 +1,10 @@
 """Sync Eufy smart scale body composition data to Garmin Connect and Strava."""
 
-__version__ = "1.10.2"
+__version__ = "1.11.0"
 
 # Public API for programmatic use
-from eufy_sync.garmin_auth import GarminAuth
 from eufy_sync.eufy_client import EufyClient, EufyMeasurement
+from eufy_sync.garmin_auth import GarminAuth
 from eufy_sync.strava_client import StravaClient
 from eufy_sync.transform import GarminBodyComposition, transform
 

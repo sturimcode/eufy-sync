@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from eufy_sync.cli.updater import _check_for_updates
+import pytest
+
 from eufy_sync.cli.shared import UPDATE_CHECK_INTERVAL
+from eufy_sync.cli.updater import _check_for_updates
+
+
+@pytest.fixture(autouse=True)
+def _no_browser_extra(monkeypatch):
+    # The dev venv may carry Playwright; the pins below assume the base install.
+    monkeypatch.setitem(sys.modules, "playwright", None)
 
 
 def _mock_pypi_response(version: str) -> MagicMock:
@@ -118,7 +127,7 @@ def test_self_update_uses_pinned_pipx_when_available():
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
          patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
-         patch("eufy_sync.cli.updater.shutil.which", return_value="/usr/local/bin/pipx"), \
+         patch("eufy_sync.install.shutil.which", return_value="/usr/local/bin/pipx"), \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
         _self_update()
 
@@ -165,8 +174,8 @@ def test_self_update_uses_uv_when_installed_via_uv_tool():
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
          patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
-         patch("eufy_sync.cli.updater.sys.executable", "/Users/x/.local/share/uv/tools/eufy-sync/bin/python"), \
-         patch("eufy_sync.cli.updater.shutil.which", return_value="/usr/local/bin/uv"), \
+         patch("eufy_sync.install.sys.executable", "/Users/x/.local/share/uv/tools/eufy-sync/bin/python"), \
+         patch("eufy_sync.install.shutil.which", return_value="/usr/local/bin/uv"), \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
         _self_update()
 
@@ -182,8 +191,8 @@ def test_self_update_uses_uv_for_windows_uv_tool_path():
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
          patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
-         patch("eufy_sync.cli.updater.sys.executable", win_exe), \
-         patch("eufy_sync.cli.updater.shutil.which", return_value="C:\\Users\\x\\uv.exe"), \
+         patch("eufy_sync.install.sys.executable", win_exe), \
+         patch("eufy_sync.install.shutil.which", return_value="C:\\Users\\x\\uv.exe"), \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
         _self_update()
 
@@ -199,8 +208,8 @@ def test_self_update_windows_quotes_spaced_executable_path():
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
          patch("eufy_sync.cli.updater.platform.system", return_value="Windows"), \
-         patch("eufy_sync.cli.updater.sys.executable", spaced), \
-         patch("eufy_sync.cli.updater.shutil.which", return_value=None), \
+         patch("eufy_sync.install.sys.executable", spaced), \
+         patch("eufy_sync.install.shutil.which", return_value=None), \
          patch("eufy_sync.cli.updater.subprocess.Popen") as mock_popen:
         _self_update()
 
@@ -212,11 +221,12 @@ def test_self_update_windows_quotes_spaced_executable_path():
 def test_self_update_uses_pip_when_no_pipx():
     # Pinned to Darwin so a Windows host exercises this inline path too.
     import sys as _sys
+
     from eufy_sync.cli.updater import _self_update
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
          patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
-         patch("eufy_sync.cli.updater.shutil.which", return_value=None), \
+         patch("eufy_sync.install.shutil.which", return_value=None), \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
         _self_update()
 
@@ -242,7 +252,7 @@ def test_self_update_reports_failed_install(capsys):
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
          patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
-         patch("eufy_sync.cli.updater.shutil.which", return_value="/usr/local/bin/pipx"), \
+         patch("eufy_sync.install.shutil.which", return_value="/usr/local/bin/pipx"), \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=1)):
         _self_update()
 
@@ -256,7 +266,7 @@ def test_self_update_on_windows_uses_detached_console():
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
          patch("eufy_sync.cli.updater.platform.system", return_value="Windows"), \
-         patch("eufy_sync.cli.updater.shutil.which", return_value="C:\\pipx\\pipx.exe"), \
+         patch("eufy_sync.install.shutil.which", return_value="C:\\pipx\\pipx.exe"), \
          patch("eufy_sync.cli.updater.subprocess.run") as mock_run, \
          patch("eufy_sync.cli.updater.subprocess.Popen") as mock_popen:
         _self_update()
@@ -279,10 +289,32 @@ def test_self_update_on_darwin_runs_inline():
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
          patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
-         patch("eufy_sync.cli.updater.shutil.which", return_value="/usr/local/bin/pipx"), \
+         patch("eufy_sync.install.shutil.which", return_value="/usr/local/bin/pipx"), \
          patch("eufy_sync.cli.updater.subprocess.Popen") as mock_popen, \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
         _self_update()
 
     mock_popen.assert_not_called()
     assert mock_run.call_args.args[0] == ["pipx", "install", "--force", "eufy-sync==9.9.9"]
+
+
+def test_self_update_keeps_the_browser_extra_when_installed(monkeypatch):
+    # Reinstalling "eufy-sync==X" through uv or pipx replaces the whole tool
+    # venv, so an update would silently drop Playwright for anyone who opted
+    # into the browser fallback. The pin has to carry the extra along.
+    import importlib.machinery
+    import types
+
+    from eufy_sync.cli.updater import _self_update
+    present = types.ModuleType("playwright")
+    present.__spec__ = importlib.machinery.ModuleSpec("playwright", None)
+    monkeypatch.setitem(sys.modules, "playwright", present)
+    with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
+         patch("eufy_sync.install.sys.executable", "/Users/x/.local/share/uv/tools/eufy-sync/bin/python"), \
+         patch("eufy_sync.install.shutil.which", return_value="/usr/local/bin/uv"), \
+         patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        _self_update()
+
+    assert mock_run.call_args.args[0] == ["uv", "tool", "install", "--force", "eufy-sync[browser]==9.9.9"]

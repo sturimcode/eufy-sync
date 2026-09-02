@@ -3,12 +3,18 @@ from __future__ import annotations
 import json
 import os
 import stat
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from eufy_sync.credentials import _keyring_available
+from eufy_sync.credentials import (
+    CHUNK_LIMIT,
+    SERVICE_NAME,
+    VAULT_ACCOUNT,
+    _keyring_available,
+    get_token,
+    store_token,
+)
 
 
 def _make_fake_backend(module: str):
@@ -56,7 +62,7 @@ class _FakeKeyringStore:
         try:
             del self.data[(service, account)]
         except KeyError:
-            raise keyring.errors.PasswordDeleteError("not found")
+            raise keyring.errors.PasswordDeleteError("not found") from None
 
     def accounts_written(self) -> set[str]:
         """Every distinct account name ever set_password'd, service-agnostic."""
@@ -92,7 +98,7 @@ def cred_file(tmp_path, monkeypatch):
 
 
 def test_keychain_backend_round_trip_password(fake_keyring, cred_file):
-    from eufy_sync.credentials import store_password, get_password, delete_password
+    from eufy_sync.credentials import delete_password, get_password, store_password
 
     store_password("default:eufy", "hunter2")
     assert get_password("default:eufy") == "hunter2"
@@ -102,7 +108,7 @@ def test_keychain_backend_round_trip_password(fake_keyring, cred_file):
 
 
 def test_keychain_backend_round_trip_token(fake_keyring, cred_file):
-    from eufy_sync.credentials import store_token, get_token, delete_token
+    from eufy_sync.credentials import delete_token, get_token, store_token
 
     store_token("garmin", {"di_token": "abc"})
     assert get_token("garmin") == {"di_token": "abc"}
@@ -130,7 +136,7 @@ def test_storing_a_second_secret_does_not_clobber_the_first(fake_keyring, cred_f
     """Read-modify-write integrity: every secret shares one vault, so a store
     must load, add one key, and save the whole object. If it wrote only the new
     key, the earlier secrets would vanish."""
-    from eufy_sync.credentials import store_password, store_token, get_password, get_token
+    from eufy_sync.credentials import get_password, get_token, store_password, store_token
 
     store_password("default:eufy", "pw1")
     store_token("garmin", {"di_token": "b"})
@@ -145,7 +151,7 @@ def test_storing_a_second_secret_does_not_clobber_the_first(fake_keyring, cred_f
 
 
 def test_file_backend_round_trip(no_keyring, cred_file):
-    from eufy_sync.credentials import store_password, get_password, delete_password, store_token, get_token
+    from eufy_sync.credentials import delete_password, get_password, get_token, store_password, store_token
 
     store_password("default:eufy", "hunter2")
     assert get_password("default:eufy") == "hunter2"
@@ -175,7 +181,7 @@ def test_file_backend_never_touches_keyring(no_keyring, cred_file):
     """When the file backend is active, keyring.set_password/get_password
     must never be called - prevents a hybrid state where secrets leak into
     both places."""
-    from eufy_sync.credentials import store_password, get_password, store_token, get_token
+    from eufy_sync.credentials import get_password, get_token, store_password, store_token
 
     with patch("keyring.set_password") as mock_set, patch("keyring.get_password") as mock_get:
         store_password("default:eufy", "hunter2")
@@ -192,6 +198,7 @@ def test_file_backend_never_touches_keyring(no_keyring, cred_file):
 
 def test_lazy_migration_promotes_legacy_password_then_reads_vault_only(fake_keyring, cred_file):
     import keyring
+
     from eufy_sync.credentials import SERVICE_NAME, get_password
 
     # Seed the legacy single-item layout directly via the fake keyring.
@@ -208,6 +215,7 @@ def test_lazy_migration_promotes_legacy_password_then_reads_vault_only(fake_keyr
 
 def test_lazy_migration_promotes_legacy_token(fake_keyring, cred_file):
     import keyring
+
     from eufy_sync.credentials import SERVICE_NAME, get_token
 
     keyring.set_password(SERVICE_NAME, "token:garmin", json.dumps({"di_token": "abc"}))
@@ -223,12 +231,17 @@ def test_lazy_migration_promotes_legacy_token(fake_keyring, cred_file):
 
 
 def test_use_file_store_moves_vault_from_keychain_to_file(fake_keyring, cred_file):
-    from eufy_sync.credentials import (
-        store_password, store_token, use_file_store, _active_backend,
-        get_password, get_token,
-    )
     import keyring
-    from eufy_sync.credentials import SERVICE_NAME
+
+    from eufy_sync.credentials import (
+        SERVICE_NAME,
+        _active_backend,
+        get_password,
+        get_token,
+        store_password,
+        store_token,
+        use_file_store,
+    )
 
     store_password("default:eufy", "pw1")
     store_token("garmin", {"di_token": "abc"})
@@ -262,8 +275,13 @@ def test_use_file_store_moves_vault_from_keychain_to_file(fake_keyring, cred_fil
 
 def test_use_keychain_store_moves_vault_from_file_to_keychain(fake_keyring, cred_file):
     from eufy_sync.credentials import (
-        store_password, store_token, use_file_store, use_keychain_store,
-        _active_backend, get_password, get_token,
+        _active_backend,
+        get_password,
+        get_token,
+        store_password,
+        store_token,
+        use_file_store,
+        use_keychain_store,
     )
 
     store_password("default:eufy", "pw1")
@@ -292,7 +310,7 @@ def test_use_keychain_store_raises_cleanly_when_keyring_unavailable(no_keyring, 
 def test_auto_fallback_creates_file_and_persists_token_with_no_keychain(no_keyring, cred_file):
     """The headless-Linux fix: with no keychain and no CRED_FILE yet,
     store_token must still persist (to a 0o600 file), not silently no-op."""
-    from eufy_sync.credentials import store_token, get_token, _active_backend
+    from eufy_sync.credentials import _active_backend, get_token, store_token
 
     assert not cred_file.exists()
     assert _active_backend() == "file"
@@ -322,6 +340,7 @@ def test_malformed_file_vault_json_returns_none_not_crash(no_keyring, cred_file)
 
 def test_malformed_keychain_vault_json_returns_none_not_crash(fake_keyring, cred_file):
     import keyring
+
     from eufy_sync.credentials import SERVICE_NAME, get_password, get_token
 
     keyring.set_password(SERVICE_NAME, "vault", "{not valid json::")
@@ -433,7 +452,7 @@ def test_cli_use_file_store_exits_one_when_keychain_unreadable(tmp_path, capsys)
 
 
 def test_unmarked_file_with_keyring_is_ignored(fake_keyring, cred_file):
-    from eufy_sync.credentials import _active_backend, store_password, get_password
+    from eufy_sync.credentials import _active_backend, get_password, store_password
 
     cred_file.parent.mkdir(parents=True, exist_ok=True)
     cred_file.write_text(json.dumps({"passwords": {"default:eufy": "stray-pw"}, "tokens": {}}))
@@ -450,7 +469,7 @@ def test_unmarked_file_with_keyring_is_ignored(fake_keyring, cred_file):
 def test_unmarked_file_without_keyring_stays_file(no_keyring, cred_file):
     """Headless auto-fallback: the file it creates has no marker, and it must
     keep being the active backend on every later run."""
-    from eufy_sync.credentials import _active_backend, store_token, get_token
+    from eufy_sync.credentials import _active_backend, get_token, store_token
 
     store_token("eufy", {"access_token": "t"})
 
@@ -496,7 +515,7 @@ def test_non_utf8_file_counts_as_unmarked(fake_keyring, cred_file):
 
 
 def test_use_file_store_sets_marker_and_activates_file(fake_keyring, cred_file):
-    from eufy_sync.credentials import use_file_store, _active_backend, store_password, get_password
+    from eufy_sync.credentials import _active_backend, get_password, store_password, use_file_store
 
     store_password("default:eufy", "pw1")
 
@@ -511,7 +530,7 @@ def test_use_file_store_sets_marker_and_activates_file(fake_keyring, cred_file):
 def test_use_file_store_merges_keychain_and_stray_file(fake_keyring, cred_file):
     """Opting in must not lose secrets from either side: union of both vaults,
     with the currently active store (the keychain here) winning conflicts."""
-    from eufy_sync.credentials import use_file_store, store_token
+    from eufy_sync.credentials import store_token, use_file_store
 
     store_token("garmin", {"di_token": "keychain-A"})
     store_token("shared", {"v": "keychain"})
@@ -532,7 +551,7 @@ def test_use_file_store_merges_keychain_and_stray_file(fake_keyring, cred_file):
 
 
 def test_use_file_store_is_idempotent_on_marked_file(fake_keyring, cred_file):
-    from eufy_sync.credentials import use_file_store, store_password
+    from eufy_sync.credentials import store_password, use_file_store
 
     store_password("default:eufy", "pw1")
     use_file_store()
@@ -548,7 +567,7 @@ def test_use_file_store_aborts_when_keychain_unreadable(fake_keyring, cred_file,
     change nothing. Writing the marker over a file that lacks the unread
     keychain secrets would orphan them permanently. Even with existing file
     contents present, the safe move is to stop and let the user retry."""
-    from eufy_sync.credentials import use_file_store, _active_backend
+    from eufy_sync.credentials import _active_backend, use_file_store
 
     def boom(service, account):
         raise OSError("keychain locked")
@@ -596,7 +615,7 @@ def test_interrupted_file_save_keeps_previous_vault(fake_keyring, cred_file):
     """The vault file is replaced atomically: a write that dies partway
     through must leave the previous contents (and the opt-in marker) intact
     instead of truncating the file in place."""
-    from eufy_sync.credentials import use_file_store, store_token, _active_backend
+    from eufy_sync.credentials import _active_backend, store_token, use_file_store
 
     use_file_store()
     store_token("garmin", {"di_token": "abc"})
@@ -615,7 +634,7 @@ def test_interrupted_file_save_keeps_previous_vault(fake_keyring, cred_file):
 def test_marker_survives_store_token_round_trip(fake_keyring, cred_file):
     """_normalize_vault must preserve the marker, or the first write after
     opting in would silently flip the backend to the keychain again."""
-    from eufy_sync.credentials import use_file_store, store_token, _active_backend
+    from eufy_sync.credentials import _active_backend, store_token, use_file_store
 
     use_file_store()
     store_token("garmin", {"di_token": "abc"})
@@ -631,8 +650,13 @@ def test_marker_survives_store_token_round_trip(fake_keyring, cred_file):
 
 def test_use_keychain_store_strips_marker_and_unlinks_file(fake_keyring, cred_file):
     import keyring
+
     from eufy_sync.credentials import (
-        SERVICE_NAME, store_password, use_file_store, use_keychain_store, get_password,
+        SERVICE_NAME,
+        get_password,
+        store_password,
+        use_file_store,
+        use_keychain_store,
     )
 
     store_password("default:eufy", "pw1")
@@ -652,6 +676,7 @@ def test_use_keychain_store_stray_file_does_not_overwrite_keychain(fake_keyring,
     the keychain must not let its leftover values clobber real keychain
     secrets. Union is still kept: file-only keys survive the move."""
     import keyring
+
     from eufy_sync.credentials import SERVICE_NAME, store_password, use_keychain_store
 
     store_password("default:eufy", "real-pw")  # active backend: keychain
@@ -676,7 +701,7 @@ def test_keychain_read_failure_raises_actionable_error_and_writes_nothing(fake_k
     """If the keychain cannot be read, returning an empty vault would let the
     next save overwrite the real vault with a near-empty one. The read must
     raise with an actionable message instead, and nothing may be written."""
-    from eufy_sync.credentials import get_token, get_password
+    from eufy_sync.credentials import get_password, get_token
 
     def boom(service, account):
         raise OSError("keychain locked")
@@ -732,15 +757,6 @@ def test_doctor_keychain_line_reflects_file_store(monkeypatch):
 # keychain backend splits an oversized vault across numbered entries. A vault
 # that fits keeps today's single-entry shape, so existing installs never see
 # a migration.
-
-from eufy_sync.credentials import (
-    CHUNK_LIMIT,
-    SERVICE_NAME,
-    VAULT_ACCOUNT,
-    store_token,
-    get_token,
-)
-
 
 def _big_token(size: int) -> dict:
     return {"access_token": "x" * size}
@@ -810,7 +826,7 @@ def test_use_file_store_deletes_chunk_entries_not_just_the_header(fake_keyring, 
     Deleting only the header makes the leftovers invisible to every reader
     while each one still holds a slice of the plaintext vault in the keychain
     the user just opted out of."""
-    from eufy_sync.credentials import use_file_store, get_token, _active_backend
+    from eufy_sync.credentials import _active_backend, get_token, use_file_store
 
     store_token("garmin", _big_token(3 * CHUNK_LIMIT))
     header = json.loads(fake_keyring.get_password(SERVICE_NAME, VAULT_ACCOUNT))
@@ -834,7 +850,7 @@ def test_use_file_store_survives_a_failing_chunk_delete(fake_keyring, cred_file,
     """The file already holds the merged vault by the time the chunks are
     cleaned up, so a keychain that refuses the delete must not fail the
     switch and leave the user on neither store."""
-    from eufy_sync.credentials import use_file_store, get_token, _active_backend
+    from eufy_sync.credentials import _active_backend, get_token, use_file_store
 
     store_token("garmin", _big_token(3 * CHUNK_LIMIT))
 

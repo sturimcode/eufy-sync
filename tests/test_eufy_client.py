@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from eufy_sync.config import EufyConfig
-from eufy_sync.eufy_client import AmbiguousProfileError, EufyClient, EufyMeasurement, EufyProfile
+from eufy_sync.eufy_client import AmbiguousProfileError, EufyClient, EufyProfile
 
 
 def test_parse_record_basic():

@@ -37,7 +37,6 @@ class UserConfig:
 
 @dataclass
 class AppConfig:
-    sync_interval_minutes: int
     users: list[UserConfig]
 
 
@@ -164,7 +163,4 @@ def load_config(path: Path) -> AppConfig:
             strava=strava,
         ))
 
-    return AppConfig(
-        sync_interval_minutes=raw.get("sync_interval_minutes", 15),
-        users=users,
-    )
+    return AppConfig(users=users)

@@ -182,7 +182,7 @@ def _main() -> None:
             setup._show_upgrade_notice()
 
         # Load config (passwords resolved from keychain or YAML fallback)
-        from eufy_sync.config import AppConfig, load_config
+        from eufy_sync.config import load_config
         config = load_config(config_path)
     except SystemExit:
         raise
@@ -220,9 +220,9 @@ def _main() -> None:
 
     # Run sync
     from eufy_sync.cli import lock
-    from eufy_sync.sync import sync_user
-    from eufy_sync.state import SyncState
     from eufy_sync.eufy_client import AmbiguousProfileError
+    from eufy_sync.state import SyncState
+    from eufy_sync.sync import sync_user
 
     # Only the sync path is locked; --status, --history, --doctor and the
     # setup commands are read-only or interactive and never collide. A manual

@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from eufy_sync import platform_support
+from eufy_sync import credentials, platform_support
 from eufy_sync.cli import doctor
 from eufy_sync.config import AppConfig, EufyConfig, GarminConfig, StravaConfig, UserConfig
 from eufy_sync.platform_support import generic, macos
@@ -41,7 +41,7 @@ def _app_config(*, garmin: bool = True, strava: bool = True, customer_id: str | 
         garmin=GarminConfig(email="g@example.com", password="pw") if garmin else None,
         strava=StravaConfig(client_id="123", client_secret="secret") if strava else None,
     )
-    return AppConfig(sync_interval_minutes=15, users=[user])
+    return AppConfig(users=[user])
 
 
 class _FakeMeasurement:
@@ -59,7 +59,7 @@ def _patch_all_pass(tmp_path, monkeypatch):
     app_config = _app_config()
 
     monkeypatch.setattr(doctor, "load_config", MagicMock(return_value=app_config))
-    monkeypatch.setattr(doctor, "_keyring_available", MagicMock(return_value=True))
+    monkeypatch.setattr(credentials, "_keyring_available", lambda: True)
 
     eufy_client = MagicMock()
     eufy_client.token_status.return_value = {"state": "valid", "days_remaining": 21}
@@ -355,7 +355,6 @@ def test_keychain_stray_unmarked_file_warns_adopt_or_delete(tmp_path, monkeypatc
     """A credentials file that was not created by --use-file-store is ignored
     while the keychain works. Doctor must surface it: it holds a stale copy
     of secrets that nothing reads or updates."""
-    from eufy_sync import credentials
 
     stray = tmp_path / "credentials.json"
     stray.write_text('{"passwords": {"default:eufy": "old"}, "tokens": {}}')

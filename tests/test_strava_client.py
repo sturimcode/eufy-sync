@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from eufy_sync.config import StravaConfig
 from eufy_sync.strava_client import StravaClient
@@ -102,7 +102,7 @@ def test_refresh_401_tells_user_to_reauthorize(mock_load, mock_save):
     with patch.object(client._client, "post", return_value=mock_response):
         try:
             client.authenticate()
-            assert False, "Should have raised"
+            raise AssertionError("Should have raised")
         except RuntimeError as e:
             assert "Re-authorize" in str(e)
     client.close()
@@ -123,7 +123,7 @@ def test_refresh_500_is_a_plain_retryable_failure(mock_load, mock_save):
     with patch.object(client._client, "post", return_value=mock_response):
         try:
             client.authenticate()
-            assert False, "Should have raised"
+            raise AssertionError("Should have raised")
         except RuntimeError as e:
             assert "Re-authorize" not in str(e)
             assert "temporary" in str(e).lower() or "500" in str(e)
@@ -144,7 +144,7 @@ def test_refresh_429_is_a_plain_retryable_failure(mock_load, mock_save):
     with patch.object(client._client, "post", return_value=mock_response):
         try:
             client.authenticate()
-            assert False, "Should have raised"
+            raise AssertionError("Should have raised")
         except RuntimeError as e:
             assert "Re-authorize" not in str(e)
     client.close()
@@ -155,13 +155,13 @@ def test_authorize_strava_socket_bind_failure_names_the_port():
     raises a raw OSError. That must surface as a RuntimeError that names the
     port and suggests freeing it, not an unexplained 'Address already in
     use' traceback."""
-    from eufy_sync.strava_client import authorize_strava, CALLBACK_PORT
+    from eufy_sync.strava_client import CALLBACK_PORT, authorize_strava
 
     with patch("eufy_sync.strava_client.HTTPServer",
                side_effect=OSError(48, "Address already in use")):
         try:
             authorize_strava(_make_config())
-            assert False, "Should have raised"
+            raise AssertionError("Should have raised")
         except RuntimeError as e:
             assert str(CALLBACK_PORT) in str(e)
             assert "already in use" in str(e).lower() or "close" in str(e).lower()
@@ -172,7 +172,7 @@ def test_authenticate_raises_without_tokens(mock_load):
     client = StravaClient(_make_config())
     try:
         client.authenticate()
-        assert False, "Should have raised"
+        raise AssertionError("Should have raised")
     except RuntimeError as e:
         assert "--setup-strava" in str(e)
     client.close()
@@ -214,7 +214,24 @@ def test_update_weight_failure_raises(mock_load, mock_save):
     with patch.object(client._client, "put", return_value=mock_response):
         try:
             client.update_weight(86.2)
-            assert False, "Should have raised"
+            raise AssertionError("Should have raised")
         except RuntimeError as e:
             assert "401" in str(e)
     client.close()
+
+
+def test_auth_url_encodes_every_query_value():
+    # Built by string concatenation, the redirect URI and scope went out raw.
+    # Browsers tolerated it, but the URL must be correct by construction.
+    from urllib.parse import parse_qs, urlparse
+
+    from eufy_sync.strava_client import REDIRECT_URI, STRAVA_AUTH_URL, _auth_url
+    url = _auth_url("123", "st@te/value")
+    assert url.startswith(STRAVA_AUTH_URL + "?")
+    assert "redirect_uri=http%3A%2F%2Flocalhost" in url
+    query = parse_qs(urlparse(url).query)
+    assert query["client_id"] == ["123"]
+    assert query["redirect_uri"] == [REDIRECT_URI]
+    assert query["scope"] == ["profile:write,profile:read_all"]
+    assert query["state"] == ["st@te/value"]
+    assert query["approval_prompt"] == ["force"]

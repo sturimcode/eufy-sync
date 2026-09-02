@@ -8,7 +8,7 @@ from pathlib import Path
 
 import yaml
 
-from eufy_sync import platform_support
+from eufy_sync import install, platform_support
 from eufy_sync.cli import shared
 from eufy_sync.prompt import PROMPT_TIMEOUT_SECONDS, input_with_timeout
 
@@ -35,7 +35,7 @@ def _update_password(config_path: Path) -> None:
         print("No changes made.")
         return
 
-    from eufy_sync.credentials import store_password, delete_token
+    from eufy_sync.credentials import delete_token, store_password
 
     if eufy_pw:
         store_password(f"{user_name}:eufy", eufy_pw)
@@ -172,10 +172,10 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
 
     print("This will remove:")
     print(f"  - All saved credentials and tokens in {data_dir}/")
-    print(f"  - Keychain entries for eufy-sync")
-    print(f"  - Sync history database")
+    print("  - Keychain entries for eufy-sync")
+    print("  - Sync history database")
     if platform_support.agent_installed():
-        print(f"  - Automatic sync")
+        print("  - Automatic sync")
     print("")
 
     answer = input("Are you sure? [y/N] ").strip()
@@ -215,7 +215,7 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
     # deletes, which is safe only because credentials.json lives inside data_dir
     # and is erased by the rmtree below; keep them together if CRED_FILE ever
     # moves outside ~/.garmin-sync.
-    from eufy_sync.credentials import delete_password, delete_token, _keyring_available
+    from eufy_sync.credentials import _keyring_available, delete_password, delete_token
     if _keyring_available():
         # Best-effort: a locked keychain makes the vault read raise, and a
         # half-finished uninstall that leaves the data dir behind (the rmtree
@@ -261,10 +261,4 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
     else:
         print("Removed all eufy-sync data.")
 
-    if "/uv/tools/" in sys.executable:
-        removal_cmd = "uv tool uninstall eufy-sync"
-    elif shutil.which("pipx"):
-        removal_cmd = "pipx uninstall eufy-sync"
-    else:
-        removal_cmd = "pip uninstall eufy-sync"
-    print(f"To remove the package itself, run: {removal_cmd}")
+    print(f"To remove the package itself, run: {install.uninstall_command()}")

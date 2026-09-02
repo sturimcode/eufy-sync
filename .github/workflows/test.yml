@@ -5,8 +5,22 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Weekly, so a dependency or Python release that breaks the suite shows up
+  # between releases instead of on the next tag push.
+  schedule:
+    - cron: "0 12 * * 1"
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:

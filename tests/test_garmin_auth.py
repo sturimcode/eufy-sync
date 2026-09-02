@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -419,3 +420,51 @@ def test_exchange_ticket_returns_tokens_and_client_id():
     assert access == "acc"
     assert refresh == "ref"
     assert client_id  # the client id the exchange succeeded with
+
+
+def test_interactive_login_network_blip_does_not_open_browser(monkeypatch):
+    # A Wi-Fi hiccup during a first-run login used to trigger the browser
+    # fallback: a Chromium download and a window, when retrying the same
+    # login a moment later is the right move. The error must leave as it
+    # arrived, so the caller's transient-network classification still works.
+    from garminconnect import GarminConnectConnectionError
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: None)
+    _fail_on_browser(monkeypatch)
+    fake = MagicMock()
+    fake.login.side_effect = GarminConnectConnectionError(
+        "Connection error: [Errno 8] nodename nor servname provided, or not known"
+    )
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        with pytest.raises(GarminConnectConnectionError, match="nodename nor servname"):
+            auth.login(interactive=True)
+
+
+def test_interactive_login_non_network_failure_still_opens_browser(monkeypatch):
+    # The fallback exists for logins the direct path cannot complete (a
+    # Cloudflare block reads as a 403 connection error); those keep it.
+    from garminconnect import GarminConnectConnectionError
+    auth = _auth()
+    monkeypatch.setattr(auth, "_load_token", lambda: None)
+    monkeypatch.setattr(auth, "_save_token", lambda g: None)
+    fake = MagicMock()
+    fake.login.side_effect = GarminConnectConnectionError("Login failed: 403 Forbidden")
+    monkeypatch.setattr("eufy_sync.garmin_auth._ensure_chromium", lambda: None)
+    monkeypatch.setattr("eufy_sync.garmin_auth.browser_login", lambda e, p: "ticket")
+    monkeypatch.setattr("eufy_sync.garmin_auth._exchange_ticket_for_tokens",
+                        lambda t: ("acc", "ref", "cid"))
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        result = auth.login(interactive=True)
+    assert result is fake
+    fake.client.loads.assert_called_once()
+
+
+def test_ensure_chromium_names_the_extra_when_playwright_is_missing(monkeypatch):
+    # Playwright is an optional extra. A user without it who reaches the
+    # browser fallback needs the one install command, not an ImportError.
+    from eufy_sync.garmin_auth import _ensure_chromium
+    monkeypatch.setitem(sys.modules, "playwright", None)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
+    with patch("eufy_sync.garmin_auth.install_command", return_value="uv tool install --force 'eufy-sync[browser]'"):
+        with pytest.raises(PermanentSyncError, match=r"eufy-sync\[browser\]"):
+            _ensure_chromium()

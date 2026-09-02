@@ -20,9 +20,10 @@ import sys
 from pathlib import Path
 
 import httpx
-
 from garminconnect import Garmin, GarminConnectAuthenticationError
 
+from eufy_sync.install import BROWSER_EXTRA, install_command
+from eufy_sync.network import is_transient_network_error
 from eufy_sync.prompt import PROMPT_TIMEOUT_SECONDS, input_with_timeout
 
 logger = logging.getLogger(__name__)
@@ -196,9 +197,21 @@ def _exchange_ticket_for_tokens(service_ticket: str) -> tuple[str, str, str]:
 
 
 def _ensure_chromium() -> None:
-    """Install Playwright Chromium if not already present (lazy, only on fallback)."""
+    """Install Playwright Chromium if not already present (lazy, only on fallback).
+
+    Playwright itself is the optional "browser" extra: most installs never
+    reach this path, and the package is several times the size of everything
+    else combined. Without it, name the one command that adds it."""
+    from eufy_sync.sync import PermanentSyncError
     try:
         from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise PermanentSyncError(
+            "The direct Garmin login did not work and the browser fallback needs "
+            f"the optional Playwright extra. Install it with: {install_command(BROWSER_EXTRA)} "
+            "then run: eufy-sync --reauth garmin"
+        ) from None
+    try:
         with sync_playwright() as p:
             path = p.chromium.executable_path
             if not Path(path).exists():
@@ -207,11 +220,10 @@ def _ensure_chromium() -> None:
         print("Installing Chromium for the Garmin browser login (one-time)...")
         result = subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
         if result.returncode != 0:
-            from eufy_sync.sync import PermanentSyncError
             raise PermanentSyncError(
                 "Failed to install Chromium for the Garmin browser fallback. "
                 "Try: playwright install chromium"
-            )
+            ) from None
 
 
 class GarminLoginCancelled(Exception):
@@ -314,9 +326,10 @@ class GarminAuth:
     def _fresh_login(self, garmin: Garmin) -> None:
         """Try the browser-free login; fall back to the browser on any failure.
 
-        Two failures skip the fallback: a cancelled MFA prompt (the user chose
-        to stop) and definitively rejected credentials (the browser would
-        autofill the same bad password and fail minutes later)."""
+        Three failures skip the fallback: a cancelled MFA prompt (the user
+        chose to stop), definitively rejected credentials (the browser would
+        autofill the same bad password and fail minutes later), and a passing
+        network failure (a retry fixes that; a browser does not)."""
         from eufy_sync.sync import PermanentSyncError
         try:
             garmin.login()
@@ -331,6 +344,12 @@ class GarminAuth:
                 "Garmin rejected the email or password. Run: eufy-sync --update-password"
             ) from e
         except Exception as e:
+            if is_transient_network_error(str(e)):
+                # The network was not there. A browser cannot fix that, and
+                # opening one here meant a Chromium download and a window on
+                # a Wi-Fi blip. Leave the error as it arrived so the caller
+                # still recognizes it as transient.
+                raise
             logger.warning(
                 "Browser-free Garmin login failed (%s); opening browser fallback", e
             )
