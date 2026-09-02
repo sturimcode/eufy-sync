@@ -8,7 +8,7 @@ from pathlib import Path
 
 import yaml
 
-from eufy_sync import platform_support
+from eufy_sync import install, platform_support
 from eufy_sync.cli import shared
 from eufy_sync.prompt import PROMPT_TIMEOUT_SECONDS, input_with_timeout
 
@@ -261,10 +261,4 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
     else:
         print("Removed all eufy-sync data.")
 
-    if "/uv/tools/" in sys.executable:
-        removal_cmd = "uv tool uninstall eufy-sync"
-    elif shutil.which("pipx"):
-        removal_cmd = "pipx uninstall eufy-sync"
-    else:
-        removal_cmd = "pip uninstall eufy-sync"
-    print(f"To remove the package itself, run: {removal_cmd}")
+    print(f"To remove the package itself, run: {install.uninstall_command()}")

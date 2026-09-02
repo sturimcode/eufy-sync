@@ -23,6 +23,7 @@ import httpx
 
 from garminconnect import Garmin, GarminConnectAuthenticationError
 
+from eufy_sync.install import BROWSER_EXTRA, install_command
 from eufy_sync.network import is_transient_network_error
 from eufy_sync.prompt import PROMPT_TIMEOUT_SECONDS, input_with_timeout
 
@@ -197,9 +198,21 @@ def _exchange_ticket_for_tokens(service_ticket: str) -> tuple[str, str, str]:
 
 
 def _ensure_chromium() -> None:
-    """Install Playwright Chromium if not already present (lazy, only on fallback)."""
+    """Install Playwright Chromium if not already present (lazy, only on fallback).
+
+    Playwright itself is the optional "browser" extra: most installs never
+    reach this path, and the package is several times the size of everything
+    else combined. Without it, name the one command that adds it."""
+    from eufy_sync.sync import PermanentSyncError
     try:
         from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise PermanentSyncError(
+            "The direct Garmin login did not work and the browser fallback needs "
+            f"the optional Playwright extra. Install it with: {install_command(BROWSER_EXTRA)} "
+            "then run: eufy-sync --reauth garmin"
+        ) from None
+    try:
         with sync_playwright() as p:
             path = p.chromium.executable_path
             if not Path(path).exists():
@@ -208,7 +221,6 @@ def _ensure_chromium() -> None:
         print("Installing Chromium for the Garmin browser login (one-time)...")
         result = subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
         if result.returncode != 0:
-            from eufy_sync.sync import PermanentSyncError
             raise PermanentSyncError(
                 "Failed to install Chromium for the Garmin browser fallback. "
                 "Try: playwright install chromium"

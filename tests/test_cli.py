@@ -407,7 +407,8 @@ def test_uninstall_names_uv_for_uv_installs(
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
-    with patch("eufy_sync.cli.maintenance.sys.executable", "/Users/x/.local/share/uv/tools/eufy-sync/bin/python"):
+    with patch("eufy_sync.install.sys.executable", "/Users/x/.local/share/uv/tools/eufy-sync/bin/python"), \
+         patch("eufy_sync.install.shutil.which", return_value="/usr/local/bin/uv"):
         _uninstall(data_dir)
 
     out = capsys.readouterr().out
@@ -435,8 +436,8 @@ def test_uninstall_names_pipx_when_not_uv(
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
-    with patch("eufy_sync.cli.maintenance.sys.executable", "/Users/x/.local/pipx/venvs/eufy-sync/bin/python"), \
-         patch("eufy_sync.cli.maintenance.shutil.which", return_value="/usr/local/bin/pipx"):
+    with patch("eufy_sync.install.sys.executable", "/Users/x/.local/pipx/venvs/eufy-sync/bin/python"), \
+         patch("eufy_sync.install.shutil.which", return_value="/usr/local/bin/pipx"):
         _uninstall(data_dir)
 
     out = capsys.readouterr().out

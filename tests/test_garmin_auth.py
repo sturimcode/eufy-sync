@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -456,3 +457,14 @@ def test_interactive_login_non_network_failure_still_opens_browser(monkeypatch):
         result = auth.login(interactive=True)
     assert result is fake
     fake.client.loads.assert_called_once()
+
+
+def test_ensure_chromium_names_the_extra_when_playwright_is_missing(monkeypatch):
+    # Playwright is an optional extra. A user without it who reaches the
+    # browser fallback needs the one install command, not an ImportError.
+    from eufy_sync.garmin_auth import _ensure_chromium
+    monkeypatch.setitem(sys.modules, "playwright", None)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
+    with patch("eufy_sync.garmin_auth.install_command", return_value="uv tool install --force 'eufy-sync[browser]'"):
+        with pytest.raises(PermanentSyncError, match=r"eufy-sync\[browser\]"):
+            _ensure_chromium()

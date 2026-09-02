@@ -4,13 +4,12 @@ from __future__ import annotations
 import json
 import platform
 import re
-import shutil
 import subprocess
 import sys
 import time
 import urllib.request
 
-from eufy_sync import platform_support
+from eufy_sync import install, platform_support
 from eufy_sync.cli import shared
 
 
@@ -99,16 +98,11 @@ def _self_update() -> None:
         print(f"Unexpected version from PyPI ({latest!r}); update manually with pipx.")
         return
 
-    # Normalize backslashes to forward slashes so the marker matches on
-    # Windows uv installs (C:\...\uv\tools\...) as well as POSIX ones.
-    if "/uv/tools/" in sys.executable.replace("\\", "/") and shutil.which("uv"):
-        # Installed with `uv tool install`. Its venvs carry no pip, and pipx
-        # would create a second copy, so update through uv itself.
-        cmd = ["uv", "tool", "install", "--force", f"eufy-sync=={latest}"]
-    elif shutil.which("pipx"):
-        cmd = ["pipx", "install", "--force", f"eufy-sync=={latest}"]
-    else:
-        cmd = [sys.executable, "-m", "pip", "install", "--upgrade", f"eufy-sync=={latest}"]
+    # A uv or pipx reinstall replaces the whole tool venv, so the pin has to
+    # carry the browser extra along for anyone who opted into it, or the
+    # update would silently drop Playwright.
+    package = install.BROWSER_EXTRA if install.has_browser_extra() else "eufy-sync"
+    cmd = install.install_argv(f"{package}=={latest}")
 
     if platform.system() == "Windows":
         # A running eufy-sync.exe holds a lock on itself, so it cannot be

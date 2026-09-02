@@ -179,7 +179,19 @@ On each run it pulls your Eufy history and checks a local SQLite DB for what eac
 
 Garmin has no official API for writing body composition into Connect. In March 2026 it put Cloudflare in front of its login, which broke the Python libraries that talked to it; [garth](https://github.com/matin/garth) was [deprecated](https://github.com/matin/garth/discussions/222) and stays that way.
 
-eufy-sync logs in through [python-garminconnect](https://github.com/cyberjunky/python-garminconnect), which gets past Cloudflare without a browser. On first run you enter your Garmin email and password, plus a code if you use two-factor. The tokens save to your keychain and refresh on their own, so later runs need no login. If that direct login gets rate-limited, a Chromium window opens once for you to sign in, then it continues. Headless setups use the direct login only, since there is no screen for a browser.
+eufy-sync logs in through [python-garminconnect](https://github.com/cyberjunky/python-garminconnect), which gets past Cloudflare without a browser. On first run you enter your Garmin email and password, plus a code if you use two-factor. The tokens save to your keychain and refresh on their own, so later runs need no login.
+
+If that direct login gets rate-limited, eufy-sync can open a Chromium window once for you to sign in, then continue. That fallback is an optional extra, since Playwright is several times the size of the rest of the install and most people never need it. If a login ever needs it, the error names the exact command; it is one of these, matching your installer:
+
+```bash
+uv tool install --force 'eufy-sync[browser]'
+```
+
+```bash
+pipx install --force 'eufy-sync[browser]'
+```
+
+Headless setups use the direct login only, since there is no screen for a browser.
 
 ## Security
 

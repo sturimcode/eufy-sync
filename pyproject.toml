@@ -37,8 +37,12 @@ dependencies = [
     "garminconnect>=0.3.10",
     "curl_cffi>=0.15.0",
     "pyyaml>=6.0",
-    "playwright>=1.40.0",
 ]
+
+[project.optional-dependencies]
+# The browser fallback for a rate-limited Garmin login. Opt-in: Playwright is
+# several times the size of everything else, and most installs never need it.
+browser = ["playwright>=1.40.0"]
 
 [project.scripts]
 eufy-sync = "eufy_sync.cli:main"
