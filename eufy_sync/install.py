@@ -16,7 +16,7 @@ BROWSER_EXTRA = "eufy-sync[browser]"
 
 
 def installer() -> str:
-    """"uv", "pipx", or "pip"."""
+    """Return "uv", "pipx", or "pip"."""
     # Normalize backslashes so the marker matches on Windows uv installs
     # (C:\...\uv\tools\...) as well as POSIX ones.
     if "/uv/tools/" in sys.executable.replace("\\", "/") and shutil.which("uv"):
