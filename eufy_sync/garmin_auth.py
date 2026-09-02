@@ -23,6 +23,7 @@ import httpx
 
 from garminconnect import Garmin, GarminConnectAuthenticationError
 
+from eufy_sync.network import is_transient_network_error
 from eufy_sync.prompt import PROMPT_TIMEOUT_SECONDS, input_with_timeout
 
 logger = logging.getLogger(__name__)
@@ -314,9 +315,10 @@ class GarminAuth:
     def _fresh_login(self, garmin: Garmin) -> None:
         """Try the browser-free login; fall back to the browser on any failure.
 
-        Two failures skip the fallback: a cancelled MFA prompt (the user chose
-        to stop) and definitively rejected credentials (the browser would
-        autofill the same bad password and fail minutes later)."""
+        Three failures skip the fallback: a cancelled MFA prompt (the user
+        chose to stop), definitively rejected credentials (the browser would
+        autofill the same bad password and fail minutes later), and a passing
+        network failure (a retry fixes that; a browser does not)."""
         from eufy_sync.sync import PermanentSyncError
         try:
             garmin.login()
@@ -331,6 +333,12 @@ class GarminAuth:
                 "Garmin rejected the email or password. Run: eufy-sync --update-password"
             ) from e
         except Exception as e:
+            if is_transient_network_error(str(e)):
+                # The network was not there. A browser cannot fix that, and
+                # opening one here meant a Chromium download and a window on
+                # a Wi-Fi blip. Leave the error as it arrived so the caller
+                # still recognizes it as transient.
+                raise
             logger.warning(
                 "Browser-free Garmin login failed (%s); opening browser fallback", e
             )

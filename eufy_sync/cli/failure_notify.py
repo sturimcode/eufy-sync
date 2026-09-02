@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 
 from eufy_sync.cli import shared
+# Re-exported: app.py and the tests reach the classifier through this module.
+from eufy_sync.network import is_transient_network_error  # noqa: F401
 
 # Consecutive headless network failures before one escalation notification.
 # The timer runs every 4h, so 3 in a row means the network has been gone for
@@ -26,37 +28,6 @@ from eufy_sync.cli import shared
 THRESHOLD = 3
 
 _STREAK_FILE = "network_fail_streak.json"
-
-# Substrings (matched case-insensitively) that mark a failure as a transient
-# network problem rather than something the user must fix. These are the
-# DNS / socket / timeout messages that surface from httpx, requests, and the
-# stdlib when connectivity is missing or coming back.
-#
-# Deliberately NOT here: "_ssl.c" on its own. A TLS handshake that TIMED OUT
-# is a blip and is caught by "timed out" below, but "certificate verify
-# failed" and "wrong version number" also carry "_ssl.c" and are persistent,
-# user-actionable problems (a wrong system clock, a stale CA bundle, a
-# TLS-intercepting proxy) that must notify, not be silenced.
-_TRANSIENT_MARKERS = (
-    "nodename nor servname",              # macOS getaddrinfo, no DNS
-    "name or service not known",          # Linux getaddrinfo, no DNS
-    "temporary failure in name resolution",
-    "timed out",                          # connect / read / handshake timeouts
-    "all connection attempts failed",     # httpx ConnectError, common on wake
-    "connection reset",
-    "connection refused",
-    "connection aborted",
-    "network is unreachable",
-    "max retries exceeded",
-    "temporarily unavailable",
-)
-
-
-def is_transient_network_error(msg: str) -> bool:
-    """True when a failure message looks like a passing network problem."""
-    lowered = (msg or "").lower()
-    return any(marker in lowered for marker in _TRANSIENT_MARKERS)
-
 
 def _streak_path() -> Path:
     return shared.DATA_DIR / _STREAK_FILE
