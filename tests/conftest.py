@@ -48,7 +48,7 @@ def _hermetic_machine(tmp_path, monkeypatch):
         try:
             del store[(service, account)]
         except KeyError:
-            raise keyring.errors.PasswordDeleteError("not found")
+            raise keyring.errors.PasswordDeleteError("not found") from None
 
     monkeypatch.setattr("keyring.set_password", set_password)
     monkeypatch.setattr("keyring.get_password", get_password)

@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 from eufy_sync.cli import shared
+
 # Re-exported: app.py and the tests reach the classifier through this module.
 from eufy_sync.network import is_transient_network_error  # noqa: F401
 

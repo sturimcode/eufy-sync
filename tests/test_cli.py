@@ -2,20 +2,20 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
 
-from eufy_sync.cli.shared import _write_config
-from eufy_sync.platform_support.macos import LAUNCH_AGENT_LABEL, LAUNCH_AGENT_PATH, _generate_plist
-from eufy_sync.prompt import PROMPT_TIMEOUT_SECONDS
 from eufy_sync.cli.maintenance import (
     _install_launch_agent,
+    _offer_launch_agent,
     _uninstall,
     _uninstall_launch_agent,
-    _offer_launch_agent,
 )
+from eufy_sync.cli.shared import _write_config
+from eufy_sync.platform_support.macos import LAUNCH_AGENT_LABEL, _generate_plist
+from eufy_sync.prompt import PROMPT_TIMEOUT_SECONDS
 
 
 @pytest.fixture
@@ -47,6 +47,7 @@ def test_update_password_path_configures_logging(monkeypatch, tmp_path: Path):
     # logging first or garminconnect's per-strategy 429 warnings leak through
     # logging's last-resort handler.
     import sys as _sys
+
     from eufy_sync.cli import app, shared
     calls = []
     monkeypatch.setattr(shared, "_configure_logging", lambda v: calls.append(v))
@@ -177,6 +178,7 @@ def test_write_run_script_is_byte_stable_across_installs(tmp_path):
     # macOS re-announces background items when the registered file changes;
     # a second install with the same binary must not rewrite the script.
     import os
+
     from eufy_sync.platform_support.macos import _write_run_script
     with patch("eufy_sync.cli.shared.DATA_DIR", tmp_path):
         first = _write_run_script("/home/user/.local/bin/eufy-sync")
@@ -487,6 +489,7 @@ def test_uninstall_removes_custom_config_and_db_paths(
 def test_prompt_profile_choice_returns_selected_customer_id():
     from datetime import datetime, timezone
     from unittest.mock import patch
+
     from eufy_sync.cli.profiles import _prompt_profile_choice
     from eufy_sync.eufy_client import EufyProfile
     profiles = [
@@ -501,6 +504,7 @@ def test_prompt_profile_choice_returns_selected_customer_id():
 def test_select_profile_writes_chosen_customer_id(_keyring, tmp_path: Path):
     from datetime import datetime, timezone
     from unittest.mock import MagicMock, patch
+
     from eufy_sync.cli.profiles import _select_profile
     from eufy_sync.cli.shared import _write_config
     from eufy_sync.eufy_client import EufyProfile
@@ -531,6 +535,7 @@ def test_select_profile_writes_chosen_customer_id(_keyring, tmp_path: Path):
 def test_prompt_profile_choice_retries_on_invalid_input():
     from datetime import datetime, timezone
     from unittest.mock import patch
+
     from eufy_sync.cli.profiles import _prompt_profile_choice
     from eufy_sync.eufy_client import EufyProfile
     profiles = [
@@ -543,6 +548,7 @@ def test_prompt_profile_choice_retries_on_invalid_input():
 
 def test_configure_logging_quiets_garminconnect_when_not_verbose():
     import logging
+
     from eufy_sync.cli.shared import _configure_logging
 
     logging.getLogger("garminconnect").setLevel(logging.NOTSET)
@@ -552,6 +558,7 @@ def test_configure_logging_quiets_garminconnect_when_not_verbose():
 
 def test_configure_logging_keeps_garminconnect_detail_when_verbose():
     import logging
+
     from eufy_sync.cli.shared import _configure_logging
 
     logging.getLogger("garminconnect").setLevel(logging.ERROR)
@@ -583,6 +590,7 @@ def test_save_customer_id_writes_into_config(tmp_path: Path):
 
 def _ambiguous_profiles():
     from datetime import datetime, timezone
+
     from eufy_sync.eufy_client import EufyProfile
     return [
         EufyProfile("cid-human", datetime(2026, 6, 27, tzinfo=timezone.utc), 88.0),
@@ -1166,8 +1174,8 @@ def test_headless_success_clears_network_streak(
 ):
     """A clean run resets the streak so a later isolated blip starts from zero,
     not one short of escalating."""
-    from eufy_sync.cli.app import main
     from eufy_sync.cli import shared
+    from eufy_sync.cli.app import main
 
     config_path = _write_synced_config(tmp_path)
     db_path = tmp_path / "state.db"

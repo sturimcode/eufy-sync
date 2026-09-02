@@ -6,7 +6,6 @@ import pytest
 
 from eufy_sync.cli import failure_notify as fn
 
-
 # --- classification ----------------------------------------------------------
 
 

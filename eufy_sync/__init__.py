@@ -3,8 +3,8 @@
 __version__ = "1.10.2"
 
 # Public API for programmatic use
-from eufy_sync.garmin_auth import GarminAuth
 from eufy_sync.eufy_client import EufyClient, EufyMeasurement
+from eufy_sync.garmin_auth import GarminAuth
 from eufy_sync.strava_client import StravaClient
 from eufy_sync.transform import GarminBodyComposition, transform
 

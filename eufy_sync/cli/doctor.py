@@ -12,11 +12,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from eufy_sync import credentials
-from eufy_sync import platform_support
+from eufy_sync import credentials, platform_support
 from eufy_sync.cli import updater
 from eufy_sync.config import load_config
-from eufy_sync.credentials import _keyring_available, active_store_label
+from eufy_sync.credentials import active_store_label
 from eufy_sync.eufy_client import EufyClient
 from eufy_sync.garmin_auth import GarminAuth
 from eufy_sync.state import SyncState

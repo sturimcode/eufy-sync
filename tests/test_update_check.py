@@ -4,12 +4,12 @@ import json
 import sys
 import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from eufy_sync.cli.updater import _check_for_updates
 from eufy_sync.cli.shared import UPDATE_CHECK_INTERVAL
+from eufy_sync.cli.updater import _check_for_updates
 
 
 @pytest.fixture(autouse=True)
@@ -221,6 +221,7 @@ def test_self_update_windows_quotes_spaced_executable_path():
 def test_self_update_uses_pip_when_no_pipx():
     # Pinned to Darwin so a Windows host exercises this inline path too.
     import sys as _sys
+
     from eufy_sync.cli.updater import _self_update
     with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
          patch("eufy_sync.__version__", "1.0.0"), \
@@ -301,9 +302,10 @@ def test_self_update_keeps_the_browser_extra_when_installed(monkeypatch):
     # Reinstalling "eufy-sync==X" through uv or pipx replaces the whole tool
     # venv, so an update would silently drop Playwright for anyone who opted
     # into the browser fallback. The pin has to carry the extra along.
-    from eufy_sync.cli.updater import _self_update
     import importlib.machinery
     import types
+
+    from eufy_sync.cli.updater import _self_update
     present = types.ModuleType("playwright")
     present.__spec__ = importlib.machinery.ModuleSpec("playwright", None)
     monkeypatch.setitem(sys.modules, "playwright", present)

@@ -6,12 +6,11 @@ import time
 from datetime import datetime, timezone
 
 import httpx
-
 from garminconnect import GarminConnectTooManyRequestsError
 
+from eufy_sync import state as state_module
 from eufy_sync.config import UserConfig
 from eufy_sync.eufy_client import AmbiguousProfileError, EufyClient
-from eufy_sync import state as state_module
 from eufy_sync.state import SyncState
 from eufy_sync.transform import transform
 
@@ -239,13 +238,15 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                                 datetime.fromisoformat(upgrade_row["measurement_timestamp"]),
                                 upgrade_row["weight_kg"],
                             )
+                        # _retry calls the lambda before this iteration ends,
+                        # so the loop variables it closes over are the right ones.
                         result = _retry(
-                            lambda: client.upload_body_composition(body_comp),
+                            lambda: client.upload_body_composition(body_comp),  # noqa: B023
                             f"Garmin upload ({m.measurement_id})",
                         )
                     else:
                         result = _retry(
-                            lambda: client.update_weight(m.weight_kg),
+                            lambda: client.update_weight(m.weight_kg),  # noqa: B023
                             f"Strava upload ({m.measurement_id})",
                         )
                     response_str = json.dumps(result) if result else None

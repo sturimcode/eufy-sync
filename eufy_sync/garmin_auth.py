@@ -20,7 +20,6 @@ import sys
 from pathlib import Path
 
 import httpx
-
 from garminconnect import Garmin, GarminConnectAuthenticationError
 
 from eufy_sync.install import BROWSER_EXTRA, install_command
@@ -224,7 +223,7 @@ def _ensure_chromium() -> None:
             raise PermanentSyncError(
                 "Failed to install Chromium for the Garmin browser fallback. "
                 "Try: playwright install chromium"
-            )
+            ) from None
 
 
 class GarminLoginCancelled(Exception):

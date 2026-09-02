@@ -140,6 +140,7 @@ def test_upload_relogs_in_silently_and_retries_when_headless():
 
 def test_upload_propagates_a_silent_relogin_that_needs_mfa():
     from garminconnect import GarminConnectAuthenticationError
+
     from eufy_sync.sync import PermanentSyncError
     client = GarminClient(GarminConfig(email="g@example.com", password="pw"))
     dead = MagicMock()
@@ -285,6 +286,7 @@ def test_duplicate_check_fails_open_when_the_relogin_fails():
     # check: fail open, and let the upload raise the error that carries the
     # fix-it hint.
     from garminconnect import GarminConnectConnectionError
+
     from eufy_sync.sync import PermanentSyncError
     client = GarminClient(GarminConfig(email="g@example.com", password="pw"))
     dead = MagicMock()
@@ -484,6 +486,7 @@ def test_delete_weight_entry_relogs_in_and_retries_on_401():
 
 def test_delete_weight_entry_fails_open_when_the_relogin_fails():
     from garminconnect import GarminConnectConnectionError
+
     from eufy_sync.sync import PermanentSyncError
     dead = MagicMock()
     dead.get_daily_weigh_ins.side_effect = GarminConnectConnectionError("API Error 401 - ")

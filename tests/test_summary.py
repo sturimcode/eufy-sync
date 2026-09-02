@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from eufy_sync.cli.status import _print_summary
 

@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from eufy_sync.cli import shared
 
+if TYPE_CHECKING:
+    from eufy_sync.eufy_client import EufyProfile
 
-def _format_profile(profile: "EufyProfile", index: int) -> str:
+
+def _format_profile(profile: EufyProfile, index: int) -> str:
     lb = profile.last_weight_kg * 2.20462
     when = profile.last_measured.strftime("%Y-%m-%d")
     label = profile.name or f"profile ...{profile.customer_id[-4:]}"

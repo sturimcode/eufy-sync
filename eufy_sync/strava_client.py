@@ -15,10 +15,10 @@ import logging
 import secrets
 import time
 import webbrowser
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Thread
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
@@ -32,6 +32,19 @@ STRAVA_API_BASE = "https://www.strava.com/api/v3"
 CALLBACK_PORT = 8089
 REDIRECT_URI = f"http://localhost:{CALLBACK_PORT}/callback"
 REFRESH_SAFETY_MARGIN = 300  # seconds before expiry to trigger refresh
+
+
+def _auth_url(client_id: str, state_value: str) -> str:
+    """The authorization URL, with every query value percent-encoded."""
+    query = urlencode({
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": REDIRECT_URI,
+        "scope": "profile:write,profile:read_all",
+        "approval_prompt": "force",
+        "state": state_value,
+    })
+    return f"{STRAVA_AUTH_URL}?{query}"
 
 
 def authorize_strava(config: StravaConfig) -> dict:
@@ -96,17 +109,9 @@ def authorize_strava(config: StravaConfig) -> dict:
     server_thread = Thread(target=_serve_until_done, daemon=True)
     server_thread.start()
 
-    auth_url = (
-        f"{STRAVA_AUTH_URL}"
-        f"?client_id={config.client_id}"
-        f"&response_type=code"
-        f"&redirect_uri={REDIRECT_URI}"
-        f"&scope=profile:write,profile:read_all"
-        f"&approval_prompt=force"
-        f"&state={state_value}"
-    )
+    auth_url = _auth_url(config.client_id, state_value)
 
-    print(f"\nOpening Strava authorization in your browser...")
+    print("\nOpening Strava authorization in your browser...")
     print(f"If it doesn't open, visit:\n{auth_url}\n")
     webbrowser.open(auth_url)
 

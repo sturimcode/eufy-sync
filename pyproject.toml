@@ -21,7 +21,7 @@ keywords = [
     "weight sync",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: End Users/Desktop",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
@@ -58,3 +58,15 @@ include = ["eufy_sync*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# Correctness and import hygiene only. Style rules that would rewrite working
+# code for no behavior gain stay off.
+select = ["F", "E4", "E7", "E9", "B", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["eufy_sync"]
