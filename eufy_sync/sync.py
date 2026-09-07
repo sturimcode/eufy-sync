@@ -59,7 +59,7 @@ def _retry(fn, description: str):
             time.sleep(delay)
 
 
-def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False, repair_days: int | None = None) -> tuple[dict[str, int], dict[str, str]]:
+def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False, repair_days: int | None = None, target: str | None = None) -> tuple[dict[str, int], dict[str, str]]:
     """Sync one user's Eufy data to configured targets.
 
     Returns (counts, errors): counts maps target name to the number of
@@ -73,16 +73,29 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
     already calls synced (issue #58): the target can have lost data we
     recorded as delivered, and only the target knows that.
     """
+    supported_targets = ("garmin", "strava", "zwift")
+    if target is not None and target not in supported_targets:
+        raise ValueError(
+            f"Unknown sync target '{target}'. Choose garmin, strava, or zwift."
+        )
+    if target is not None and getattr(user, target) is None:
+        raise ValueError(
+            f"Sync target '{target}' is not configured for user '{user.name}'."
+        )
+
     repair = repair_days is not None
     eufy = EufyClient(user.eufy)
 
     all_targets: list[tuple[str, object]] = []
-    if user.garmin:
+    if user.garmin and target in (None, "garmin"):
         from eufy_sync.garmin_client import GarminClient
         all_targets.append(("garmin", GarminClient(user.garmin)))
-    if user.strava:
+    if user.strava and target in (None, "strava"):
         from eufy_sync.strava_client import StravaClient
         all_targets.append(("strava", StravaClient(user.strava)))
+    if user.zwift and target in (None, "zwift"):
+        from eufy_sync.zwift_client import ZwiftClient
+        all_targets.append(("zwift", ZwiftClient(user.zwift)))
 
     targets: list[tuple[str, object]] = []
 
@@ -172,49 +185,62 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
             if m.measurement_id not in pending or not m.weight_only:
                 measurements_by_id[m.measurement_id] = m
         measurements = list(measurements_by_id.values())
-        # Garmin receives history in order; Strava takes the newest valid
-        # measurement from this sorted batch.
+        # Garmin receives history in order; current-weight targets take the
+        # newest valid measurement from the fresh Eufy batch.
         measurements.sort(key=lambda m: m.timestamp)
         logger.info("Found %d measurements for %s", len(measurements), user.name)
 
-        # Strava stores one current value, so older values in the same batch
-        # would just consume requests before being immediately overwritten.
-        fresh_ids = {m.measurement_id for m in fetched}
-        valid = [m for m in measurements if m.measurement_id in fresh_ids and transform(m) is not None]
-        strava_latest_id = valid[-1].measurement_id if valid else None
+        # Current-weight targets store one value, so older values in the same
+        # batch would just consume requests before being immediately replaced.
+        valid_fetched = sorted(
+            (m for m in fetched if transform(m) is not None),
+            key=lambda m: m.timestamp,
+        )
+        current_weight_latest = valid_fetched[-1] if valid_fetched else None
 
         # Backfill can return older, unsynced readings alongside a newest
         # reading that dedup will skip, or omit the newest reading entirely.
-        # Never move Strava's current weight behind its recorded progress.
-        strava_latest_timestamp = (
-            state.get_latest_sync_timestamp(user.name, "strava")
-            if any(name == "strava" for name, _ in targets) else None
-        )
+        # Never move a target's current weight behind its recorded progress.
+        current_weight_timestamps = {
+            name: state.get_latest_sync_timestamp(user.name, name)
+            for name, _ in targets
+            if name in ("strava", "zwift")
+        }
 
         counts = {name: 0 for name, _ in targets}
         for m in measurements:
             body_comp = transform(m)
-            if body_comp is None:
+            is_current_weight_candidate = (
+                current_weight_latest is not None
+                and m.measurement_id == current_weight_latest.measurement_id
+            )
+            if body_comp is None and not is_current_weight_candidate:
                 logger.warning("Skipping invalid measurement: %s (%.1f kg)", m.measurement_id, m.weight_kg)
                 continue
 
             # Snapshot: a failing upload rebuilds `targets` mid-loop.
             for target_name, client in list(targets):
-                if (
-                    target_name == "strava"
-                    and strava_latest_timestamp is not None
-                    and m.timestamp.timestamp() < strava_latest_timestamp
-                ):
-                    logger.debug("Skipping Strava history older than its current weight: %s", m.measurement_id)
+                target_measurement = current_weight_latest if target_name in current_weight_timestamps else m
+                if target_measurement is None:
                     continue
-                if target_name == "strava" and m.measurement_id != strava_latest_id:
+                if target_name == "garmin" and body_comp is None:
+                    logger.warning("Skipping invalid measurement: %s (%.1f kg)", m.measurement_id, m.weight_kg)
+                    continue
+                if (
+                    target_name in current_weight_timestamps
+                    and current_weight_timestamps[target_name] is not None
+                    and target_measurement.timestamp.timestamp() < current_weight_timestamps[target_name]
+                ):
+                    logger.debug("Skipping %s history older than its current weight: %s", target_name.capitalize(), target_measurement.measurement_id)
+                    continue
+                if target_name in current_weight_timestamps and m.measurement_id != target_measurement.measurement_id:
                     continue
 
                 # Still consulted in repair mode: it decides whether the sync
                 # is recorded below, since re-uploading a known id must not
                 # insert a second row (UNIQUE on user/measurement/target).
-                synced_already = state.is_synced(user.name, m.measurement_id, target_name)
-                previous_id = pending_previous_ids.get(m.measurement_id)
+                synced_already = state.is_synced(user.name, target_measurement.measurement_id, target_name)
+                previous_id = pending_previous_ids.get(target_measurement.measurement_id)
                 if target_name == "garmin" and synced_already and previous_id and previous_id != m.measurement_id:
                     # The new row proves the replacement uploaded before a
                     # crash interrupted local bookkeeping. Finish locally.
@@ -258,7 +284,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     continue
 
                 if dry_run:
-                    print(f"[DRY RUN] Would sync to {target_name}: {m.weight_kg:.1f} kg at {m.timestamp}")
+                    print(f"[DRY RUN] Would sync to {target_name}: {target_measurement.weight_kg:.1f} kg at {target_measurement.timestamp}")
                     counts[target_name] += 1
                     continue
 
@@ -315,21 +341,21 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                         )
                     else:
                         result = _retry(
-                            lambda: client.update_weight(m.weight_kg),  # noqa: B023
-                            f"Strava upload ({m.measurement_id})",
+                            lambda: client.update_weight(target_measurement.weight_kg),  # noqa: B023
+                            f"{target_name.capitalize()} weight update ({target_measurement.measurement_id})",
                         )
                     response_str = json.dumps(result) if result else None
 
                     if not synced_already:
                         state.record_sync(
                             user_name=user.name,
-                            measurement_id=m.measurement_id,
-                            measurement_timestamp=m.timestamp.isoformat(),
-                            weight_kg=m.weight_kg,
+                            measurement_id=target_measurement.measurement_id,
+                            measurement_timestamp=target_measurement.timestamp.isoformat(),
+                            weight_kg=target_measurement.weight_kg,
                             synced_at=datetime.now(timezone.utc).isoformat(),
                             target=target_name,
                             response=response_str,
-                            weight_only=m.weight_only,
+                            weight_only=target_measurement.weight_only,
                         )
                     if upgrade_row is not None:
                         state.mark_upgraded(user.name, upgrade_row["measurement_id"], "garmin")
@@ -346,9 +372,9 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     continue
 
                 counts[target_name] += 1
-                lb = m.weight_kg * 2.20462
+                lb = target_measurement.weight_kg * 2.20462
                 detail = "full body comp" if target_name == "garmin" else "weight only"
-                logger.info("Synced %.2f kg (%.1f lb) → %s (%s)", m.weight_kg, lb, target_name.capitalize(), detail)
+                logger.info("Synced %.2f kg (%.1f lb) → %s (%s)", target_measurement.weight_kg, lb, target_name.capitalize(), detail)
 
                 # Small delay between uploads to avoid rate limiting
                 time.sleep(1 if target_name == "garmin" else 0.5)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from unittest.mock import MagicMock, patch
 
-from eufy_sync.cli.status import _print_summary
+from eufy_sync.cli.status import _print_summary, _show_status
 
 
 def _mock_state(last_sync_ts: int | None = None):
@@ -12,7 +12,7 @@ def _mock_state(last_sync_ts: int | None = None):
     return state
 
 
-def _mock_user(name: str = "default", has_garmin: bool = True, has_strava: bool = False):
+def _mock_user(name: str = "default", has_garmin: bool = True, has_strava: bool = False, has_zwift: bool = False):
     user = MagicMock()
     user.name = name
     if has_garmin:
@@ -25,6 +25,11 @@ def _mock_user(name: str = "default", has_garmin: bool = True, has_strava: bool 
         user.strava.client_secret = "secret"
     else:
         user.strava = None
+    if has_zwift:
+        user.zwift.email = "z@example.com"
+        user.zwift.password = "pw"
+    else:
+        user.zwift = None
     return user
 
 
@@ -90,6 +95,58 @@ def test_summary_synced_strava_only(capsys):
 
     output = capsys.readouterr().out.strip()
     assert "Synced 2 measurements to Strava." == output
+
+
+def test_summary_synced_zwift_only(capsys):
+    state = _mock_state()
+    user = _mock_user(has_garmin=False, has_zwift=True)
+
+    _print_summary({"zwift": 1}, [], state, [user])
+
+    assert capsys.readouterr().out.strip() == "Synced 1 measurement to Zwift."
+
+
+def test_summary_reports_zwift_token_health(capsys):
+    state = _mock_state()
+    user = _mock_user(has_garmin=False, has_zwift=True)
+
+    with _patch_eufy_token_status(), patch(
+        "eufy_sync.cli.status._zwift_token_status",
+        return_value={"state": "valid"},
+    ):
+        _print_summary({}, [], state, [user])
+
+    assert "Zwift connected" in capsys.readouterr().out
+
+
+def test_summary_treats_zwift_refresh_pending_as_connected(capsys):
+    state = _mock_state()
+    user = _mock_user(has_garmin=False, has_zwift=True)
+
+    with _patch_eufy_token_status(), patch(
+        "eufy_sync.cli.status._zwift_token_status",
+        return_value={"state": "refresh_needed"},
+    ):
+        _print_summary({}, [], state, [user])
+
+    output = capsys.readouterr().out
+    assert "Zwift connected" in output
+    assert "Zwift not connected" not in output
+
+
+def test_status_explains_zwift_refresh_is_automatic(capsys):
+    state = _mock_state()
+    user = _mock_user(has_garmin=False, has_zwift=True)
+
+    with _patch_eufy_token_status(), patch(
+        "eufy_sync.cli.status._zwift_token_status",
+        return_value={"state": "refresh_needed"},
+    ):
+        _show_status(state, [user])
+
+    output = capsys.readouterr().out
+    assert "Zwift auth: connected (refreshes on next sync)" in output
+    assert "--reauth zwift" not in output
 
 
 def test_summary_synced_both_targets(capsys):

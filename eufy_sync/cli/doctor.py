@@ -21,6 +21,7 @@ from eufy_sync.eufy_client import EufyClient
 from eufy_sync.garmin_client import GarminClient
 from eufy_sync.state import SyncState
 from eufy_sync.strava_client import StravaClient
+from eufy_sync.zwift_client import ZwiftClient
 
 _LABEL_WIDTH = 14
 
@@ -70,6 +71,8 @@ def _run_doctor(config_path: Path, db_path: Path) -> int:
         targets.append("garmin")
     if user.strava:
         targets.append("strava")
+    if user.zwift:
+        targets.append("zwift")
     report("PASS", "config", f"valid ({len(config.users)} user, targets: {', '.join(targets)})")
 
     # 2. profile
@@ -88,6 +91,10 @@ def _run_doctor(config_path: Path, db_path: Path) -> int:
     # 6. strava token
     if user.strava:
         _check_strava_token(report, user)
+
+    # 6b. zwift account read access
+    if user.zwift:
+        _check_zwift_session(report, user)
 
     # 7. eufy cloud
     _check_eufy_cloud(report, eufy_client)
@@ -195,11 +202,26 @@ def _check_strava_token(report, user) -> None:
                 client.close()
 
 
+def _check_zwift_session(report, user) -> None:
+    client = None
+    try:
+        client = ZwiftClient(user.zwift)
+        client.authenticate()
+        client.check_connection()
+        report("PASS", "zwift session", "connected (live read check)")
+    except Exception as e:
+        _report_connection_error(report, "zwift session", e)
+    finally:
+        if client is not None:
+            with suppress(Exception):
+                client.close()
+
+
 def _report_connection_error(report, label: str, error: Exception) -> None:
     msg = str(error)
     # Network and server failures should not tell the user to reset a login.
     fix = next((f"eufy-sync {hint}" for hint in (
-        "--update-password", "--reauth garmin", "--setup-strava",
+        "--update-password", "--reauth garmin", "--setup-strava", "--reauth zwift",
     ) if hint in msg), None)
     report("FAIL", label, msg, fix)
 
