@@ -11,6 +11,7 @@ from eufy_sync.cli import doctor, maintenance, profiles, setup, shared, status, 
 
 logger = logging.getLogger("eufy_sync")
 NETWORK_RETRY_DELAY = 60
+_REAUTH_TARGETS = frozenset(("garmin", "strava", "zwift"))
 
 
 def _target_label(total_counts: dict[str, int]) -> str:
@@ -25,6 +26,38 @@ def _tally_run(user, counts: dict[str, int], errors: dict[str, str], total_count
     for target_name, err in errors.items():
         failures.append((f"{user.name}/{target_name}", err))
     logger.info("User %s: synced %s", user.name, counts)
+
+
+def _known_failure_targets(failures: list, marker: str) -> set[str]:
+    """Return allowlisted target names from structured per-target failures."""
+    targets = set()
+    for name, error in failures:
+        if marker not in error or "/" not in name:
+            continue
+        target = name.rsplit("/", 1)[1]
+        if target in _REAUTH_TARGETS:
+            targets.add(target)
+    return targets
+
+
+def _reauth_repair_command(failures: list) -> str:
+    marked_failures = [(name, error) for name, error in failures if "--reauth" in error]
+    targets = _known_failure_targets(failures, "--reauth")
+    if len(marked_failures) == 1 and len(targets) == 1:
+        return f"eufy-sync --reauth {next(iter(targets))}"
+    return "eufy-sync --reauth"
+
+
+def _password_failure_title(failures: list) -> str:
+    marked_failures = [
+        (name, error) for name, error in failures if "--update-password" in error
+    ]
+    targets = _known_failure_targets(failures, "--update-password")
+    if len(marked_failures) == 1 and len(targets) == 1:
+        return f"eufy-sync: {next(iter(targets)).capitalize()} login failed"
+    if any("changed your Eufy password" in error for _, error in failures):
+        return "eufy-sync: Eufy login failed"
+    return "eufy-sync: login failed"
 
 
 def _sync_with_network_retry(user, state, **kwargs):
@@ -359,14 +392,18 @@ def _main() -> None:
             if failures:
                 from eufy_sync.cli import failure_notify
                 reauth_needed = any("--reauth" in err for _, err in failures)
-                eufy_password = any("changed your Eufy password" in err for _, err in failures)
+                password_needed = any(
+                    "--update-password" in err or "changed your Eufy password" in err
+                    for _, err in failures
+                )
                 multiple_profiles = any("multiple Eufy profiles" in err for _, err in failures)
                 all_transient = all(failure_notify.is_transient_network_error(err) for _, err in failures)
                 if reauth_needed:
-                    platform_support.notify("eufy-sync: re-login needed", "Run: eufy-sync --reauth garmin", command="eufy-sync --reauth garmin")
+                    command = _reauth_repair_command(failures)
+                    platform_support.notify("eufy-sync: re-login needed", f"Run: {command}", command=command)
                     failure_notify.clear_network_failures()
-                elif eufy_password:
-                    platform_support.notify("eufy-sync: Eufy login failed", "Run: eufy-sync --update-password", command="eufy-sync --update-password")
+                elif password_needed:
+                    platform_support.notify(_password_failure_title(failures), "Run: eufy-sync --update-password", command="eufy-sync --update-password")
                     failure_notify.clear_network_failures()
                 elif multiple_profiles:
                     platform_support.notify("eufy-sync: choose your profile", "Run: eufy-sync --select-profile", command="eufy-sync --select-profile")
