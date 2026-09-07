@@ -63,6 +63,12 @@ def test_unusable_lock_file_runs_unlocked():
                 assert second is True
 
 
+def test_strict_lock_refuses_to_run_when_lock_file_cannot_open():
+    with patch("eufy_sync.cli.lock.os.open", side_effect=OSError("read-only")):
+        with lock.single_instance(require_lock=True) as acquired:
+            assert acquired is False
+
+
 def _write_synced_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, {

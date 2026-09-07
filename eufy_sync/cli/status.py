@@ -4,6 +4,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 
+def _zwift_token_status(config) -> dict:
+    from eufy_sync.zwift_client import ZwiftClient
+    client = ZwiftClient(config)
+    try:
+        return client.token_status()
+    finally:
+        client.close()
+
+
 def _print_summary(total_counts: dict[str, int], failures: list, state, users: list) -> None:
     """Print a single-line sync summary."""
     if failures:
@@ -15,7 +24,9 @@ def _print_summary(total_counts: dict[str, int], failures: list, state, users: l
     if total > 0:
         target_names = list(total_counts.keys())
         if len(target_names) == 1:
-            name = "Garmin Connect" if target_names[0] == "garmin" else "Strava"
+            name = {"garmin": "Garmin Connect", "strava": "Strava", "zwift": "Zwift"}.get(
+                target_names[0], target_names[0].capitalize()
+            )
             print(f"Synced {total} measurement{'s' if total != 1 else ''} to {name}.")
         else:
             parts = [f"{n.capitalize()}: {c}" for n, c in total_counts.items()]
@@ -65,6 +76,13 @@ def _print_summary(total_counts: dict[str, int], failures: list, state, users: l
             parts.append("Strava token refresh pending")
         else:
             parts.append("Strava connected")
+
+    if user.zwift:
+        zwift_status = _zwift_token_status(user.zwift)
+        if zwift_status["state"] in ("valid", "refresh_needed"):
+            parts.append("Zwift connected")
+        else:
+            parts.append("Zwift not connected")
 
     print(" | ".join(parts))
     print(
@@ -121,6 +139,17 @@ def _show_status(state, users: list) -> None:
                 print("Strava auth: access token expired, will refresh on next sync")
             else:
                 print("Strava auth: valid (refresh token active)")
+
+        if user.zwift:
+            zwift_status = _zwift_token_status(user.zwift)
+            if zwift_status["state"] == "valid":
+                print("Zwift auth: valid")
+            elif zwift_status["state"] == "expired":
+                print("Zwift auth: expired - run: eufy-sync --reauth zwift")
+            elif zwift_status["state"] == "refresh_needed":
+                print("Zwift auth: connected (refreshes on next sync)")
+            else:
+                print("Zwift auth: not connected - run: eufy-sync --reauth zwift")
 
 
 def _show_history(state, users: list, limit: int = 14) -> None:

@@ -30,8 +30,9 @@ def _update_password(config_path: Path) -> None:
 
     eufy_pw = getpass.getpass("New Eufy password: ")
     garmin_pw = getpass.getpass("New Garmin password: ") if "garmin" in user else ""
+    zwift_pw = getpass.getpass("New Zwift password: ") if "zwift" in user else ""
 
-    if not eufy_pw and not garmin_pw:
+    if not eufy_pw and not garmin_pw and not zwift_pw:
         print("No changes made.")
         return
 
@@ -42,6 +43,8 @@ def _update_password(config_path: Path) -> None:
 
     if garmin_pw:
         store_password(f"{user_name}:garmin", garmin_pw)
+    if zwift_pw:
+        store_password(f"{user_name}:zwift", zwift_pw)
 
     # Clear cached tokens for changed services
     if eufy_pw:
@@ -55,17 +58,24 @@ def _update_password(config_path: Path) -> None:
         garmin_session = shared.DATA_DIR / "session.json"
         if garmin_session.exists():
             garmin_session.unlink()
+    if zwift_pw:
+        delete_token("zwift")
 
     changed = []
     if eufy_pw:
         changed.append("Eufy")
     if garmin_pw:
         changed.append("Garmin")
+    if zwift_pw:
+        changed.append("Zwift")
     print(f"{' and '.join(changed)} password{'s' if len(changed) > 1 else ''} updated.")
 
     if garmin_pw:
         print("Garmin password changed - re-authenticating...")
-        _reauth(config_path, config)
+        _reauth(config_path, config, target="garmin")
+    if zwift_pw:
+        print("Zwift password changed - re-authenticating...")
+        _reauth(config_path, config, target="zwift")
 
 
 def _reauth(config_path: Path, config: dict | None = None, force: bool = False, target: str | None = None) -> None:
@@ -82,8 +92,9 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
 
     do_garmin = (target is None or target == "garmin") and "garmin" in user
     do_strava = (target is None or target == "strava") and "strava" in user
+    do_zwift = (target is None or target == "zwift") and "zwift" in user
 
-    if target and not do_garmin and not do_strava:
+    if target and not do_garmin and not do_strava and not do_zwift:
         print(f"Target '{target}' is not configured. Check your config.")
         return
 
@@ -142,6 +153,50 @@ def _reauth(config_path: Path, config: dict | None = None, force: bool = False, 
             print("Retry with: eufy-sync --reauth strava")
             sys.exit(1)
         print("Done - Strava tokens saved.")
+
+    if do_zwift:
+        from eufy_sync.config import ZwiftConfig, _get_password
+        from eufy_sync.zwift_client import ZwiftClient
+
+        zwift_email = user["zwift"]["email"]
+        zwift_cfg = ZwiftConfig(
+            email=zwift_email,
+            password=_get_password(user_name, "zwift", zwift_email, user["zwift"].get("password")),
+        )
+        client = ZwiftClient(zwift_cfg)
+        try:
+            client.authenticate(force=True)
+            client.check_connection()
+        except Exception as e:
+            print(f"Zwift re-authentication failed: {e}")
+            print("Retry with: eufy-sync --reauth zwift")
+            sys.exit(1)
+        finally:
+            client.close()
+        print("Done - Zwift token saved.")
+
+
+def _disconnect_zwift(config_path: Path) -> None:
+    """Remove only Zwift configuration and credentials."""
+    if not config_path.exists():
+        print("No config found. Run eufy-sync first to set up.")
+        sys.exit(1)
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    user = config["users"][0]
+    if "zwift" not in user:
+        print("Zwift is not configured.")
+        return
+
+    user_name = user.get("name", "default")
+    del user["zwift"]
+    shared._write_config(config_path, config)
+
+    from eufy_sync.credentials import delete_password, delete_token
+    delete_password(f"{user_name}:zwift")
+    delete_token("zwift")
+    delete_token("zwift_probe")
+    print("Zwift disconnected. Other sync targets are unchanged.")
 
 
 def _install_launch_agent() -> None:
@@ -225,11 +280,13 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
             for name in user_names:
                 # "strava" here is the API app's client secret, not an account
                 # password; it moved into the vault alongside the other two.
-                for suffix in ["eufy", "garmin", "strava"]:
+                for suffix in ["eufy", "garmin", "strava", "zwift"]:
                     delete_password(f"{name}:{suffix}")
             delete_token("eufy")
             delete_token("garmin")
             delete_token("strava")
+            delete_token("zwift")
+            delete_token("zwift_probe")
         except Exception:
             print("Note: could not clear keychain entries (the keychain may be locked).")
 

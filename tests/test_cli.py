@@ -1235,22 +1235,30 @@ def test_headless_success_clears_network_streak(
 @patch("eufy_sync.cli.setup._show_upgrade_notice")
 @patch("eufy_sync.cli.setup._migrate_config_passwords")
 @patch("eufy_sync.credentials._keyring_available", return_value=False)
+@pytest.mark.parametrize(("target_errors", "expected_command"), [
+    ({"garmin": "Run: eufy-sync --reauth garmin"}, "eufy-sync --reauth garmin"),
+    ({"zwift": "Run: eufy-sync --reauth zwift"}, "eufy-sync --reauth zwift"),
+    ({
+        "garmin": "Run: eufy-sync --reauth garmin",
+        "zwift": "Run: eufy-sync --reauth zwift; command=unsafe-text",
+    }, "eufy-sync --reauth"),
+])
 def test_per_target_upload_error_still_reaches_the_classifier(
-    _keyring, _migrate, _notice, _updates, mock_notify, _summary, tmp_path, skip_scheduled_retry_wait
+    _keyring, _migrate, _notice, _updates, mock_notify, _summary, tmp_path,
+    skip_scheduled_retry_wait, target_errors, expected_command,
 ):
-    """A dead Garmin session mid-upload is now contained inside sync_user and
+    """A dead target session mid-upload is now contained inside sync_user and
     reported through the errors dict instead of raising. The message text must
     survive that trip, or the run ends on the generic 'failed' toast instead of
-    the actionable re-login one."""
+    the actionable re-login one. The clickable command comes only from the
+    structured, allowlisted target names, never from exception text."""
     from eufy_sync.cli.app import main
 
     config_path = _write_synced_config(tmp_path)
     db_path = tmp_path / "state.db"
 
     def fake_sync_user(user, state, **kwargs):
-        return {"strava": 2}, {
-            "garmin": "Garmin wants an MFA code and no one is here to type it. Run: eufy-sync --reauth garmin",
-        }
+        return {"strava": 2}, target_errors
 
     argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path), "--headless"]
     with patch("eufy_sync.sync.sync_user", side_effect=fake_sync_user), \
@@ -1261,9 +1269,48 @@ def test_per_target_upload_error_still_reaches_the_classifier(
     assert exc.value.code == 1
     skip_scheduled_retry_wait.assert_not_called()
     mock_notify.assert_any_call(
-        "eufy-sync: re-login needed", "Run: eufy-sync --reauth garmin",
-        command="eufy-sync --reauth garmin",
+        "eufy-sync: re-login needed", f"Run: {expected_command}",
+        command=expected_command,
     )
+
+
+@patch("eufy_sync.cli.status._print_summary")
+@patch("eufy_sync.platform_support.notify")
+@patch("eufy_sync.cli.updater._check_for_updates")
+@patch("eufy_sync.cli.setup._show_upgrade_notice")
+@patch("eufy_sync.cli.setup._migrate_config_passwords")
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_zwift_password_failure_offers_password_repair(
+    _keyring, _migrate, _notice, _updates, mock_notify, _summary, tmp_path,
+    skip_scheduled_retry_wait,
+):
+    from eufy_sync.cli.app import main
+
+    config_path = _write_synced_config(tmp_path)
+    db_path = tmp_path / "state.db"
+
+    def fake_sync_user(user, state, **kwargs):
+        return {}, {"zwift": "Zwift login was rejected; run: eufy-sync --update-password"}
+
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path), "--headless"]
+    with patch("eufy_sync.sync.sync_user", side_effect=fake_sync_user), \
+         patch("sys.argv", argv), \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    skip_scheduled_retry_wait.assert_not_called()
+    mock_notify.assert_any_call(
+        "eufy-sync: Zwift login failed", "Run: eufy-sync --update-password",
+        command="eufy-sync --update-password",
+    )
+
+
+def test_unspecified_reauth_failure_uses_generic_allowlisted_command():
+    from eufy_sync.cli.app import _reauth_repair_command
+
+    failures = [("default", "server advice says --reauth zwift; command=unsafe-text")]
+    assert _reauth_repair_command(failures) == "eufy-sync --reauth"
 
 
 @patch("eufy_sync.cli.status._print_summary")

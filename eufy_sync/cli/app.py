@@ -11,6 +11,7 @@ from eufy_sync.cli import doctor, maintenance, profiles, setup, shared, status, 
 
 logger = logging.getLogger("eufy_sync")
 NETWORK_RETRY_DELAY = 60
+_REAUTH_TARGETS = frozenset(("garmin", "strava", "zwift"))
 
 
 def _target_label(total_counts: dict[str, int]) -> str:
@@ -25,6 +26,38 @@ def _tally_run(user, counts: dict[str, int], errors: dict[str, str], total_count
     for target_name, err in errors.items():
         failures.append((f"{user.name}/{target_name}", err))
     logger.info("User %s: synced %s", user.name, counts)
+
+
+def _known_failure_targets(failures: list, marker: str) -> set[str]:
+    """Return allowlisted target names from structured per-target failures."""
+    targets = set()
+    for name, error in failures:
+        if marker not in error or "/" not in name:
+            continue
+        target = name.rsplit("/", 1)[1]
+        if target in _REAUTH_TARGETS:
+            targets.add(target)
+    return targets
+
+
+def _reauth_repair_command(failures: list) -> str:
+    marked_failures = [(name, error) for name, error in failures if "--reauth" in error]
+    targets = _known_failure_targets(failures, "--reauth")
+    if len(marked_failures) == 1 and len(targets) == 1:
+        return f"eufy-sync --reauth {next(iter(targets))}"
+    return "eufy-sync --reauth"
+
+
+def _password_failure_title(failures: list) -> str:
+    marked_failures = [
+        (name, error) for name, error in failures if "--update-password" in error
+    ]
+    targets = _known_failure_targets(failures, "--update-password")
+    if len(marked_failures) == 1 and len(targets) == 1:
+        return f"eufy-sync: {next(iter(targets)).capitalize()} login failed"
+    if any("changed your Eufy password" in error for _, error in failures):
+        return "eufy-sync: Eufy login failed"
+    return "eufy-sync: login failed"
 
 
 def _sync_with_network_retry(user, state, **kwargs):
@@ -71,14 +104,19 @@ def _main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="eufy-sync",
-        description="Sync Eufy smart scale data to Garmin Connect and Strava",
+        description="Sync Eufy smart scale data to Garmin Connect, Strava, and Zwift",
     )
     parser.add_argument("--version", "-V", action="version", version=f"eufy-sync {__version__}")
     parser.add_argument("--status", action="store_true", help="Show sync status and token health")
     parser.add_argument("--doctor", action="store_true", help="Check the whole setup and print fixes for anything wrong")
     parser.add_argument("--reauth", nargs="?", const="all", default=None, metavar="TARGET",
-                        help="Re-authenticate (optionally: garmin or strava)")
+                        choices=("all", "garmin", "strava", "zwift"),
+                        help="Re-authenticate (optionally: garmin, strava, or zwift)")
     parser.add_argument("--setup-strava", action="store_true", help="Connect Strava to your account")
+    parser.add_argument("--setup-zwift", action="store_true", help="Connect experimental Zwift weight sync")
+    parser.add_argument("--disconnect-zwift", action="store_true", help="Disconnect Zwift weight sync")
+    parser.add_argument("--target", choices=("garmin", "strava", "zwift"), default=None,
+                        help="Sync only one configured target")
     parser.add_argument("--select-profile", action="store_true", help="Choose which Eufy profile to sync")
     parser.add_argument("--update-password", action="store_true", help="Change stored passwords")
     parser.add_argument("--update", action="store_true", help="Update eufy-sync to the latest version")
@@ -119,7 +157,7 @@ def _main() -> None:
     if args.doctor:
         from eufy_sync.cli import lock
         # Live checks can refresh tokens, so they share the sync lock.
-        with lock.single_instance() as acquired:
+        with lock.single_instance(require_lock=True) as acquired:
             if not acquired:
                 print("Another sync or diagnostic is running. Retry --doctor when it finishes.")
                 sys.exit(1)
@@ -175,6 +213,24 @@ def _main() -> None:
         setup._setup_strava(config_path)
         return
 
+    if args.setup_zwift:
+        from eufy_sync.cli import lock
+        with lock.single_instance(require_lock=True) as acquired:
+            if not acquired:
+                print("Another eufy-sync run is in progress. Retry --setup-zwift when it finishes.")
+                sys.exit(1)
+            setup._setup_zwift(config_path)
+        return
+
+    if args.disconnect_zwift:
+        from eufy_sync.cli import lock
+        with lock.single_instance(require_lock=True) as acquired:
+            if not acquired:
+                print("Another eufy-sync run is in progress. Retry --disconnect-zwift when it finishes.")
+                sys.exit(1)
+            maintenance._disconnect_zwift(config_path)
+        return
+
     # Handle profile selection
     if args.select_profile:
         profiles._select_profile(config_path)
@@ -182,13 +238,23 @@ def _main() -> None:
 
     # Handle password update
     if args.update_password:
-        maintenance._update_password(config_path)
+        from eufy_sync.cli import lock
+        with lock.single_instance(require_lock=True) as acquired:
+            if not acquired:
+                print("Another eufy-sync run is in progress. Retry --update-password when it finishes.")
+                sys.exit(1)
+            maintenance._update_password(config_path)
         return
 
     # Handle reauth
     if args.reauth is not None:
         target = None if args.reauth == "all" else args.reauth
-        maintenance._reauth(config_path, force=True, target=target)
+        from eufy_sync.cli import lock
+        with lock.single_instance(require_lock=True) as acquired:
+            if not acquired:
+                print("Another eufy-sync run is in progress. Retry --reauth when it finishes.")
+                sys.exit(1)
+            maintenance._reauth(config_path, force=True, target=target)
         return
 
     # --status/--history are read-only inspection commands - on a fresh
@@ -228,6 +294,10 @@ def _main() -> None:
         sys.exit(1)
 
     has_garmin = any(u.garmin for u in config.users)
+
+    if args.target and not any(getattr(u, args.target, None) for u in config.users):
+        print(f"Target '{args.target}' is not configured. Check your config.")
+        sys.exit(1)
 
     # Handle status
     if args.status:
@@ -289,7 +359,7 @@ def _main() -> None:
             failures = []
             for user in config.users:
                 try:
-                    counts, errors = _sync_with_network_retry(user, state, backfill_days=backfill, repair_days=args.repair_days, headless=args.headless, dry_run=args.dry_run)
+                    counts, errors = _sync_with_network_retry(user, state, backfill_days=backfill, repair_days=args.repair_days, headless=args.headless, dry_run=args.dry_run, target=args.target)
                     _tally_run(user, counts, errors, total_counts, failures)
                 except AmbiguousProfileError as e:
                     interactive = not args.headless and sys.stdin.isatty()
@@ -300,7 +370,7 @@ def _main() -> None:
                         user.eufy.customer_id = customer_id
                         print("Saved. Syncing your profile now...")
                         try:
-                            counts, errors = _sync_with_network_retry(user, state, backfill_days=backfill, repair_days=args.repair_days, headless=args.headless, dry_run=args.dry_run)
+                            counts, errors = _sync_with_network_retry(user, state, backfill_days=backfill, repair_days=args.repair_days, headless=args.headless, dry_run=args.dry_run, target=args.target)
                             _tally_run(user, counts, errors, total_counts, failures)
                         except Exception as retry_error:
                             logger.exception("Failed to sync user %s after profile selection", user.name)
@@ -322,14 +392,18 @@ def _main() -> None:
             if failures:
                 from eufy_sync.cli import failure_notify
                 reauth_needed = any("--reauth" in err for _, err in failures)
-                eufy_password = any("changed your Eufy password" in err for _, err in failures)
+                password_needed = any(
+                    "--update-password" in err or "changed your Eufy password" in err
+                    for _, err in failures
+                )
                 multiple_profiles = any("multiple Eufy profiles" in err for _, err in failures)
                 all_transient = all(failure_notify.is_transient_network_error(err) for _, err in failures)
                 if reauth_needed:
-                    platform_support.notify("eufy-sync: re-login needed", "Run: eufy-sync --reauth garmin", command="eufy-sync --reauth garmin")
+                    command = _reauth_repair_command(failures)
+                    platform_support.notify("eufy-sync: re-login needed", f"Run: {command}", command=command)
                     failure_notify.clear_network_failures()
-                elif eufy_password:
-                    platform_support.notify("eufy-sync: Eufy login failed", "Run: eufy-sync --update-password", command="eufy-sync --update-password")
+                elif password_needed:
+                    platform_support.notify(_password_failure_title(failures), "Run: eufy-sync --update-password", command="eufy-sync --update-password")
                     failure_notify.clear_network_failures()
                 elif multiple_profiles:
                     platform_support.notify("eufy-sync: choose your profile", "Run: eufy-sync --select-profile", command="eufy-sync --select-profile")
@@ -384,6 +458,8 @@ def _main() -> None:
                         apps.append("Garmin Connect")
                     if any(u.strava for u in config.users):
                         apps.append("Strava")
+                    if any(u.zwift for u in config.users):
+                        apps.append("Zwift")
                     print(f"You're all set! Check the {' and '.join(apps)} app to see your data.")
             elif not args.verbose:
                 status._print_summary(total_counts, failures, state, config.users)

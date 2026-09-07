@@ -5,7 +5,8 @@ upload the same measurement twice, and both can refresh the Strava token - the
 loser then saves a token the rotation already killed. An exclusive OS lock on
 one file in the data dir keeps the second run out of the sync path; the
 live diagnostics share this lock, since they can refresh tokens too. The
-read-only commands (--status, --history) and setup/maintenance stay unlocked.
+read-only commands (--status, --history) stay unlocked. Credential-changing
+commands require the lock instead of continuing if the lock file cannot open.
 
 The lock is a courtesy, not a guarantee. If the file cannot be created the run
 proceeds unlocked rather than failing: an overlap is a rare annoyance, while a
@@ -75,16 +76,17 @@ def _release(fd: int) -> None:
 
 
 @contextlib.contextmanager
-def single_instance() -> Iterator[bool]:
+def single_instance(require_lock: bool = False) -> Iterator[bool]:
     """Hold the sync lock for the block.
 
-    Yields True when this run owns the lock, or when the lock file could not
-    be created at all and the run continues unlocked. Yields False when
-    another run holds it, and the caller should skip this run.
+    Yields True when this run owns the lock. By default, failure to create the
+    lock file also yields True so ordinary sync remains available. With
+    require_lock=True, that failure yields False so credential and token
+    mutations cannot proceed without serialization.
     """
     fd = _open()
     if fd is None:
-        yield True
+        yield not require_lock
         return
     try:
         if not _try_acquire(fd):

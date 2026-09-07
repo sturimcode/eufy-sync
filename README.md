@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/pypi/pyversions/eufy-sync)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Syncs body composition from a Eufy smart scale to Garmin Connect and Strava.
+Syncs body composition from a Eufy smart scale to Garmin Connect, plus current weight to Strava and Zwift.
 
 > macOS, Windows, and headless Linux. Needs Python 3.12+ and a terminal.
 
@@ -16,11 +16,12 @@ Eufy scales sync to Apple Health, Fitbit, and Google Fit, but not Garmin or Stra
 | Target | What syncs |
 |--------|------------|
 | Garmin Connect | Full body composition: weight, body fat, muscle mass, bone mass, hydration, BMR, visceral fat, metabolic age |
-| Strava | Weight |
+| Strava | Current weight |
+| Zwift (experimental, opt-in) | Current weight, verified after saving |
 
 ## Install
 
-You need a Eufy scale with cloud sync and a Garmin Connect and/or Strava account.
+You need a Eufy scale with cloud sync and an account with at least one target: Garmin Connect, Strava, or Zwift.
 
 Each block below can be pasted in whole; the lines run one after another.
 
@@ -66,7 +67,7 @@ Open a new terminal window, so it picks up the newly installed command, and run:
 eufy-sync
 ```
 
-It walks you through choosing targets and entering credentials, then runs the first sync.
+It walks you through choosing Garmin and/or Strava and entering credentials, then runs the first sync. For a Zwift-only setup, start with `eufy-sync --setup-zwift`, then run `eufy-sync` to sync.
 
 > **Cloned the repo?** Run install commands from outside the repo directory to avoid path conflicts, e.g. `cd /tmp && pipx install eufy-sync`.
 
@@ -82,8 +83,11 @@ eufy-sync --verbose            # detailed logs
 
 # accounts and profiles
 eufy-sync --setup-strava       # add Strava
+eufy-sync --setup-zwift        # add experimental Zwift weight sync
+eufy-sync --disconnect-zwift   # remove Zwift from this installation
+eufy-sync --target zwift       # sync only Zwift (also: garmin / strava)
 eufy-sync --select-profile     # pick your profile on a shared scale
-eufy-sync --reauth [target]    # re-login (all, or garmin / strava)
+eufy-sync --reauth [target]    # re-login (all, or garmin / strava / zwift)
 eufy-sync --update-password    # change stored passwords
 
 # automation
@@ -164,16 +168,26 @@ Since June 2026, Strava only lets paid subscribers use its API, so step 1 needs 
 3. Run `eufy-sync --setup-strava` and enter your Client ID and Secret
 4. Authorize in the browser when it opens
 
+## Adding Zwift (experimental)
+
+Run `eufy-sync --setup-zwift` and enter your Zwift email and password. Setup checks that it can read your profile before enabling sync, and saves the login in the existing credential store. Later runs reuse it and renew the session automatically.
+
+Zwift receives only the newest valid weight fetched for your selected Eufy profile. It does not receive body composition or weight history. Each update reads your current profile, changes its weight, then reads it again to verify the save. A successful HTTP response alone does not count as a delivered weight. If the weight already matches, the tool records a verified match without sending another update.
+
+This uses an unofficial Zwift route and is experimental. A changed weight and its restoration have been verified on a real account, including reads with renewed authentication. That does not establish reliability across every account or later updates from connected services. Zwift failures are reported separately so Garmin and Strava can continue.
+
+Use `eufy-sync --target zwift --dry-run` to preview a run. The first sync looks back seven days; if your latest weigh-in is older, use `eufy-sync --target zwift --backfill-days 30`. Older backfill cannot replace a newer weight already recorded as synced. `eufy-sync --disconnect-zwift` removes this target and its saved login from the installation.
+
 ## How it works
 
 ```
 Eufy Cloud  ->  eufy_client.py  ->  transform   ->  garmin_client.py  ->  Garmin (body comp)
 (pull)          (auth)              (filter,    ->  strava_client.py  ->  Strava (weight)
-                                    dedup,
+                                    dedup,     ->  zwift_client.py   ->  Zwift (weight)
                                     state.db)
 ```
 
-On each run it pulls your Eufy history and checks a local SQLite DB for what each target already has, then uploads only what is new: full body composition to Garmin through python-garminconnect's upload API (skipping dates Garmin already holds, so two machines do not double up), and the latest weight to Strava. Every sync is recorded in the DB.
+On each run it pulls your Eufy history and checks a local SQLite DB for what each target already has, then uploads only what is new: full body composition to Garmin through python-garminconnect's upload API (skipping dates Garmin already holds, so two machines do not double up), and the latest weight to Strava and Zwift. Successful deliveries are recorded in the DB; Zwift is recorded only after the current weight is verified.
 
 ## How Garmin login works
 
@@ -195,7 +209,7 @@ Headless setups use the direct login only, since there is no screen for a browse
 
 ## Security
 
-Credentials go over HTTPS to Eufy, Garmin, and Strava only, and are never logged or sent anywhere else. The one other outbound call is a weekly version check to pypi.org, with no credentials.
+Credentials go over HTTPS to their respective services: Eufy, Garmin, Strava, and Zwift, and are never logged or sent anywhere else. The one other outbound call is a weekly version check to pypi.org, with no credentials.
 
 Where passwords and OAuth tokens live:
 
@@ -205,7 +219,7 @@ Where passwords and OAuth tokens live:
 
 The keychain is used whenever it works; systems without one fall back to the file automatically. `eufy-sync --use-file-store` makes the switch permanent, with no keychain prompts at all, a good fit for headless or scheduled setups; `eufy-sync --use-keychain` moves them back. A credentials file that was not created by `--use-file-store` does not override a working keychain. On Windows the file fallback relies on your user profile's permissions, since Windows does not honor POSIX file modes.
 
-The config in `~/.garmin-sync/` holds only email addresses and Strava app credentials, at `600` permissions.
+The config in `~/.garmin-sync/` holds email addresses, the selected Eufy profile ID, and the public Strava client ID, at `600` permissions. Passwords and the Strava client secret stay in the credential store.
 
 ## Known quirks
 
@@ -231,4 +245,4 @@ If this saves you from typing your weight into Garmin by hand, you can [buy me a
 
 ## Disclaimer
 
-Uses unofficial APIs for Eufy and Garmin, and the official Strava API. Could break if any of them change things. Use at your own risk.
+Uses unofficial APIs for Eufy, Garmin, and Zwift, and the official Strava API. Could break if any of them change things. Use at your own risk.

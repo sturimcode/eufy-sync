@@ -187,3 +187,38 @@ def test_load_config_missing_strava_secret_names_setup_strava(_keyring, tmp_path
         load_config(path)
 
 
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_load_config_allows_zwift_only_and_resolves_password(_keyring, tmp_path: Path):
+    from eufy_sync.credentials import store_password
+
+    store_password("default:zwift", "vault-password")
+    path = tmp_path / "config.yaml"
+    _write(path, {
+        "users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com", "password": "eufy-password"},
+            "zwift": {"email": "z@example.com"},
+        }],
+    })
+
+    cfg = load_config(path)
+    assert cfg.users[0].garmin is None
+    assert cfg.users[0].strava is None
+    assert cfg.users[0].zwift.email == "z@example.com"
+    assert cfg.users[0].zwift.password == "vault-password"
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_load_config_zwift_password_env_fallback(_keyring, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ZWIFT_TEST_PASSWORD", "environment-password")
+    path = tmp_path / "config.yaml"
+    _write(path, {
+        "users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com", "password": "eufy-password"},
+            "zwift": {"email": "z@example.com", "password": "${ZWIFT_TEST_PASSWORD}"},
+        }],
+    })
+
+    assert load_config(path).users[0].zwift.password == "environment-password"
+
