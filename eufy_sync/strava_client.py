@@ -218,12 +218,19 @@ class StravaClient:
         _save_tokens(self._tokens)
         logger.info("Refreshed Strava access token")
 
+    def check_connection(self) -> None:
+        """Verify the saved session with a read-only athlete request."""
+        resp = self._client.get(f"{STRAVA_API_BASE}/athlete")
+        if resp.status_code in (401, 403):
+            from eufy_sync.sync import PermanentSyncError
+            raise PermanentSyncError("Strava rejected the session. Run: eufy-sync --setup-strava")
+        resp.raise_for_status()
+
     def update_weight(self, weight_kg: float) -> dict:
         """Update the athlete's weight on Strava.
 
-        Note: Strava only accepts current weight - no timestamp or body
-        composition fields. When syncing multiple measurements, send in
-        chronological order so the final weight is correct.
+        Strava only accepts current weight, without a timestamp or body
+        composition fields. The caller selects the newest valid reading.
         """
         resp = self._client.put(
             f"{STRAVA_API_BASE}/athlete",

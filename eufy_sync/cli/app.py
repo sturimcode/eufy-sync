@@ -4,11 +4,13 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
+from time import sleep
 
 from eufy_sync import platform_support
 from eufy_sync.cli import doctor, maintenance, profiles, setup, shared, status, updater
 
 logger = logging.getLogger("eufy_sync")
+NETWORK_RETRY_DELAY = 60
 
 
 def _target_label(total_counts: dict[str, int]) -> str:
@@ -23,6 +25,33 @@ def _tally_run(user, counts: dict[str, int], errors: dict[str, str], total_count
     for target_name, err in errors.items():
         failures.append((f"{user.name}/{target_name}", err))
     logger.info("User %s: synced %s", user.name, counts)
+
+
+def _sync_with_network_retry(user, state, **kwargs):
+    """Give scheduled network failures one delayed retry, keeping partial counts."""
+    from eufy_sync.network import is_transient_network_error
+    from eufy_sync.sync import sync_user
+
+    can_retry = kwargs.get("headless", False) and not kwargs.get("dry_run", False)
+    totals: dict[str, int] = {}
+    for attempt in range(2):
+        try:
+            counts, errors = sync_user(user, state, **kwargs)
+        except Exception as e:
+            if not (can_retry and attempt == 0 and is_transient_network_error(str(e))):
+                if any(totals.values()):
+                    return totals, {"sync": str(e)}
+                raise
+        else:
+            for target, count in counts.items():
+                totals[target] = totals.get(target, 0) + count
+            if not (
+                can_retry and attempt == 0 and errors
+                and all(is_transient_network_error(err) for err in errors.values())
+            ):
+                return totals, errors
+        logger.warning("Network unavailable; retrying scheduled sync once in %ds", NETWORK_RETRY_DELAY)
+        sleep(NETWORK_RETRY_DELAY)
 
 
 def main() -> None:
@@ -88,7 +117,13 @@ def _main() -> None:
     # Handle doctor - must report even on a fresh install, never launch the
     # first-run wizard, and never traceback.
     if args.doctor:
-        sys.exit(doctor._run_doctor(config_path, db_path))
+        from eufy_sync.cli import lock
+        # Live checks can refresh tokens, so they share the sync lock.
+        with lock.single_instance() as acquired:
+            if not acquired:
+                print("Another sync or diagnostic is running. Retry --doctor when it finishes.")
+                sys.exit(1)
+            sys.exit(doctor._run_doctor(config_path, db_path))
 
     # Handle full uninstall
     if args.uninstall:
@@ -222,10 +257,9 @@ def _main() -> None:
     from eufy_sync.cli import lock
     from eufy_sync.eufy_client import AmbiguousProfileError
     from eufy_sync.state import SyncState
-    from eufy_sync.sync import sync_user
 
-    # Only the sync path is locked; --status, --history, --doctor and the
-    # setup commands are read-only or interactive and never collide. A manual
+    # Sync and live diagnostics share the lock because both refresh tokens.
+    # A manual
     # run landing on top of the 4-hourly scheduled one would upload the same
     # measurement twice, and both runs refreshing the Strava token can leave
     # the loser saving a token the rotation already killed. An overlap is a
@@ -255,7 +289,7 @@ def _main() -> None:
             failures = []
             for user in config.users:
                 try:
-                    counts, errors = sync_user(user, state, backfill_days=backfill, repair_days=args.repair_days, headless=args.headless, dry_run=args.dry_run)
+                    counts, errors = _sync_with_network_retry(user, state, backfill_days=backfill, repair_days=args.repair_days, headless=args.headless, dry_run=args.dry_run)
                     _tally_run(user, counts, errors, total_counts, failures)
                 except AmbiguousProfileError as e:
                     interactive = not args.headless and sys.stdin.isatty()
@@ -266,7 +300,7 @@ def _main() -> None:
                         user.eufy.customer_id = customer_id
                         print("Saved. Syncing your profile now...")
                         try:
-                            counts, errors = sync_user(user, state, backfill_days=backfill, repair_days=args.repair_days, headless=args.headless, dry_run=args.dry_run)
+                            counts, errors = _sync_with_network_retry(user, state, backfill_days=backfill, repair_days=args.repair_days, headless=args.headless, dry_run=args.dry_run)
                             _tally_run(user, counts, errors, total_counts, failures)
                         except Exception as retry_error:
                             logger.exception("Failed to sync user %s after profile selection", user.name)

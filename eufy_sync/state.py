@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -39,6 +40,13 @@ class SyncState:
                 response TEXT,
                 weight_only INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(user_name, eufy_measurement_id, target)
+            );
+            CREATE TABLE IF NOT EXISTS pending_upgrades (
+                user_name TEXT NOT NULL,
+                measurement_id TEXT NOT NULL,
+                previous_measurement_id TEXT NOT NULL,
+                measurement_json TEXT NOT NULL,
+                PRIMARY KEY(user_name, measurement_id)
             );
         """)
         self._conn.commit()
@@ -174,6 +182,36 @@ class SyncState:
             (user_name, measurement_id, target),
         )
         self._conn.commit()
+
+    def save_pending_upgrade(self, user_name: str, previous_id: str, measurement: dict) -> None:
+        """Commit the replacement before the remote weight-only entry is deleted."""
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO pending_upgrades VALUES (?, ?, ?, ?)",
+                (user_name, measurement["measurement_id"], previous_id, json.dumps(measurement)),
+            )
+
+    def get_pending_upgrades(self, user_name: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT previous_measurement_id, measurement_json FROM pending_upgrades WHERE user_name = ?",
+            (user_name,),
+        )
+        return [{"previous_id": previous_id, "measurement": json.loads(payload)} for previous_id, payload in rows]
+
+    def clear_pending_upgrade(self, user_name: str, measurement_id: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM pending_upgrades WHERE user_name = ? AND measurement_id = ?",
+                (user_name, measurement_id),
+            )
+
+    def get_oldest_weight_only_timestamp(self, user_name: str, target: str) -> int | None:
+        rows = self._conn.execute(
+            "SELECT measurement_timestamp FROM sync_log WHERE user_name = ? AND target = ? AND weight_only = 1",
+            (user_name, target),
+        )
+        timestamps = [datetime.fromisoformat(row[0]).timestamp() for row in rows]
+        return int(min(timestamps)) if timestamps else None
 
     def get_latest_sync_timestamp(self, user_name: str, target: str | None = None) -> int | None:
         """Return the unix timestamp of the most recent synced measurement,
