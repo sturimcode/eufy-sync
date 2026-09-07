@@ -272,7 +272,8 @@ class EufyClient:
     def list_profiles(self) -> list[EufyProfile]:
         """Return one profile per customer_id seen in the full history, newest first."""
         records = self._get_records(None)
-        return self._profiles_from(self._parse_all(records))
+        raw = self._fetch_raw_measurements(None, filter_profile=False)
+        return self._profiles_from(self._parse_all(records) + raw)
 
     def fetch_measurements(self, after_timestamp: int | None = None) -> list[EufyMeasurement]:
         if self.config.customer_id:
@@ -291,14 +292,31 @@ class EufyClient:
             else:
                 measurements = parsed
 
-        if measurements:
-            return measurements
-        # The normal endpoints had nothing in the window. This is the headless
-        # case: a weigh-in that the phone app has not processed yet. Fall back to
-        # the per-device raw Wi-Fi endpoint, which exposes the weight earlier.
-        return self._fetch_raw_measurements(after_timestamp)
+        processed = measurements
+        # Reading farther back for pending upgrades must not hide newer raw
+        # weigh-ins behind an older processed record. Merge both endpoints,
+        # always keeping full body composition when their ids match.
+        # With no selection, inspect raw history before applying the window.
+        # An older profile or one seen only in processed history still makes
+        # this a shared account. Keep this check outside the fallback's
+        # best-effort exception handling so ambiguity stops the sync.
+        raw_after = after_timestamp if self.config.customer_id else None
+        measurements = self._fetch_raw_measurements(raw_after)
+        if not self.config.customer_id:
+            profiles = self._profiles_from(parsed + measurements)
+            if len(profiles) > 1:
+                raise AmbiguousProfileError(profiles)
+        if after_timestamp is not None:
+            cutoff = datetime.fromtimestamp(after_timestamp, tz=timezone.utc)
+            measurements = [m for m in measurements if m.timestamp >= cutoff]
+            processed = [m for m in processed if m.timestamp >= cutoff]
+        combined = {m.measurement_id: m for m in measurements}
+        combined.update({m.measurement_id: m for m in processed})
+        return list(combined.values())
 
-    def _fetch_raw_measurements(self, after_timestamp: int | None) -> list[EufyMeasurement]:
+    def _fetch_raw_measurements(
+        self, after_timestamp: int | None, *, filter_profile: bool = True,
+    ) -> list[EufyMeasurement]:
         """Recover weight-only measurements from the raw Wi-Fi endpoint, applying
         the same profile and window filters as the normal path. Degrades to an
         empty list on any error so the run is never worse than today."""
@@ -322,7 +340,7 @@ class EufyClient:
                 if m is not None:
                     measurements.append(m)
             raw_count = len(measurements)
-            if self.config.customer_id:
+            if filter_profile and self.config.customer_id:
                 measurements = [m for m in measurements if m.customer_id == self.config.customer_id]
             if after_timestamp is not None:
                 cutoff = datetime.fromtimestamp(after_timestamp, tz=timezone.utc)
@@ -358,7 +376,10 @@ class EufyClient:
             logger.warning("Raw Wi-Fi record has invalid weight: %s", raw_weight)
             return None
 
-        customer_id = record.get("customer_id", "unknown")
+        customer_id = record.get("customer_id")
+        if not customer_id or customer_id == "unknown":
+            logger.warning("Raw Wi-Fi record has no profile id; skipping unassigned weight")
+            return None
         measurement_id = f"{customer_id}_{update_time}"
 
         return EufyMeasurement(

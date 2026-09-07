@@ -9,6 +9,7 @@ line) when check 1 (config) fails, since nothing else can load without it.
 from __future__ import annotations
 
 import time
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from eufy_sync.cli import updater
 from eufy_sync.config import load_config
 from eufy_sync.credentials import active_store_label
 from eufy_sync.eufy_client import EufyClient
-from eufy_sync.garmin_auth import GarminAuth
+from eufy_sync.garmin_client import GarminClient
 from eufy_sync.state import SyncState
 from eufy_sync.strava_client import StravaClient
 
@@ -165,30 +166,42 @@ def _check_eufy_token(report, user):
 
 
 def _check_garmin_session(report, user) -> None:
+    client = None
     try:
-        auth = GarminAuth(user.garmin.email, user.garmin.password)
-        status = auth.token_status()
-        if status.get("state") == "valid":
-            report("PASS", "garmin session", "valid")
-        else:
-            report("FAIL", "garmin session", "expired", "eufy-sync --reauth garmin")
+        client = GarminClient(user.garmin)
+        client.authenticate(allow_interactive=False)
+        client.check_connection()
+        report("PASS", "garmin session", "connected (live check)")
     except Exception as e:
-        report("FAIL", "garmin session", str(e), "eufy-sync --reauth garmin")
+        _report_connection_error(report, "garmin session", e)
+    finally:
+        if client is not None:
+            with suppress(Exception):
+                client.close()
 
 
 def _check_strava_token(report, user) -> None:
+    client = None
     try:
         client = StravaClient(user.strava)
-        status = client.token_status()
-        state = status.get("state")
-        if state == "valid":
-            report("PASS", "strava token", "valid")
-        elif state == "refresh_needed":
-            report("PASS", "strava token", "valid (refresh pending on next sync)")
-        else:
-            report("FAIL", "strava token", state or "expired", "eufy-sync --reauth strava")
+        client.authenticate()
+        client.check_connection()
+        report("PASS", "strava token", "connected (live check)")
     except Exception as e:
-        report("FAIL", "strava token", str(e), "eufy-sync --reauth strava")
+        _report_connection_error(report, "strava token", e)
+    finally:
+        if client is not None:
+            with suppress(Exception):
+                client.close()
+
+
+def _report_connection_error(report, label: str, error: Exception) -> None:
+    msg = str(error)
+    # Network and server failures should not tell the user to reset a login.
+    fix = next((f"eufy-sync {hint}" for hint in (
+        "--update-password", "--reauth garmin", "--setup-strava",
+    ) if hint in msg), None)
+    report("FAIL", label, msg, fix)
 
 
 def _check_eufy_cloud(report, eufy_client) -> None:

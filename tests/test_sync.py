@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from eufy_sync.config import EufyConfig, GarminConfig, StravaConfig, UserConfig
 from eufy_sync.eufy_client import EufyMeasurement
 from eufy_sync.state import SyncState
@@ -196,8 +198,8 @@ def _measurement(weight_kg: float, dt: datetime) -> EufyMeasurement:
     )
 
 
-def test_strava_receives_measurements_in_chronological_order(tmp_path: Path):
-    """Strava only stores latest weight; multi-measurement syncs must finish on the newest."""
+def test_strava_receives_only_the_newest_valid_measurement(tmp_path: Path):
+    """Skip history and invalid later readings when choosing Strava's current weight."""
     state = SyncState(tmp_path / "test.db")
 
     older = _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc))
@@ -205,7 +207,8 @@ def test_strava_receives_measurements_in_chronological_order(tmp_path: Path):
     newest = _measurement(86.0, datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc))
 
     # Eufy API typically returns newest-first
-    fetched = [newest, middle, older]
+    invalid = _measurement(0.0, newest.timestamp + timedelta(days=1))
+    fetched = [invalid, newest, middle, older]
 
     user = UserConfig(
         name="default",
@@ -231,10 +234,11 @@ def test_strava_receives_measurements_in_chronological_order(tmp_path: Path):
     assert errors == {}
 
     weights_uploaded = [call.args[0] for call in fake_strava.update_weight.call_args_list]
-    assert weights_uploaded == [85.0, 85.5, 86.0], (
-        f"Strava must receive weights oldest→newest so the final value is the newest, "
-        f"got order: {weights_uploaded}"
-    )
+    assert weights_uploaded == [86.0]
+    assert counts == {"strava": 1}
+    assert state.is_synced(user.name, newest.measurement_id, "strava")
+    assert not state.is_synced(user.name, older.measurement_id, "strava")
+    assert state.get_latest_sync_timestamp(user.name, "strava") == int(newest.timestamp.timestamp())
 
     state.close()
 
@@ -500,17 +504,17 @@ def test_garmin_upload_failure_does_not_stop_strava(tmp_path: Path):
 
     assert "--reauth" in errors["garmin"]
     assert "strava" not in errors
-    assert counts["strava"] == 2
+    assert counts["strava"] == 1
     assert counts["garmin"] == 0
 
     # Garmin is dropped after the first failure, not retried per measurement.
     assert fake_garmin.upload_body_composition.call_count == 1
     weights = [call.args[0] for call in fake_strava.update_weight.call_args_list]
-    assert weights == [85.0, 84.7]
+    assert weights == [84.7]
 
     # Nothing is recorded for the upload that failed.
     assert not state.is_synced(user.name, first.measurement_id, "garmin")
-    assert state.is_synced(user.name, first.measurement_id, "strava")
+    assert not state.is_synced(user.name, first.measurement_id, "strava")
     assert state.is_synced(user.name, second.measurement_id, "strava")
 
     state.close()
@@ -536,7 +540,8 @@ def test_all_upload_failures_return_errors_without_raising(tmp_path: Path):
 
     assert set(errors) == {"garmin", "strava"}
     assert counts == {"garmin": 0, "strava": 0}
-    # Both dropped on the first measurement; the second is never attempted.
+    # Each target is dropped after its one attempted upload. Strava only
+    # attempts the newest reading, even after Garmin failed on the oldest.
     assert fake_garmin.upload_body_composition.call_count == 1
     assert fake_strava.update_weight.call_count == 1
 
@@ -745,7 +750,9 @@ def test_full_record_with_different_id_replaces_instead_of_duplicating(tmp_path:
     state = SyncState(tmp_path / "test.db")
     user = _garmin_user()
     weigh_in = datetime(2026, 5, 10, 7, 0, tzinfo=timezone.utc)
-    processed = datetime(2026, 5, 10, 9, 30, tzinfo=timezone.utc)  # app opened later
+    # Both timestamps describe the weigh-in, with a small recording delay.
+    # A time hours later no longer counts as evidence of the same reading.
+    processed = weigh_in + timedelta(seconds=30)
 
     raw = _raw_measurement(85.0, weigh_in)
     _run_garmin_sync(user, state, [raw], has_weight_on_date_return=False)
@@ -768,6 +775,117 @@ def test_full_record_with_different_id_replaces_instead_of_duplicating(tmp_path:
     state.close()
 
 
+@pytest.mark.parametrize("seconds,weight", [(12 * 3600, 85.0), (30, 88.0)])
+def test_distinct_full_reading_preserves_same_day_raw_reading(tmp_path: Path, seconds, weight):
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    morning = datetime(2026, 5, 10, 8).astimezone()
+    raw = _raw_measurement(85.0, morning)
+    _run_garmin_sync(user, state, [raw], has_weight_on_date_return=False)
+
+    full = _full_measurement(weight, morning + timedelta(seconds=seconds))
+    garmin = _run_garmin_sync(user, state, [full], has_weight_on_date_return=True)
+
+    garmin.delete_weight_entry.assert_not_called()
+    garmin.upload_body_composition.assert_called_once()
+    assert state.is_synced(user.name, full.measurement_id, "garmin")
+    remaining = state.weight_only_syncs_on_date(user.name, "garmin", morning.date())
+    assert [r["measurement_id"] for r in remaining] == [raw.measurement_id]
+    state.close()
+
+
+def test_ambiguous_raw_matches_are_preserved(tmp_path: Path):
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    dt = datetime(2026, 5, 10, 12, tzinfo=timezone.utc)
+    raws = [_raw_measurement(85.0, dt + timedelta(seconds=s)) for s in (0, 60)]
+    _run_garmin_sync(user, state, raws, has_weight_on_date_return=False)
+
+    full = _full_measurement(85.0, dt + timedelta(seconds=30))
+    garmin = _run_garmin_sync(user, state, [full], has_weight_on_date_return=True)
+
+    garmin.delete_weight_entry.assert_not_called()
+    garmin.upload_body_composition.assert_called_once()
+    assert len(state.weight_only_syncs_on_date(user.name, "garmin", dt.astimezone().date())) == 2
+    state.close()
+
+
+def test_failed_upgrade_survives_restart_and_eufy_outage(tmp_path: Path):
+    from eufy_sync.sync import PermanentSyncError
+
+    db_path = tmp_path / "test.db"
+    state = SyncState(db_path)
+    user = _garmin_user()
+    dt = datetime(2026, 5, 10, 12, tzinfo=timezone.utc)
+    raw = _raw_measurement(85.0, dt)
+    full = _full_measurement(85.0, dt)
+    _run_garmin_sync(user, state, [raw], has_weight_on_date_return=False)
+    source = MagicMock()
+    source.fetch_measurements.return_value = [full]
+    garmin = MagicMock()
+    garmin.upload_body_composition.side_effect = PermanentSyncError("upload rejected")
+
+    def delete_only_after_committing_recovery(*args):
+        with sqlite3.connect(db_path) as observer:
+            assert observer.execute("SELECT COUNT(*) FROM pending_upgrades").fetchone()[0] == 1
+        return True
+
+    garmin.delete_weight_entry.side_effect = delete_only_after_committing_recovery
+    with patch("eufy_sync.sync.EufyClient", return_value=source), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=garmin), \
+         patch("eufy_sync.sync.time.sleep"):
+        _, errors = sync_user(user, state)
+    assert errors == {"garmin": "upload rejected"}
+    garmin.delete_weight_entry.assert_called_once()
+    state.close()
+
+    state = SyncState(db_path)
+    assert len(state.get_pending_upgrades(user.name)) == 1
+    source.authenticate.side_effect = RuntimeError("network is unreachable")
+    garmin.upload_body_composition.side_effect = None
+    garmin.upload_body_composition.return_value = {"ok": True}
+    garmin.reset_mock()
+    user.strava = StravaConfig(client_id="fake", client_secret="fake")
+    strava = MagicMock()
+    with patch("eufy_sync.sync.EufyClient", return_value=source), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=garmin), \
+         patch("eufy_sync.strava_client.StravaClient", return_value=strava), \
+         patch("eufy_sync.sync.time.sleep"):
+        counts, errors = sync_user(user, state)
+    assert counts == {"garmin": 1, "strava": 0}
+    strava.update_weight.assert_not_called()
+    assert errors == {"eufy": "network is unreachable"}
+    assert garmin.upload_body_composition.call_args.args[0].percent_fat == 18.5
+    assert state.get_pending_upgrades(user.name) == []
+    assert state.weight_only_syncs_on_date(user.name, "garmin", dt.astimezone().date()) == []
+    state.close()
+
+
+def test_uploaded_replacement_finishes_bookkeeping_after_a_crash(tmp_path: Path):
+    from dataclasses import asdict
+
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    dt = datetime(2026, 5, 10, 12, tzinfo=timezone.utc)
+    raw = _raw_measurement(85.0, dt)
+    full = _full_measurement(85.0, dt + timedelta(seconds=30))
+    state.record_sync(user.name, raw.measurement_id, raw.timestamp.isoformat(),
+                      raw.weight_kg, dt.isoformat(), target="garmin", weight_only=True)
+    payload = asdict(full)
+    payload["timestamp"] = full.timestamp.isoformat()
+    state.save_pending_upgrade(user.name, raw.measurement_id, payload)
+    state.record_sync(user.name, full.measurement_id, full.timestamp.isoformat(),
+                      full.weight_kg, dt.isoformat(), target="garmin")
+
+    garmin = _run_garmin_sync(user, state, [], has_weight_on_date_return=True)
+
+    garmin.delete_weight_entry.assert_not_called()
+    garmin.upload_body_composition.assert_not_called()
+    assert state.get_pending_upgrades(user.name) == []
+    assert state.get_oldest_weight_only_timestamp(user.name, "garmin") is None
+    state.close()
+
+
 def test_second_full_record_same_day_does_not_delete(tmp_path: Path):
     """Regression: a corrected re-weigh (two FULL records the same day) must
     keep today's behavior - upload the second one, delete nothing."""
@@ -783,6 +901,83 @@ def test_second_full_record_same_day_does_not_delete(tmp_path: Path):
     fake_garmin_2.upload_body_composition.assert_called_once()
     fake_garmin_2.delete_weight_entry.assert_not_called()
 
+    state.close()
+
+
+def test_automatic_sync_revisits_older_weight_only_readings(tmp_path: Path):
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    old_dt = datetime(2026, 5, 10, 12, tzinfo=timezone.utc)
+    old_raw = _raw_measurement(85.0, old_dt)
+    newest = _full_measurement(84.0, old_dt + timedelta(days=3))
+    _run_garmin_sync(user, state, [old_raw, newest], has_weight_on_date_return=False)
+    old_full = _full_measurement(85.0, old_dt)
+    source = MagicMock()
+    source.fetch_measurements.side_effect = lambda after_timestamp: [
+        m for m in (old_full, newest) if m.timestamp.timestamp() >= after_timestamp
+    ]
+    garmin = MagicMock()
+    garmin.upload_body_composition.return_value = {"ok": True}
+    with patch("eufy_sync.sync.EufyClient", return_value=source), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=garmin), \
+         patch("eufy_sync.sync.time.sleep"):
+        counts, errors = sync_user(user, state)
+    assert errors == {}
+    assert counts == {"garmin": 1}
+    assert state.get_oldest_weight_only_timestamp(user.name, "garmin") is None
+    assert state.get_latest_sync_timestamp(user.name, "garmin") == int(newest.timestamp.timestamp())
+    state.close()
+
+
+@pytest.mark.parametrize("mode,include_current", [
+    ({"backfill_days": 30}, True),
+    ({"backfill_days": 30}, False),
+    ({"repair_days": 30}, False),
+])
+def test_strava_never_rolls_back_to_missing_history(tmp_path: Path, mode, include_current):
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_and_strava_user()
+    older = _measurement(85.0, datetime(2026, 5, 10, 12, tzinfo=timezone.utc))
+    current = _measurement(80.0, datetime(2026, 5, 20, 12, tzinfo=timezone.utc))
+    state.record_sync(user.name, current.measurement_id, current.timestamp.isoformat(),
+                      current.weight_kg, current.timestamp.isoformat(), target="strava")
+    source = MagicMock()
+    source.fetch_measurements.return_value = [older, current] if include_current else [older]
+    garmin = MagicMock()
+    garmin.has_weight_on_date.return_value = False
+    garmin.upload_body_composition.return_value = {"ok": True}
+    strava = MagicMock()
+    strava.update_weight.return_value = {"ok": True}
+
+    with patch("eufy_sync.sync.EufyClient", return_value=source), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=garmin), \
+         patch("eufy_sync.strava_client.StravaClient", return_value=strava), \
+         patch("eufy_sync.sync.time.sleep"):
+        counts, errors = sync_user(user, state, **mode)
+
+    assert errors == {}
+    strava.update_weight.assert_not_called()
+    assert not state.is_synced(user.name, older.measurement_id, "strava")
+    assert state.is_synced(user.name, older.measurement_id, "garmin")
+    assert counts["garmin"] == len(source.fetch_measurements.return_value)
+    state.close()
+
+
+def test_strava_advances_after_skipping_older_history(tmp_path: Path):
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_and_strava_user()
+    older = _measurement(85.0, datetime(2026, 5, 10, 12, tzinfo=timezone.utc))
+    current = _measurement(80.0, datetime(2026, 5, 20, 12, tzinfo=timezone.utc))
+    newest = _measurement(79.0, datetime(2026, 5, 21, 12, tzinfo=timezone.utc))
+    state.record_sync(user.name, current.measurement_id, current.timestamp.isoformat(),
+                      current.weight_kg, current.timestamp.isoformat(), target="strava")
+
+    counts, errors, _, strava = _run_dual_sync(user, state, [newest, older, current])
+
+    assert errors == {}
+    strava.update_weight.assert_called_once_with(79.0)
+    assert counts["strava"] == 1
+    assert state.is_synced(user.name, newest.measurement_id, "strava")
     state.close()
 
 

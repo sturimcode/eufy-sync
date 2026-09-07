@@ -4,8 +4,8 @@ A manual run and the 4-hourly scheduled run can overlap. Two syncs at once can
 upload the same measurement twice, and both can refresh the Strava token - the
 loser then saves a token the rotation already killed. An exclusive OS lock on
 one file in the data dir keeps the second run out of the sync path; the
-read-only commands (--status, --history, --doctor) and the setup/maintenance
-commands stay unlocked.
+live diagnostics share this lock, since they can refresh tokens too. The
+read-only commands (--status, --history) and setup/maintenance stay unlocked.
 
 The lock is a courtesy, not a guarantee. If the file cannot be created the run
 proceeds unlocked rather than failing: an overlap is a rare annoyance, while a

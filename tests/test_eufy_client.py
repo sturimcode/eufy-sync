@@ -284,14 +284,17 @@ def test_fetch_falls_back_to_raw_when_normal_empty():
     assert measurements[0].body_fat_pct is None
 
 
-def test_fetch_does_not_use_raw_when_normal_has_data():
+def test_fetch_merges_new_raw_readings_and_prefers_processed_duplicates():
     c = _client(customer_id="a")
-    fallback_probe = MagicMock()
+    raws = [_raw_wifi_record("a", 80.0, t) for t in (2_000_000_000, 2_000_086_400)]
     with patch.object(c, "_get_records", return_value=[_record("a", 800, 2_000_000_000)]), \
-         patch.object(c, "_fetch_raw_measurements", fallback_probe):
+         patch.object(c, "_list_device_ids", return_value=["dev1"]), \
+         patch.object(c, "_get_raw_records", return_value=raws):
         measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
-    assert len(measurements) == 1
-    fallback_probe.assert_not_called()
+    assert len(measurements) == 2
+    by_id = {m.measurement_id: m for m in measurements}
+    assert by_id["a_2000000000"].weight_only is False
+    assert by_id["a_2000086400"].weight_only is True
 
 
 def test_raw_fallback_drops_other_profiles():
@@ -305,6 +308,58 @@ def test_raw_fallback_drops_other_profiles():
          patch.object(c, "_get_raw_records", return_value=raws):
         measurements = c.fetch_measurements(after_timestamp=1_500_000_000)
     assert {m.customer_id for m in measurements} == {"a"}
+
+
+@pytest.mark.parametrize("other_time", [1_000, 2_000_000_000])
+def test_raw_fallback_requires_selection_even_for_an_older_second_profile(other_time):
+    c = _client()
+    raws = [_raw_wifi_record("a", 80.0, 2_000_000_000), _raw_wifi_record("b", 60.0, other_time)]
+    with patch.object(c, "_get_records", return_value=[]), \
+         patch.object(c, "_list_device_ids", return_value=["dev1"]), \
+         patch.object(c, "_get_raw_records", return_value=raws) as get_raw:
+        with pytest.raises(AmbiguousProfileError) as exc:
+            c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert {p.customer_id for p in exc.value.profiles} == {"a", "b"}
+    get_raw.assert_called_once_with("dev1", None)
+
+
+def test_raw_fallback_checks_processed_history_for_other_profiles():
+    c = _client()
+    with patch.object(c, "_get_records", return_value=[_record("a", 800, 1_000)]), \
+         patch.object(c, "_list_device_ids", return_value=["dev1"]), \
+         patch.object(c, "_get_raw_records", return_value=[_raw_wifi_record("b", 60.0, 2_000_000_000)]):
+        with pytest.raises(AmbiguousProfileError) as exc:
+            c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert {p.customer_id for p in exc.value.profiles} == {"a", "b"}
+
+
+def test_single_raw_profile_is_filtered_to_requested_window():
+    c = _client()
+    raws = [_raw_wifi_record("a", 81.0, 1_000), _raw_wifi_record("a", 80.0, 2_000_000_000)]
+    with patch.object(c, "_get_records", return_value=[]), \
+         patch.object(c, "_list_device_ids", return_value=["dev1"]), \
+         patch.object(c, "_get_raw_records", return_value=raws):
+        result = c.fetch_measurements(after_timestamp=1_500_000_000)
+    assert [m.weight_kg for m in result] == [80.0]
+
+
+def test_unassigned_raw_weight_is_not_synced():
+    c = _client()
+    with patch.object(c, "_get_records", return_value=[]), \
+         patch.object(c, "_list_device_ids", return_value=["dev1"]), \
+         patch.object(c, "_get_raw_records", return_value=[_raw_wifi_record(None, 80.0, 2_000_000_000)]):
+        assert c.fetch_measurements() == []
+
+
+def test_list_profiles_includes_raw_profiles_even_with_existing_selection():
+    c = _client(customer_id="a")
+    raws = [_raw_wifi_record("a", 81.0, 200), _raw_wifi_record("b", 60.0, 300)]
+    with patch.object(c, "_get_records", return_value=[_record("a", 800, 100)]), \
+         patch.object(c, "_list_device_ids", return_value=["dev1"]), \
+         patch.object(c, "_get_raw_records", return_value=raws):
+        profiles = c.list_profiles()
+    assert {p.customer_id for p in profiles} == {"a", "b"}
+    assert next(p for p in profiles if p.customer_id == "a").last_weight_kg == 81.0
 
 
 def test_raw_fallback_degrades_when_device_list_errors():

@@ -67,9 +67,8 @@ def _patch_all_pass(tmp_path, monkeypatch):
     eufy_client.fetch_measurements.return_value = [_FakeMeasurement(recent)]
     monkeypatch.setattr(doctor, "EufyClient", MagicMock(return_value=eufy_client))
 
-    garmin_auth = MagicMock()
-    garmin_auth.token_status.return_value = {"state": "valid", "days_remaining": None}
-    monkeypatch.setattr(doctor, "GarminAuth", MagicMock(return_value=garmin_auth))
+    garmin_client = MagicMock()
+    monkeypatch.setattr(doctor, "GarminClient", MagicMock(return_value=garmin_client))
 
     strava_client = MagicMock()
     strava_client.token_status.return_value = {"state": "valid", "days_remaining": None, "hours_remaining": 5}
@@ -114,11 +113,17 @@ def test_all_pass_exits_zero_and_prints_summary(tmp_path, monkeypatch, capsys):
     assert code == 0
     assert "All checks passed." in out
     assert "FAIL" not in out
+    doctor.GarminClient.return_value.authenticate.assert_called_once_with(allow_interactive=False)
+    for client in (doctor.GarminClient.return_value, doctor.StravaClient.return_value):
+        client.check_connection.assert_called_once()
+        client.close.assert_called_once()
 
 
-def test_garmin_no_session_fails_with_exact_fix_and_exit_1(tmp_path, monkeypatch, capsys):
+def test_garmin_login_requiring_mfa_fails_with_exact_fix_and_exit_1(tmp_path, monkeypatch, capsys):
     config_path, db_path = _patch_all_pass(tmp_path, monkeypatch)
-    doctor.GarminAuth.return_value.token_status.return_value = {"state": "no_session", "days_remaining": None}
+    doctor.GarminClient.return_value.authenticate.side_effect = RuntimeError(
+        "Garmin wants an MFA code. Run: eufy-sync --reauth garmin"
+    )
 
     code = doctor._run_doctor(config_path, db_path)
 
@@ -324,9 +329,11 @@ def test_eufy_token_expired_is_warn_not_fail(tmp_path, monkeypatch, capsys):
     assert code == 0
 
 
-def test_strava_expired_fails_with_reauth_fix(tmp_path, monkeypatch, capsys):
+def test_strava_rejected_session_fails_with_setup_fix(tmp_path, monkeypatch, capsys):
     config_path, db_path = _patch_all_pass(tmp_path, monkeypatch)
-    doctor.StravaClient.return_value.token_status.return_value = {"state": "expired", "days_remaining": 0}
+    doctor.StravaClient.return_value.check_connection.side_effect = RuntimeError(
+        "Strava rejected the session. Run: eufy-sync --setup-strava"
+    )
 
     code = doctor._run_doctor(config_path, db_path)
 
@@ -334,7 +341,36 @@ def test_strava_expired_fails_with_reauth_fix(tmp_path, monkeypatch, capsys):
     assert code == 1
     assert "FAIL" in out
     assert "strava token" in out
-    assert "fix: eufy-sync --reauth strava" in out
+    assert "fix: eufy-sync --setup-strava" in out
+
+
+def test_live_connection_failure_is_not_reported_as_a_valid_saved_token(tmp_path, monkeypatch, capsys):
+    config_path, db_path = _patch_all_pass(tmp_path, monkeypatch)
+    for client in (doctor.GarminClient.return_value, doctor.StravaClient.return_value):
+        client.check_connection.side_effect = RuntimeError("network is unreachable")
+
+    assert doctor._run_doctor(config_path, db_path) == 1
+    out = capsys.readouterr().out
+    assert "FAIL  garmin session" in out
+    assert "FAIL  strava token" in out
+    assert "--reauth" not in out
+    for client in (doctor.GarminClient.return_value, doctor.StravaClient.return_value):
+        client.close.assert_called_once()
+
+
+def test_doctor_waits_for_sync_to_finish_before_refreshing_tokens(tmp_path, capsys):
+    from eufy_sync.cli import lock
+    from eufy_sync.cli.app import main
+
+    with lock.single_instance() as acquired:
+        assert acquired
+        with patch("sys.argv", ["eufy-sync", "--doctor"]), \
+             patch.object(doctor, "_run_doctor") as diagnostic, \
+             pytest.raises(SystemExit) as exc:
+            main()
+    assert exc.value.code == 1
+    diagnostic.assert_not_called()
+    assert "Retry --doctor" in capsys.readouterr().out
 
 
 def test_profile_unset_warns_with_select_profile_fix(tmp_path, monkeypatch, capsys):

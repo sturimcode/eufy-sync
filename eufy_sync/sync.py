@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import asdict
 from datetime import datetime, timezone
 
 import httpx
@@ -10,7 +11,7 @@ from garminconnect import GarminConnectTooManyRequestsError
 
 from eufy_sync import state as state_module
 from eufy_sync.config import UserConfig
-from eufy_sync.eufy_client import AmbiguousProfileError, EufyClient
+from eufy_sync.eufy_client import AmbiguousProfileError, EufyClient, EufyMeasurement
 from eufy_sync.state import SyncState
 from eufy_sync.transform import transform
 
@@ -18,6 +19,10 @@ logger = logging.getLogger("eufy_sync")
 
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 5  # seconds
+# A different id can still be the processed version of a raw reading, but
+# only a unique match close in both time and weight is safe to replace.
+UPGRADE_MAX_SECONDS = 120
+UPGRADE_MAX_WEIGHT_KG = 0.1
 
 
 class PermanentSyncError(RuntimeError):
@@ -83,7 +88,6 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
 
     try:
         logger.info("Syncing user: %s", user.name)
-        eufy.authenticate()
 
         errors: dict[str, str] = {}
         first_exception: BaseException | None = None
@@ -126,27 +130,66 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 ts = state.get_latest_sync_timestamp(user.name, name)
                 if ts is None:
                     logger.info("No prior syncs to %s for %s, backfilling 7 days", name, user.name)
+                if name == "garmin":
+                    pending_ts = state.get_oldest_weight_only_timestamp(user.name, name)
+                    if pending_ts is not None:
+                        # Processed data can arrive after newer weigh-ins have
+                        # advanced the cursor. Include small timestamp shifts.
+                        ts = min(ts, pending_ts - UPGRADE_MAX_SECONDS) if ts is not None else pending_ts - UPGRADE_MAX_SECONDS
                 cursors.append(ts if ts is not None else default_cursor)
             after_timestamp = min(cursors)
 
-        measurements = _retry(
-            lambda: eufy.fetch_measurements(after_timestamp=after_timestamp),
-            "Eufy fetch",
-        )
-        # Strava only stores a single current weight; iterating oldest→newest
-        # ensures the final PUT leaves the newest value on the profile.
+        pending = {}
+        pending_previous_ids = {}
+        if any(name == "garmin" for name, _ in targets):
+            for row in state.get_pending_upgrades(user.name):
+                payload = row["measurement"]
+                payload["timestamp"] = datetime.fromisoformat(payload["timestamp"])
+                m = EufyMeasurement(**payload)
+                if user.eufy.customer_id and m.customer_id != user.eufy.customer_id:
+                    continue
+                pending[m.measurement_id] = m
+                pending_previous_ids[m.measurement_id] = row["previous_id"]
+
+        try:
+            eufy.authenticate()
+            fetched = _retry(
+                lambda: eufy.fetch_measurements(after_timestamp=after_timestamp),
+                "Eufy fetch",
+            )
+        except AmbiguousProfileError:
+            raise
+        except Exception as e:
+            if not pending:
+                raise
+            logger.warning("Eufy unavailable; recovering saved Garmin replacements: %s", e)
+            errors["eufy"] = str(e)
+            fetched = []
+        # Fresh processed data wins over the saved copy. A raw record with
+        # the same id must never replace the full data we need to recover.
+        measurements_by_id = dict(pending)
+        for m in fetched:
+            if m.measurement_id not in pending or not m.weight_only:
+                measurements_by_id[m.measurement_id] = m
+        measurements = list(measurements_by_id.values())
+        # Garmin receives history in order; Strava takes the newest valid
+        # measurement from this sorted batch.
         measurements.sort(key=lambda m: m.timestamp)
         logger.info("Found %d measurements for %s", len(measurements), user.name)
 
-        # Strava keeps a single current weight, so a repair run only has to
-        # land the newest measurement in the window; re-putting the rest would
-        # spend the rate limit (100 non-upload calls per 15 minutes) to arrive
-        # at the same value.
-        strava_repair_id = None
-        if repair:
-            valid = [m for m in measurements if transform(m) is not None]
-            if valid:
-                strava_repair_id = valid[-1].measurement_id
+        # Strava stores one current value, so older values in the same batch
+        # would just consume requests before being immediately overwritten.
+        fresh_ids = {m.measurement_id for m in fetched}
+        valid = [m for m in measurements if m.measurement_id in fresh_ids and transform(m) is not None]
+        strava_latest_id = valid[-1].measurement_id if valid else None
+
+        # Backfill can return older, unsynced readings alongside a newest
+        # reading that dedup will skip, or omit the newest reading entirely.
+        # Never move Strava's current weight behind its recorded progress.
+        strava_latest_timestamp = (
+            state.get_latest_sync_timestamp(user.name, "strava")
+            if any(name == "strava" for name, _ in targets) else None
+        )
 
         counts = {name: 0 for name, _ in targets}
         for m in measurements:
@@ -157,13 +200,28 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
 
             # Snapshot: a failing upload rebuilds `targets` mid-loop.
             for target_name, client in list(targets):
-                if repair and target_name == "strava" and m.measurement_id != strava_repair_id:
+                if (
+                    target_name == "strava"
+                    and strava_latest_timestamp is not None
+                    and m.timestamp.timestamp() < strava_latest_timestamp
+                ):
+                    logger.debug("Skipping Strava history older than its current weight: %s", m.measurement_id)
+                    continue
+                if target_name == "strava" and m.measurement_id != strava_latest_id:
                     continue
 
                 # Still consulted in repair mode: it decides whether the sync
                 # is recorded below, since re-uploading a known id must not
                 # insert a second row (UNIQUE on user/measurement/target).
                 synced_already = state.is_synced(user.name, m.measurement_id, target_name)
+                previous_id = pending_previous_ids.get(m.measurement_id)
+                if target_name == "garmin" and synced_already and previous_id and previous_id != m.measurement_id:
+                    # The new row proves the replacement uploaded before a
+                    # crash interrupted local bookkeeping. Finish locally.
+                    if not dry_run:
+                        state.mark_upgraded(user.name, previous_id, "garmin")
+                        state.clear_pending_upgrade(user.name, m.measurement_id)
+                    continue
 
                 # Issue #48: a full record can arrive for a weigh-in we
                 # already synced weight-only from the raw Wi-Fi endpoint.
@@ -175,18 +233,26 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 if target_name == "garmin" and not m.weight_only:
                     local_date = m.timestamp.astimezone().date()
                     candidates = state.weight_only_syncs_on_date(user.name, "garmin", local_date)
+                    if m.measurement_id in pending_previous_ids:
+                        candidates = [r for r in candidates if r["measurement_id"] == pending_previous_ids[m.measurement_id]]
                     if synced_already:
                         upgrade_row = next(
                             (r for r in candidates if r["measurement_id"] == m.measurement_id), None
                         )
                         if upgrade_row is None and not repair:
+                            if m.measurement_id in pending and not dry_run:
+                                state.clear_pending_upgrade(user.name, m.measurement_id)
                             logger.debug("Already synced to %s: %s", target_name, m.measurement_id)
                             continue
                     elif candidates:
-                        upgrade_row = min(
-                            candidates,
-                            key=lambda r: abs(datetime.fromisoformat(r["measurement_timestamp"]) - m.timestamp),
-                        )
+                        matches = [
+                            r for r in candidates
+                            if abs((datetime.fromisoformat(r["measurement_timestamp"]) - m.timestamp).total_seconds())
+                            <= UPGRADE_MAX_SECONDS
+                            and abs(r["weight_kg"] - m.weight_kg) <= UPGRADE_MAX_WEIGHT_KG
+                        ]
+                        if len(matches) == 1:
+                            upgrade_row = matches[0]
                 elif synced_already and not repair:
                     logger.debug("Already synced to %s: %s", target_name, m.measurement_id)
                     continue
@@ -230,6 +296,9 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 try:
                     if target_name == "garmin":
                         if upgrade_row is not None:
+                            payload = asdict(m)
+                            payload["timestamp"] = m.timestamp.isoformat()
+                            state.save_pending_upgrade(user.name, upgrade_row["measurement_id"], payload)
                             # Fail-open (returns False, never raises): if the old
                             # entry can't be removed, upload anyway - the worst
                             # case is the duplicate this fix exists to prevent,
@@ -265,6 +334,8 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     if upgrade_row is not None:
                         state.mark_upgraded(user.name, upgrade_row["measurement_id"], "garmin")
                         logger.info("Upgraded weight-only entry to full body comp for %s", m.timestamp.date())
+                    if target_name == "garmin" and (upgrade_row is not None or m.measurement_id in pending):
+                        state.clear_pending_upgrade(user.name, m.measurement_id)
                 except Exception as e:
                     logger.error("Upload to %s failed for %s: %s", target_name, user.name, e)
                     # str(e) carries the actionable text the CLI keys its

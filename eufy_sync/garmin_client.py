@@ -119,6 +119,11 @@ class GarminClient:
             self._reauth()
             return call()
 
+    def check_connection(self) -> None:
+        """Verify an authenticated read, propagating failures to diagnostics."""
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        self._call_with_reauth(lambda: self._garmin.get_daily_weigh_ins(today))
+
     def has_weight_on_date(self, dt: datetime) -> bool:
         """Whether Garmin already has a weight entry for the date."""
         # Query by LOCAL calendar date: uploads are now filed under the local

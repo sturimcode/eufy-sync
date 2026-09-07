@@ -18,6 +18,38 @@ from eufy_sync.platform_support.macos import LAUNCH_AGENT_LABEL, _generate_plist
 from eufy_sync.prompt import PROMPT_TIMEOUT_SECONDS
 
 
+@pytest.fixture(autouse=True)
+def skip_scheduled_retry_wait(monkeypatch):
+    wait = MagicMock()
+    monkeypatch.setattr("eufy_sync.cli.app.sleep", wait)
+    return wait
+
+
+def test_scheduled_network_retry_recovers_after_wake(skip_scheduled_retry_wait):
+    from eufy_sync.cli.app import _sync_with_network_retry
+
+    with patch("eufy_sync.sync.sync_user", side_effect=[
+        RuntimeError("network is unreachable"), ({"garmin": 1}, {}),
+    ]) as sync:
+        assert _sync_with_network_retry(None, None, headless=True) == ({"garmin": 1}, {})
+    assert sync.call_count == 2
+    skip_scheduled_retry_wait.assert_called_once_with(60)
+
+
+def test_retry_preserves_partial_success_when_next_attempt_fails(skip_scheduled_retry_wait):
+    from eufy_sync.cli.app import _sync_with_network_retry
+
+    with patch("eufy_sync.sync.sync_user", side_effect=[
+        ({"garmin": 1}, {"strava": "network is unreachable"}),
+        RuntimeError("Garmin wants an MFA code. Run: eufy-sync --reauth garmin"),
+    ]) as sync:
+        counts, errors = _sync_with_network_retry(None, None, headless=True)
+    assert counts == {"garmin": 1}
+    assert "--reauth garmin" in errors["sync"]
+    assert sync.call_count == 2
+    skip_scheduled_retry_wait.assert_called_once_with(60)
+
+
 @pytest.fixture
 def pin_macos_impl(monkeypatch):
     """Pin the launch-agent dispatch to the macOS implementation.
@@ -1204,7 +1236,7 @@ def test_headless_success_clears_network_streak(
 @patch("eufy_sync.cli.setup._migrate_config_passwords")
 @patch("eufy_sync.credentials._keyring_available", return_value=False)
 def test_per_target_upload_error_still_reaches_the_classifier(
-    _keyring, _migrate, _notice, _updates, mock_notify, _summary, tmp_path
+    _keyring, _migrate, _notice, _updates, mock_notify, _summary, tmp_path, skip_scheduled_retry_wait
 ):
     """A dead Garmin session mid-upload is now contained inside sync_user and
     reported through the errors dict instead of raising. The message text must
@@ -1227,6 +1259,7 @@ def test_per_target_upload_error_still_reaches_the_classifier(
         main()
 
     assert exc.value.code == 1
+    skip_scheduled_retry_wait.assert_not_called()
     mock_notify.assert_any_call(
         "eufy-sync: re-login needed", "Run: eufy-sync --reauth garmin",
         command="eufy-sync --reauth garmin",
