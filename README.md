@@ -1,5 +1,6 @@
 # eufy-sync
 
+[![CI](https://github.com/sturimcode/eufy-sync/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/sturimcode/eufy-sync/actions/workflows/test.yml?query=branch%3Amain)
 [![PyPI](https://img.shields.io/pypi/v/eufy-sync)](https://pypi.org/project/eufy-sync/)
 [![Downloads](https://img.shields.io/pypi/dm/eufy-sync)](https://pypi.org/project/eufy-sync/)
 ![Python](https://img.shields.io/pypi/pyversions/eufy-sync)
@@ -8,8 +9,6 @@
 Syncs body composition from a Eufy smart scale to Garmin Connect, plus current weight to Strava and Zwift.
 
 > macOS, Windows, and headless Linux. Needs Python 3.12+ and a terminal.
-
-Eufy scales sync to Apple Health, Fitbit, and Google Fit, but not Garmin or Strava. If you train on either, your body comp is stuck in a separate app. This fixes that.
 
 ## What syncs
 
@@ -23,7 +22,7 @@ Eufy scales sync to Apple Health, Fitbit, and Google Fit, but not Garmin or Stra
 
 You need a Eufy scale with cloud sync and an account with at least one target: Garmin Connect, Strava, or Zwift.
 
-Each block below can be pasted in whole; the lines run one after another.
+Each installer block below can be pasted in whole; its lines run one after another.
 
 ### macOS
 
@@ -57,181 +56,73 @@ Open a fresh PowerShell so the `uv` command is found, then run `uv tool install 
 
 ### Linux
 
-Same uv commands as macOS. Setting up a server? See [Headless Linux](#headless-linux-server-or-vps) for the scheduling recipe.
+Use the same uv commands as macOS. For an always-on machine, follow the [headless Linux guide](https://github.com/sturimcode/eufy-sync/blob/main/docs/headless-linux.md).
 
 ### First run
 
-Open a new terminal window, so it picks up the newly installed command, and run:
+Open a new terminal window so it picks up the newly installed command, then run:
 
 ```bash
 eufy-sync
 ```
 
-It walks you through choosing Garmin and/or Strava and entering credentials, then runs the first sync. For a Zwift-only setup, start with `eufy-sync --setup-zwift`, then run `eufy-sync` to sync.
+Setup asks for your Eufy login, then lets you choose Garmin Connect, Strava, and/or Zwift. Pick any combination, including Zwift alone. It asks for the credentials each selected service needs, lets you choose your profile on a shared Eufy account, and runs the first sync. Zwift is opt-in and marked experimental.
+
+If you want to add another target later, follow [Adding Strava](#adding-strava) or [Adding Zwift](#adding-zwift-experimental).
 
 > **Cloned the repo?** Run install commands from outside the repo directory to avoid path conflicts, e.g. `cd /tmp && pipx install eufy-sync`.
 
-## Usage
+## Common commands
 
 ```bash
-eufy-sync                      # sync new measurements to all configured targets
-eufy-sync --status             # last sync + token health
-eufy-sync --history            # recent sync history (a number shows more: --history 30)
-eufy-sync --dry-run            # preview without uploading
-eufy-sync --doctor             # check the whole setup and print fixes for anything wrong
-eufy-sync --verbose            # detailed logs
-
-# accounts and profiles
-eufy-sync --setup-strava       # add Strava
-eufy-sync --setup-zwift        # add experimental Zwift weight sync
-eufy-sync --disconnect-zwift   # remove Zwift from this installation
-eufy-sync --target zwift       # sync only Zwift (also: garmin / strava)
-eufy-sync --select-profile     # pick your profile on a shared scale
-eufy-sync --reauth [target]    # re-login (all, or garmin / strava / zwift)
-eufy-sync --update-password    # change stored passwords
-
-# automation
-eufy-sync --install-agent      # turn automatic sync on
+eufy-sync                      # sync new measurements to every configured target
+eufy-sync --status             # show the last sync and token health
+eufy-sync --dry-run            # preview a sync without uploading
+eufy-sync --doctor             # check the setup and print fixes
+eufy-sync --history            # show recent sync history
+eufy-sync --install-agent      # turn automatic sync on (macOS and Windows)
 eufy-sync --uninstall-agent    # turn automatic sync off
-eufy-sync --headless           # never prompt; log back in on its own if the session died (for scheduled runs)
-
-# maintenance
 eufy-sync --update             # update to the latest version
-eufy-sync --backfill-days 30   # sync the last 30 days
-eufy-sync --repair-days 30     # re-sync the last 30 days, even what is already marked synced
-eufy-sync --use-file-store     # store credentials in a 0o600 file, no keychain prompts
-eufy-sync --use-keychain       # move credentials back into the system keychain
-eufy-sync --uninstall          # remove all data and clean up
 ```
 
-`eufy-sync --help` lists the rest (`--version`, `--config`, `--db`).
+See the [command reference](https://github.com/sturimcode/eufy-sync/blob/main/docs/command-reference.md) for account, profile, recovery, storage, and maintenance commands. `eufy-sync --help` also lists every option.
 
-eufy-sync checks PyPI weekly and says so when a new version is out; `eufy-sync --update` installs it, whichever installer you used.
-
-### Getting data back after it goes missing
-
-`--backfill-days` only sends what the local record says was never synced, so it cannot help when the record and the target disagree. If you deleted weigh-ins in Garmin Connect, or a version before 1.9.0 filed them under the wrong date, run `eufy-sync --repair-days 30` (or however many days cover the damage). It re-sends every measurement in that window, whatever the local record says. Dates it never uploaded itself, and that Garmin already holds from another source, are still left alone.
-
-Delete any wrong-dated entries in Garmin Connect first. eufy-sync never deletes data it did not just replace, so it cannot clear those for you, and they would otherwise sit next to the corrected ones.
+eufy-sync checks PyPI weekly and says so when a new version is available. `eufy-sync --update` installs it whichever installer you used.
 
 ## Automatic sync
 
-On first run you can opt into syncing every 4 hours in the background: weigh yourself, come back later, and it has synced on its own. Logs go to `~/.garmin-sync/sync.log`, a notification tells you when a run fails, and `eufy-sync --uninstall-agent` turns it off.
+On macOS and Windows, setup offers automatic sync every four hours after a successful first sync, whichever targets you chose. You can also enable it later with `eufy-sync --install-agent`. Logs go to `~/.garmin-sync/sync.log`, a notification tells you when a run fails, and `eufy-sync --uninstall-agent` turns it off.
 
-- **macOS** runs it as a Launch Agent. If [terminal-notifier](https://github.com/julienXX/terminal-notifier) is installed (`brew install terminal-notifier`), clicking a failure notification opens Terminal with the fix command already running. Without it, notifications still appear; the click just does nothing useful.
+- **macOS** uses a Launch Agent. If [terminal-notifier](https://github.com/julienXX/terminal-notifier) is installed (`brew install terminal-notifier`), clicking a failure notification opens Terminal with the fix command already running. Notifications still appear without it, but clicking them will not run the fix.
 - **Windows** registers a Scheduled Task that runs with no visible window. When a run fails, a toast notification names the command to fix it.
-- **Linux** has no managed agent; use the systemd timer below.
-
-## Headless Linux (server or VPS)
-
-eufy-sync runs on Linux too, and a server is a good home for it: no laptop that has to be awake. Without a system keychain, credentials fall back to a file with `600` permissions.
-
-Set it up once over SSH with a plain `eufy-sync` run (the Garmin login and any two-factor code work in the terminal). Then schedule it with a systemd user timer:
-
-```ini
-# ~/.config/systemd/user/eufy-sync.service
-[Unit]
-Description=eufy-sync
-
-[Service]
-Type=oneshot
-ExecStart=%h/.local/bin/eufy-sync --headless
-```
-
-```ini
-# ~/.config/systemd/user/eufy-sync.timer
-[Unit]
-Description=Run eufy-sync every 4 hours
-
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=4h
-
-[Install]
-WantedBy=timers.target
-```
-
-```bash
-systemctl --user enable --now eufy-sync.timer
-```
-
-If a login expires later, the scheduled run logs back in from the stored password without asking. It only stops when Garmin demands a security code or the password is wrong, and the message then names the command to run over SSH. The one Eufy quirk hits hardest here: the cloud only has data after the phone app has processed the weigh-in (see Known quirks).
+- **Linux** has no managed agent. The [headless Linux guide](https://github.com/sturimcode/eufy-sync/blob/main/docs/headless-linux.md) includes a systemd user timer.
 
 ## Adding Strava
 
-If Garmin is already set up and you want Strava:
+Strava requires an active subscription to create a new API application. This is [Strava's requirement](https://developers.strava.com/docs/getting-started/), and Garmin sync works without Strava.
 
-Since June 2026, Strava only lets paid subscribers use its API, so step 1 needs an active Strava subscription on your account. That is [Strava's requirement](https://developers.strava.com/docs/getting-started/), not this tool's, and Garmin sync works fine without it.
-
-1. Create a Strava API app at https://www.strava.com/settings/api
-2. Set "Authorization Callback Domain" to `localhost`
-3. Run `eufy-sync --setup-strava` and enter your Client ID and Secret
-4. Authorize in the browser when it opens
+1. Create a Strava API app at <https://www.strava.com/settings/api>.
+2. Set **Authorization Callback Domain** to `localhost`.
+3. Run `eufy-sync --setup-strava` and enter the Client ID and Secret.
+4. Authorize eufy-sync in the browser when it opens.
 
 ## Adding Zwift (experimental)
 
-Run `eufy-sync --setup-zwift` and enter your Zwift email and password. Setup checks that it can read your profile before enabling sync, and saves the login in the existing credential store. Later runs reuse it and renew the session automatically.
+To add Zwift to an existing installation, run `eufy-sync --setup-zwift` and enter your Zwift email and password. Setup checks that it can read your Zwift profile before enabling sync, then saves the login in the existing credential store. Later runs reuse the saved login and renew the session automatically.
 
-Zwift receives only the newest valid weight fetched for your selected Eufy profile. It does not receive body composition or weight history. Each update reads your current profile, changes its weight, then reads it again to verify the save. A successful HTTP response alone does not count as a delivered weight. If the weight already matches, the tool records a verified match without sending another update.
+Run `eufy-sync` to sync, or enable [automatic sync](#automatic-sync). Zwift receives only the newest valid weight for your selected Eufy profile, not body composition or weight history. Each update reads your current profile, changes its weight, then reads it again to verify the save. If the weight already matches, the tool records a verified match without sending another update.
 
-This uses an unofficial Zwift route and is experimental. A changed weight and its restoration have been verified on a real account, including reads with renewed authentication. That does not establish reliability across every account or later updates from connected services. Zwift failures are reported separately so Garmin and Strava can continue.
+This uses an unofficial Zwift route and is experimental. It has been verified on a real account, but that does not establish reliability across every account or future Zwift changes. Zwift failures are reported separately so Garmin and Strava can continue.
 
 Use `eufy-sync --target zwift --dry-run` to preview a run. The first sync looks back seven days; if your latest weigh-in is older, use `eufy-sync --target zwift --backfill-days 30`. Older backfill cannot replace a newer weight already recorded as synced. `eufy-sync --disconnect-zwift` removes this target and its saved login from the installation.
 
-## How it works
+## Privacy and limitations
 
-```
-Eufy Cloud  ->  eufy_client.py  ->  transform   ->  garmin_client.py  ->  Garmin (body comp)
-(pull)          (auth)              (filter,    ->  strava_client.py  ->  Strava (weight)
-                                    dedup,     ->  zwift_client.py   ->  Zwift (weight)
-                                    state.db)
-```
+There is no telemetry. Credentials go over HTTPS only to the service they belong to and are never logged. eufy-sync also checks PyPI weekly for updates without sending credentials. Passwords and tokens use your system credential store when available; headless Linux uses a local file with `600` permissions. See [Security, troubleshooting, and how it works](https://github.com/sturimcode/eufy-sync/blob/main/docs/security-and-troubleshooting.md) for storage details, login recovery, data quirks, and the sync architecture.
 
-On each run it pulls your Eufy history and checks a local SQLite DB for what each target already has, then uploads only what is new: full body composition to Garmin through python-garminconnect's upload API (skipping dates Garmin already holds, so two machines do not double up), and the latest weight to Strava and Zwift. Successful deliveries are recorded in the DB; Zwift is recorded only after the current weight is verified.
+Eufy can send a raw Wi-Fi weight to its cloud before the phone app processes the full body composition. If only weight syncs, open the Eufy app, wait for it to process the weigh-in, then run `eufy-sync` again.
 
-## How Garmin login works
-
-Garmin has no official API for writing body composition into Connect. In March 2026 it put Cloudflare in front of its login, which broke the Python libraries that talked to it; [garth](https://github.com/matin/garth) was [deprecated](https://github.com/matin/garth/discussions/222) and stays that way.
-
-eufy-sync logs in through [python-garminconnect](https://github.com/cyberjunky/python-garminconnect), which gets past Cloudflare without a browser. On first run you enter your Garmin email and password, plus a code if you use two-factor. The tokens save to your keychain and refresh on their own, so later runs need no login.
-
-If that direct login gets rate-limited, eufy-sync can open a Chromium window once for you to sign in, then continue. That fallback is an optional extra, since Playwright is several times the size of the rest of the install and most people never need it. If a login ever needs it, the error names the exact command; it is one of these, matching your installer:
-
-```bash
-uv tool install --force 'eufy-sync[browser]'
-```
-
-```bash
-pipx install --force 'eufy-sync[browser]'
-```
-
-Headless setups use the direct login only, since there is no screen for a browser.
-
-## Security
-
-Credentials go over HTTPS to their respective services: Eufy, Garmin, Strava, and Zwift, and are never logged or sent anywhere else. The one other outbound call is a weekly version check to pypi.org, with no credentials.
-
-Where passwords and OAuth tokens live:
-
-- **macOS:** a single Keychain item, not plaintext files. One item means macOS asks to "Always Allow" once, not once per secret.
-- **Windows:** Windows Credential Manager.
-- **Headless Linux, or after `--use-file-store`:** a single `600` file at `~/.garmin-sync/credentials.json`.
-
-The keychain is used whenever it works; systems without one fall back to the file automatically. `eufy-sync --use-file-store` makes the switch permanent, with no keychain prompts at all, a good fit for headless or scheduled setups; `eufy-sync --use-keychain` moves them back. A credentials file that was not created by `--use-file-store` does not override a working keychain. On Windows the file fallback relies on your user profile's permissions, since Windows does not honor POSIX file modes.
-
-The config in `~/.garmin-sync/` holds email addresses, the selected Eufy profile ID, and the public Strava client ID, at `600` permissions. Passwords and the Strava client secret stay in the credential store.
-
-## Known quirks
-
-The Eufy cloud only returns a weigh-in after the Eufy app has processed it. If you step on the scale and a sync finds nothing, open the app once so it uploads, then run `eufy-sync` again. The tool cannot trigger that upload itself, so it shows up most on headless or scheduled setups.
-
-If more than one person uses the same Eufy account, setup asks which profile is yours, so only your weigh-ins sync. Until you choose, a sync that sees several profiles stops and lists them rather than guessing. Set it up before this existed? Run `eufy-sync --select-profile` once, then `eufy-sync --backfill-days 30` to pull any of your weigh-ins an earlier version skipped.
-
-The Eufy cloud reports weight at about 0.05 kg resolution, so it can differ from the Eufy app, which may read Bluetooth at higher precision. Most days match within 0.1 lb; some can be off by up to ~0.5 lb, and the kg-to-lb conversion on Garmin adds a little rounding.
-
-Garmin login failing over and over with rate-limit or Cloudflare errors, while the Garmin app works fine? Before assuming Garmin changed something, run `eufy-sync --reauth garmin`. Stale saved tokens produce exactly those errors, and a fresh login clears them.
-
-On old Windows builds (reported on Windows Server 2016), the `uv` installer download fails because the system does not trust Let's Encrypt certificates. Update the OS root certificates, or install on a current Windows machine and copy the folder over.
+Garmin, Eufy, and Zwift use unofficial APIs here; the Strava integration uses its official API. Any of these services can change. Headless login renewal is designed to recover automatically, but cannot be guaranteed to keep working after a service changes its login flow.
 
 ## Tests
 
@@ -241,8 +132,6 @@ pytest tests/ -v
 
 ## Support
 
+For setup trouble, start with `eufy-sync --doctor` and the [troubleshooting guide](https://github.com/sturimcode/eufy-sync/blob/main/docs/security-and-troubleshooting.md). [Report a bug](https://github.com/sturimcode/eufy-sync/issues/new?template=bug_report.yml) or open [GitHub Issues](https://github.com/sturimcode/eufy-sync/issues) for a feature request.
+
 If this saves you from typing your weight into Garmin by hand, you can [buy me a coffee](https://ko-fi.com/sturim).
-
-## Disclaimer
-
-Uses unofficial APIs for Eufy, Garmin, and Zwift, and the official Strava API. Could break if any of them change things. Use at your own risk.

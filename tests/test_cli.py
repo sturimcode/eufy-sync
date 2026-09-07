@@ -703,7 +703,7 @@ def test_first_run_setup_keeps_the_strava_secret_out_of_the_yaml(_keyring, tmp_p
     from eufy_sync.credentials import get_password
 
     config_path = tmp_path / "config.yaml"
-    answers = ["e@example.com", "n", "y", "12345", "sekrit"]
+    answers = ["e@example.com", "n", "y", "n", "12345", "sekrit"]
 
     with patch("builtins.input", side_effect=answers), \
          patch("getpass.getpass", return_value="eufy-pw"), \
@@ -715,6 +715,151 @@ def test_first_run_setup_keeps_the_strava_secret_out_of_the_yaml(_keyring, tmp_p
     assert get_password("default:eufy") == "eufy-pw"
     written = yaml.safe_load(config_path.read_text())
     assert written["users"][0]["strava"] == {"client_id": "12345"}
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_first_run_setup_allows_zwift_only(_keyring, tmp_path, capsys):
+    from eufy_sync.cli.setup import _first_run_setup
+    from eufy_sync.credentials import get_password
+
+    config_path = tmp_path / "config.yaml"
+    client = MagicMock()
+    answers = ["e@example.com", "n", "n", "y", "z@example.com"]
+
+    with patch("sys.stdin.isatty", return_value=True), \
+         patch("builtins.input", side_effect=answers), \
+         patch("getpass.getpass", side_effect=["eufy-pw", "zwift-pw"]), \
+         patch("eufy_sync.zwift_client.ZwiftClient", return_value=client), \
+         patch("eufy_sync.eufy_client.EufyClient", side_effect=RuntimeError("offline")):
+        _first_run_setup(config_path)
+
+    user = yaml.safe_load(config_path.read_text())["users"][0]
+    assert user["zwift"] == {"email": "z@example.com"}
+    assert "garmin" not in user
+    assert "strava" not in user
+    assert get_password("default:eufy") == "eufy-pw"
+    assert get_password("default:zwift") == "zwift-pw"
+    client.authenticate.assert_called_once_with(force=True)
+    client.check_connection.assert_called_once_with()
+    assert "Running first sync to Zwift" in capsys.readouterr().out
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_first_run_setup_allows_garmin_and_zwift(_keyring, tmp_path):
+    from eufy_sync.cli.setup import _first_run_setup
+    from eufy_sync.credentials import get_password
+
+    config_path = tmp_path / "config.yaml"
+    client = MagicMock()
+    answers = ["e@example.com", "y", "n", "y", "g@example.com", "z@example.com"]
+
+    with patch("sys.stdin.isatty", return_value=True), \
+         patch("builtins.input", side_effect=answers), \
+         patch("getpass.getpass", side_effect=["eufy-pw", "garmin-pw", "zwift-pw"]), \
+         patch("eufy_sync.zwift_client.ZwiftClient", return_value=client), \
+         patch("eufy_sync.eufy_client.EufyClient", side_effect=RuntimeError("offline")):
+        _first_run_setup(config_path)
+
+    user = yaml.safe_load(config_path.read_text())["users"][0]
+    assert user["garmin"] == {"email": "g@example.com"}
+    assert user["zwift"] == {"email": "z@example.com"}
+    assert "strava" not in user
+    assert get_password("default:garmin") == "garmin-pw"
+    assert get_password("default:zwift") == "zwift-pw"
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_first_run_setup_allows_all_three_targets(_keyring, tmp_path):
+    from eufy_sync.cli.setup import _first_run_setup
+    from eufy_sync.credentials import get_password
+
+    config_path = tmp_path / "config.yaml"
+    client = MagicMock()
+    answers = [
+        "e@example.com", "y", "y", "y", "g@example.com",
+        "12345", "strava-secret", "z@example.com",
+    ]
+
+    with patch("sys.stdin.isatty", return_value=True), \
+         patch("builtins.input", side_effect=answers), \
+         patch("getpass.getpass", side_effect=["eufy-pw", "garmin-pw", "zwift-pw"]), \
+         patch("eufy_sync.zwift_client.ZwiftClient", return_value=client), \
+         patch("eufy_sync.eufy_client.EufyClient", side_effect=RuntimeError("offline")), \
+         patch("eufy_sync.strava_client.authorize_strava", return_value={}):
+        _first_run_setup(config_path)
+
+    user = yaml.safe_load(config_path.read_text())["users"][0]
+    assert user["garmin"] == {"email": "g@example.com"}
+    assert user["strava"] == {"client_id": "12345"}
+    assert user["zwift"] == {"email": "z@example.com"}
+    assert get_password("default:strava") == "strava-secret"
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_first_run_setup_rejects_no_targets_without_storing_credentials(_keyring, tmp_path):
+    from eufy_sync.cli.setup import _first_run_setup
+    from eufy_sync.credentials import get_password
+
+    config_path = tmp_path / "config.yaml"
+    with patch("builtins.input", side_effect=["e@example.com", "n", "n", "n"]), \
+         patch("getpass.getpass", return_value="eufy-pw"), \
+         pytest.raises(SystemExit):
+        _first_run_setup(config_path)
+
+    assert not config_path.exists()
+    assert get_password("default:eufy") is None
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_first_run_setup_failed_zwift_validation_writes_nothing(_keyring, tmp_path, capsys):
+    from eufy_sync.cli.setup import _first_run_setup
+    from eufy_sync.credentials import get_password
+
+    config_path = tmp_path / "config.yaml"
+    client = MagicMock()
+    client.authenticate.side_effect = RuntimeError("account rejected")
+    answers = ["e@example.com", "n", "n", "y", "z@example.com"]
+
+    with patch("sys.stdin.isatty", return_value=True), \
+         patch("builtins.input", side_effect=answers), \
+         patch("getpass.getpass", side_effect=["eufy-pw", "zwift-pw"]), \
+         patch("eufy_sync.zwift_client.ZwiftClient", return_value=client), \
+         pytest.raises(SystemExit):
+        _first_run_setup(config_path)
+
+    assert not config_path.exists()
+    assert get_password("default:eufy") is None
+    assert get_password("default:zwift") is None
+    output = capsys.readouterr().out
+    assert "Retry with: eufy-sync\n" in output
+    assert "--setup-zwift" not in output
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_zwift_only_first_run_syncs_and_offers_scheduler(_keyring, tmp_path):
+    from eufy_sync.cli.app import main
+
+    config_path = tmp_path / "config.yaml"
+    db_path = tmp_path / "state.db"
+    client = MagicMock()
+    answers = ["e@example.com", "n", "n", "y", "z@example.com"]
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path)]
+
+    with patch("sys.argv", argv), \
+         patch("sys.stdin.isatty", return_value=True), \
+         patch("builtins.input", side_effect=answers), \
+         patch("getpass.getpass", side_effect=["eufy-pw", "zwift-pw"]), \
+         patch("eufy_sync.zwift_client.ZwiftClient", return_value=client), \
+         patch("eufy_sync.eufy_client.EufyClient", side_effect=RuntimeError("offline")), \
+         patch("eufy_sync.sync.sync_user", return_value=({"zwift": 1}, {})) as sync_user, \
+         patch("eufy_sync.cli.updater._check_for_updates"), \
+         patch("eufy_sync.cli.maintenance._offer_launch_agent") as offer_scheduler, \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 0
+    sync_user.assert_called_once()
+    offer_scheduler.assert_called_once_with()
 
 
 @patch("eufy_sync.credentials._keyring_available", return_value=False)

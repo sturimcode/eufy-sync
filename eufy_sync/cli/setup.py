@@ -1,4 +1,4 @@
-"""First-run setup wizard, Strava connection, and one-time config migrations."""
+"""First-run setup wizard, target connections, and one-time config migrations."""
 from __future__ import annotations
 
 import getpass
@@ -42,14 +42,26 @@ def _first_run_setup(config_path: Path) -> None:
         print("Error: Eufy password is required.")
         sys.exit(1)
 
-    # Garmin setup (optional)
+    # Choose every target before collecting service-specific credentials.
     print("")
     print("Sync targets (configure at least one):")
     print("")
     garmin_answer = input("Connect Garmin? [Y/n] ").strip()
+    strava_answer = input("Connect Strava? [y/N] ").strip()
+    zwift_answer = input("Connect experimental Zwift weight sync? [y/N] ").strip()
+    connect_garmin = not garmin_answer.lower().startswith("n")
+    connect_strava = strava_answer.lower().startswith("y")
+    connect_zwift = zwift_answer.lower().startswith("y")
+
+    if not connect_garmin and not connect_strava and not connect_zwift:
+        print("Error: You must configure at least one sync target (Garmin, Strava, or Zwift).")
+        sys.exit(1)
+
+    # Collect credentials only for the selected targets.
     garmin_email = None
     garmin_password = None
-    if not garmin_answer.lower().startswith("n"):
+    if connect_garmin:
+        print("")
         garmin_email = input("Garmin email (Enter if same as Eufy): ").strip()
         if not garmin_email:
             garmin_email = eufy_email
@@ -58,18 +70,25 @@ def _first_run_setup(config_path: Path) -> None:
             print("Error: Garmin password is required.")
             sys.exit(1)
 
-    # Strava setup (optional)
-    print("")
-    strava_answer = input("Connect Strava? [y/N] ").strip()
     strava_config = None
-    if strava_answer.lower().startswith("y"):
+    if connect_strava:
         strava_config = _prompt_strava_credentials()
 
-    if not garmin_email and not strava_config:
-        print("Error: You must configure at least one sync target (Garmin or Strava).")
-        sys.exit(1)
-
     user_name = "default"
+
+    # Config YAML stores only emails and the public Strava client id, never
+    # secrets. Build it before storing any passwords so a failed Zwift check
+    # leaves existing vault entries alone.
+    user_config: dict = {
+        "name": user_name,
+        "eufy": {"email": eufy_email},
+    }
+    if garmin_email:
+        user_config["garmin"] = {"email": garmin_email}
+    if strava_config:
+        user_config["strava"] = {"client_id": strava_config["client_id"]}
+    if connect_zwift:
+        _connect_zwift(user_config, retry_command="eufy-sync")
 
     # Passwords always go to the credential store (keychain vault, or a
     # 0o600 file when there is no keychain) - never into config.yaml.
@@ -79,16 +98,6 @@ def _first_run_setup(config_path: Path) -> None:
     if strava_config:
         store_password(f"{user_name}:strava", strava_config["client_secret"])
     print(f"Passwords saved to the {active_store_label()}.")
-
-    # Config YAML stores only emails and the public client id, never secrets.
-    user_config: dict = {
-        "name": user_name,
-        "eufy": {"email": eufy_email},
-    }
-    if garmin_email:
-        user_config["garmin"] = {"email": garmin_email}
-    if strava_config:
-        user_config["strava"] = {"client_id": strava_config["client_id"]}
 
     # On a shared account, pick the right person before the first sync.
     try:
@@ -115,6 +124,8 @@ def _first_run_setup(config_path: Path) -> None:
         targets.append("Garmin")
     if strava_config:
         targets.append("Strava")
+    if connect_zwift:
+        targets.append("Zwift")
     print(f"Saved. Running first sync to {' and '.join(targets)} (last 7 days)...")
     if garmin_email:
         print("Logging in to Garmin (a browser may open if the direct login is rate-limited).")
@@ -200,30 +211,8 @@ def _zwift_setup_password(prompt: str) -> str:
             sys.exit(1)
 
 
-def _setup_zwift(config_path: Path) -> None:
-    """Validate Zwift credentials, then enable experimental weight sync."""
-    fresh_install = not config_path.exists()
-    eufy_password = None
-    if fresh_install:
-        if not sys.stdin.isatty():
-            print("First-time Zwift setup requires an interactive terminal.")
-            sys.exit(1)
-        print("")
-        print("  eufy-sync - first time setup with Zwift")
-        eufy_email = input("Eufy email: ").strip()
-        if not eufy_email:
-            print("Error: Eufy email is required.")
-            sys.exit(1)
-        eufy_password = _zwift_setup_password("Eufy password: ")
-        if not eufy_password:
-            print("Error: Eufy password is required.")
-            sys.exit(1)
-        config = {"users": [{"name": "default", "eufy": {"email": eufy_email}}]}
-    else:
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-
-    user = config["users"][0]
+def _connect_zwift(user: dict, retry_command: str = "eufy-sync --setup-zwift") -> None:
+    """Validate and store Zwift credentials, then add it to a user config."""
     user_name = user.get("name", "default")
 
     from eufy_sync import credentials
@@ -259,7 +248,7 @@ def _setup_zwift(config_path: Path) -> None:
         print(f"Using the validated Zwift account for {email}.")
     else:
         if not sys.stdin.isatty():
-            print("No validated Zwift credentials were found. Run --setup-zwift in an interactive terminal.")
+            print("No validated Zwift credentials were found. Run setup in an interactive terminal.")
             sys.exit(1)
         email = input("Zwift email: ").strip()
         if not email:
@@ -280,18 +269,46 @@ def _setup_zwift(config_path: Path) -> None:
         client.check_connection()
     except Exception as e:
         print(f"Zwift connection failed: {e}")
-        print("Nothing was enabled. Retry with: eufy-sync --setup-zwift")
+        print(f"Nothing was enabled. Retry with: {retry_command}")
         sys.exit(1)
     finally:
         with suppress(Exception):
             client.close()
 
-    # Authentication succeeded, so this is now the production account. Keep
-    # its password under the stable per-user key that config.py resolves.
-    credentials.store_password(f"{user_name}:zwift", password)
+    # Authentication succeeded, so this is now the production account.
+    credentials.store_password(password_account, password)
     user["zwift"] = {"email": email}
 
+
+def _setup_zwift(config_path: Path) -> None:
+    """Validate Zwift credentials, then enable experimental weight sync."""
+    fresh_install = not config_path.exists()
+    eufy_password = None
     if fresh_install:
+        if not sys.stdin.isatty():
+            print("First-time Zwift setup requires an interactive terminal.")
+            sys.exit(1)
+        print("")
+        print("  eufy-sync - first time setup with Zwift")
+        eufy_email = input("Eufy email: ").strip()
+        if not eufy_email:
+            print("Error: Eufy email is required.")
+            sys.exit(1)
+        eufy_password = _zwift_setup_password("Eufy password: ")
+        if not eufy_password:
+            print("Error: Eufy password is required.")
+            sys.exit(1)
+        config = {"users": [{"name": "default", "eufy": {"email": eufy_email}}]}
+    else:
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+
+    user = config["users"][0]
+    user_name = user.get("name", "default")
+    _connect_zwift(user)
+
+    if fresh_install:
+        from eufy_sync import credentials
         credentials.store_password(f"{user_name}:eufy", eufy_password)
         try:
             from eufy_sync.config import EufyConfig

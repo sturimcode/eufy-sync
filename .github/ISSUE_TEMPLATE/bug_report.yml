@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a setup or sync problem.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tell us what happened and how to reproduce it. Before sharing output, remove email addresses, profile IDs, health data, passwords, tokens, and API secrets. Do not upload files from your credential store.
+  - type: input
+    id: version
+    attributes:
+      label: eufy-sync version
+      description: Run `eufy-sync --version`, or say if installation failed.
+    validations:
+      required: true
+  - type: input
+    id: operating-system
+    attributes:
+      label: Operating system
+      description: Include the version and whether this runs on a desktop, server, or NAS.
+      placeholder: macOS 15, Windows 11, or Ubuntu 24.04 on a VPS
+    validations:
+      required: true
+  - type: dropdown
+    id: target
+    attributes:
+      label: Affected service or step
+      multiple: true
+      options:
+        - Eufy
+        - Garmin Connect
+        - Strava
+        - Zwift
+        - Installation or scheduling
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the command or steps you tried, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostic output
+      description: Run `eufy-sync --doctor` if the command is available. Paste only the relevant output after removing personal data and secrets. If the command fails, the error message helps too.
+      render: text
