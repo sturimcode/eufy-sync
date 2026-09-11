@@ -1,5 +1,7 @@
+import logging
 import os
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -8,6 +10,7 @@ import pytest
 
 from eufy_sync.config import EufyConfig, GarminConfig, StravaConfig, UserConfig
 from eufy_sync.eufy_client import EufyMeasurement
+from eufy_sync.reporting import SyncReport, garmin_existing_note
 from eufy_sync.state import SyncState
 from eufy_sync.sync import sync_user
 
@@ -315,7 +318,10 @@ def _garmin_user() -> UserConfig:
     )
 
 
-def _run_garmin_sync(user, state, measurements, has_weight_on_date_return, repair_days=None, dry_run=False):
+def _run_garmin_sync(
+    user, state, measurements, has_weight_on_date_return, repair_days=None,
+    dry_run=False, report=None,
+):
     fake_eufy = MagicMock()
     fake_eufy.authenticate.return_value = None
     fake_eufy.fetch_measurements.return_value = measurements
@@ -331,7 +337,7 @@ def _run_garmin_sync(user, state, measurements, has_weight_on_date_return, repai
     with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
          patch("eufy_sync.garmin_client.GarminClient", return_value=fake_garmin), \
          patch("eufy_sync.sync.time.sleep"):
-        sync_user(user, state, dry_run=dry_run, **kwargs)  # returns (counts, errors); not needed here
+        sync_user(user, state, dry_run=dry_run, report=report, **kwargs)
 
     return fake_garmin
 
@@ -595,6 +601,76 @@ def test_other_source_same_day_entry_is_still_skipped(tmp_path: Path):
     state.close()
 
 
+def test_same_date_guard_reports_distinct_dates_from_this_run(tmp_path: Path):
+    from eufy_sync.reporting import SyncReport
+
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    report = SyncReport()
+    measurements = [
+        _measurement(85.0, datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc)),
+        _measurement(84.9, datetime(2026, 5, 10, 9, 0, tzinfo=timezone.utc)),
+        _measurement(84.8, datetime(2026, 5, 11, 8, 0, tzinfo=timezone.utc)),
+    ]
+
+    _run_garmin_sync(
+        user, state, measurements, has_weight_on_date_return=True, report=report,
+    )
+
+    assert report.garmin_existing_dates == {
+        (user.name, m.timestamp.astimezone().date()) for m in measurements
+    }
+    cached_report = SyncReport()
+    cached = _run_garmin_sync(
+        user, state, measurements, has_weight_on_date_return=True, report=cached_report,
+    )
+    assert not cached_report.garmin_existing_dates
+    cached.has_weight_on_date.assert_not_called()
+    state.close()
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="Requires a controllable local timezone")
+@pytest.mark.parametrize("zone, hour, expected_date", [
+    ("UTC+10", 1, "2026-05-09"),
+    ("UTC-14", 23, "2026-05-11"),
+])
+def test_skip_report_and_log_use_checked_local_date(
+    tmp_path, monkeypatch, caplog, zone, hour, expected_date,
+):
+    state = SyncState(tmp_path / "state.db")
+    report = SyncReport()
+    caplog.set_level("DEBUG", logger="eufy_sync")
+    monkeypatch.setattr(logging.getLogger("eufy_sync"), "handlers", [caplog.handler])
+    try:
+        with monkeypatch.context() as context:
+            context.setenv("TZ", zone)
+            time.tzset()
+            measurement = _measurement(85.0, datetime(2026, 5, 10, hour, tzinfo=timezone.utc))
+            _run_garmin_sync(
+                _garmin_user(), state, [measurement], True, report=report,
+            )
+            assert garmin_existing_note(report) == (
+                f" Garmin already has a weigh-in dated {expected_date}."
+            )
+            assert f"Garmin already has data for {expected_date}, skipping" in caplog.text
+    finally:
+        time.tzset()
+        state.close()
+
+
+def test_same_date_skips_retain_profile_identity(tmp_path):
+    state = SyncState(tmp_path / "state.db")
+    report = SyncReport(multiple_users=True)
+    measurement = _measurement(85.0, datetime(2026, 5, 10, 12, tzinfo=timezone.utc))
+    for name in ("first", "second"):
+        user = _garmin_user()
+        user.name = name
+        _run_garmin_sync(user, state, [measurement], True, report=report)
+    assert report.garmin_existing_dates == {
+        (name, measurement.timestamp.astimezone().date()) for name in ("first", "second")
+    }
+    assert garmin_existing_note(report) == " Garmin skipped existing weigh-ins for 2 profiles."
+    state.close()
 
 
 # ---------------------------------------------------------------------------
@@ -710,7 +786,7 @@ def _full_measurement(weight_kg: float, dt: datetime, measurement_id: str | None
     )
 
 
-def test_full_record_with_same_id_upgrades_weight_only_sync(tmp_path: Path):
+def test_full_record_with_same_id_upgrades_weight_only_sync(tmp_path: Path, caplog, monkeypatch):
     """Issue #48, blocked case: when the raw and processed record share a
     measurement id, the processed record used to be skipped as already
     synced, stranding the user on weight-only forever. It must instead
@@ -720,12 +796,21 @@ def test_full_record_with_same_id_upgrades_weight_only_sync(tmp_path: Path):
     dt = datetime(2026, 5, 10, 7, 0, tzinfo=timezone.utc)
 
     raw = _raw_measurement(85.0, dt)
-    fake_garmin_1 = _run_garmin_sync(user, state, [raw], has_weight_on_date_return=False)
+    report = SyncReport()
+    caplog.set_level("INFO", logger="eufy_sync")
+    monkeypatch.setattr(logging.getLogger("eufy_sync"), "handlers", [caplog.handler])
+    fake_garmin_1 = _run_garmin_sync(user, state, [raw], has_weight_on_date_return=False, report=report)
     fake_garmin_1.upload_body_composition.assert_called_once()
+    assert "Garmin (weight only)" in caplog.text
+    assert "full body comp" not in caplog.text
+    assert not report.garmin_existing_dates
+    caplog.clear()
 
     full = _full_measurement(85.0, dt)  # same id: same customer + timestamp
     assert full.measurement_id == raw.measurement_id
-    fake_garmin_2 = _run_garmin_sync(user, state, [full], has_weight_on_date_return=True)
+    fake_garmin_2 = _run_garmin_sync(user, state, [full], has_weight_on_date_return=True, report=report)
+    assert "Garmin (full body comp)" in caplog.text
+    assert not report.garmin_existing_dates
 
     fake_garmin_2.delete_weight_entry.assert_called_once()
     del_dt, del_weight = fake_garmin_2.delete_weight_entry.call_args.args
@@ -877,12 +962,14 @@ def test_uploaded_replacement_finishes_bookkeeping_after_a_crash(tmp_path: Path)
     state.record_sync(user.name, full.measurement_id, full.timestamp.isoformat(),
                       full.weight_kg, dt.isoformat(), target="garmin")
 
-    garmin = _run_garmin_sync(user, state, [], has_weight_on_date_return=True)
+    report = SyncReport()
+    garmin = _run_garmin_sync(user, state, [], has_weight_on_date_return=True, report=report)
 
     garmin.delete_weight_entry.assert_not_called()
     garmin.upload_body_composition.assert_not_called()
     assert state.get_pending_upgrades(user.name) == []
     assert state.get_oldest_weight_only_timestamp(user.name, "garmin") is None
+    assert not report.garmin_existing_dates
     state.close()
 
 
@@ -1295,10 +1382,14 @@ def test_repair_over_an_already_skipped_date_does_not_double_record(tmp_path: Pa
     _run_garmin_sync(user, state, [m], has_weight_on_date_return=True)
     assert state.is_synced(user.name, m.measurement_id, "garmin")
 
-    fake_garmin = _run_garmin_sync(user, state, [m], has_weight_on_date_return=True, repair_days=7)
+    report = SyncReport()
+    fake_garmin = _run_garmin_sync(
+        user, state, [m], has_weight_on_date_return=True, repair_days=7, report=report,
+    )
 
     fake_garmin.upload_body_composition.assert_not_called()
     assert _garmin_rows(state, m.measurement_id) == 1
+    assert report.garmin_existing_dates == {(user.name, m.timestamp.astimezone().date())}
 
     state.close()
 
@@ -1311,13 +1402,15 @@ def test_repair_dry_run_previews_without_uploading(tmp_path: Path, capsys):
     _run_garmin_sync(user, state, [m], has_weight_on_date_return=False)
     capsys.readouterr()
 
+    report = SyncReport()
     fake_garmin = _run_garmin_sync(
-        user, state, [m], has_weight_on_date_return=False, repair_days=7, dry_run=True,
+        user, state, [m], has_weight_on_date_return=False, repair_days=7, dry_run=True, report=report,
     )
 
     fake_garmin.upload_body_composition.assert_not_called()
     assert capsys.readouterr().out.count("[DRY RUN] Would sync") == 1
     assert _garmin_rows(state, m.measurement_id) == 1
+    assert not report.garmin_existing_dates
 
     state.close()
 

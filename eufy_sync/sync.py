@@ -12,6 +12,7 @@ from garminconnect import GarminConnectTooManyRequestsError
 from eufy_sync import state as state_module
 from eufy_sync.config import UserConfig
 from eufy_sync.eufy_client import AmbiguousProfileError, EufyClient, EufyMeasurement
+from eufy_sync.reporting import SyncReport
 from eufy_sync.state import SyncState
 from eufy_sync.transform import transform
 
@@ -59,7 +60,7 @@ def _retry(fn, description: str):
             time.sleep(delay)
 
 
-def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False, repair_days: int | None = None, target: str | None = None) -> tuple[dict[str, int], dict[str, str]]:
+def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False, repair_days: int | None = None, target: str | None = None, report: SyncReport | None = None) -> tuple[dict[str, int], dict[str, str]]:
     """Sync one user's Eufy data to configured targets.
 
     Returns (counts, errors): counts maps target name to the number of
@@ -301,7 +302,10 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     and not state.has_synced_on_date(user.name, "garmin", m.timestamp.astimezone().date())
                     and client.has_weight_on_date(m.timestamp)
                 ):
-                    logger.debug("Garmin already has data for %s, skipping", m.timestamp.date())
+                    skipped_date = m.timestamp.astimezone().date()
+                    logger.debug("Garmin already has data for %s, skipping", skipped_date)
+                    if report is not None:
+                        report.garmin_existing_dates.add((user.name, skipped_date))
                     if not synced_already:
                         state.record_sync(
                             user_name=user.name,
@@ -359,7 +363,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                         )
                     if upgrade_row is not None:
                         state.mark_upgraded(user.name, upgrade_row["measurement_id"], "garmin")
-                        logger.info("Upgraded weight-only entry to full body comp for %s", m.timestamp.date())
+                        logger.info("Upgraded weight-only entry to full body comp for %s", m.timestamp.astimezone().date())
                     if target_name == "garmin" and (upgrade_row is not None or m.measurement_id in pending):
                         state.clear_pending_upgrade(user.name, m.measurement_id)
                 except Exception as e:
@@ -373,7 +377,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
 
                 counts[target_name] += 1
                 lb = target_measurement.weight_kg * 2.20462
-                detail = "full body comp" if target_name == "garmin" else "weight only"
+                detail = "full body comp" if target_name == "garmin" and not m.weight_only else "weight only"
                 logger.info("Synced %.2f kg (%.1f lb) → %s (%s)", target_measurement.weight_kg, lb, target_name.capitalize(), detail)
 
                 # Small delay between uploads to avoid rate limiting

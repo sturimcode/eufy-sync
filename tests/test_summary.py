@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import time
+from datetime import date, datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from eufy_sync.cli.status import _print_summary, _show_status
+from eufy_sync.reporting import SyncReport
 
 
 def _mock_state(last_sync_ts: int | None = None):
@@ -84,7 +86,7 @@ def test_summary_synced_garmin_only(capsys):
     _print_summary({"garmin": 3}, [], state, [user])
 
     output = capsys.readouterr().out.strip()
-    assert "Synced 3 measurements to Garmin Connect." == output
+    assert "Syncs completed: Garmin 3." == output
 
 
 def test_summary_synced_strava_only(capsys):
@@ -94,7 +96,7 @@ def test_summary_synced_strava_only(capsys):
     _print_summary({"strava": 2}, [], state, [user])
 
     output = capsys.readouterr().out.strip()
-    assert "Synced 2 measurements to Strava." == output
+    assert "Syncs completed: Strava 2." == output
 
 
 def test_summary_synced_zwift_only(capsys):
@@ -103,7 +105,7 @@ def test_summary_synced_zwift_only(capsys):
 
     _print_summary({"zwift": 1}, [], state, [user])
 
-    assert capsys.readouterr().out.strip() == "Synced 1 measurement to Zwift."
+    assert capsys.readouterr().out.strip() == "Syncs completed: Zwift 1."
 
 
 def test_summary_reports_zwift_token_health(capsys):
@@ -156,9 +158,7 @@ def test_summary_synced_both_targets(capsys):
     _print_summary({"garmin": 3, "strava": 3}, [], state, [user])
 
     output = capsys.readouterr().out.strip()
-    assert "Synced 6 measurements" in output
-    assert "Garmin: 3" in output
-    assert "Strava: 3" in output
+    assert output == "Syncs completed: Garmin 3, Strava 3."
 
 
 def test_summary_synced_singular(capsys):
@@ -168,7 +168,24 @@ def test_summary_synced_singular(capsys):
     _print_summary({"garmin": 1}, [], state, [user])
 
     output = capsys.readouterr().out.strip()
-    assert "Synced 1 measurement to Garmin Connect." == output
+    assert "Syncs completed: Garmin 1." == output
+
+
+def test_summary_includes_current_run_garmin_skip(capsys):
+    state = _mock_state()
+    user = _mock_user(has_garmin=True, has_strava=True, has_zwift=True)
+    report = SyncReport(garmin_existing_dates={
+        ("default", datetime(2026, 5, 10, tzinfo=timezone.utc).date()),
+    })
+
+    _print_summary(
+        {"garmin": 0, "strava": 1, "zwift": 1}, [], state, [user], report,
+    )
+
+    assert capsys.readouterr().out.strip() == (
+        "Syncs completed: Garmin 0, Strava 1, Zwift 1. "
+        "Garmin already has a weigh-in dated 2026-05-10."
+    )
 
 
 def test_summary_failure(capsys):
@@ -180,6 +197,38 @@ def test_summary_failure(capsys):
     output = capsys.readouterr().out.strip()
     assert "Sync failed for: default" in output
     assert "--verbose" in output
+
+
+def test_summary_partial_failure_keeps_completed_counts(capsys):
+    _print_summary(
+        {"garmin": 0, "strava": 1, "zwift": 1},
+        [("default/garmin", "login failed")],
+        _mock_state(),
+        [_mock_user(has_strava=True, has_zwift=True)],
+    )
+
+    assert capsys.readouterr().out.strip().splitlines() == [
+        "Syncs completed: Garmin 0, Strava 1, Zwift 1.",
+        "Sync failed for: default/garmin. Run with --verbose for details.",
+    ]
+
+
+def test_summary_zero_upload_garmin_skip_uses_current_run_evidence(capsys):
+    report = SyncReport(garmin_existing_dates={("default", date(2026, 5, 10))})
+
+    _print_summary({"garmin": 0}, [], _mock_state(), [_mock_user()], report)
+
+    assert capsys.readouterr().out.strip() == (
+        "Garmin already has a weigh-in dated 2026-05-10."
+    )
+
+
+def test_summary_multi_user_noop_avoids_first_user_health_claims(capsys):
+    report = SyncReport(multiple_users=True)
+
+    _print_summary({}, [], _mock_state(), [_mock_user("one"), _mock_user("two")], report)
+
+    assert capsys.readouterr().out.strip() == "No new measurements for 2 profiles."
 
 
 def test_summary_refresh_needed(capsys):
