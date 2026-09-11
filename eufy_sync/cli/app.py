@@ -8,6 +8,7 @@ from time import sleep
 
 from eufy_sync import platform_support
 from eufy_sync.cli import doctor, maintenance, profiles, setup, shared, status, updater
+from eufy_sync.reporting import SyncReport, garmin_existing_note, update_counts_summary
 
 logger = logging.getLogger("eufy_sync")
 NETWORK_RETRY_DELAY = 60
@@ -16,7 +17,10 @@ _REAUTH_TARGETS = frozenset(("garmin", "strava", "zwift"))
 
 def _target_label(total_counts: dict[str, int]) -> str:
     """Human label for the targets that received data, e.g. "Garmin and Strava"."""
-    return " and ".join(n.capitalize() for n in total_counts if total_counts[n] > 0)
+    names = [n.capitalize() for n in total_counts if total_counts[n] > 0]
+    if len(names) < 3:
+        return " and ".join(names)
+    return f"{', '.join(names[:-1])} and {names[-1]}"
 
 
 def _tally_run(user, counts: dict[str, int], errors: dict[str, str], total_counts: dict[str, int], failures: list) -> None:
@@ -356,10 +360,11 @@ def _main() -> None:
 
         try:
             total_counts: dict[str, int] = {}
+            report = SyncReport(multiple_users=len(config.users) > 1)
             failures = []
             for user in config.users:
                 try:
-                    counts, errors = _sync_with_network_retry(user, state, backfill_days=backfill, repair_days=args.repair_days, headless=args.headless, dry_run=args.dry_run, target=args.target)
+                    counts, errors = _sync_with_network_retry(user, state, backfill_days=backfill, repair_days=args.repair_days, headless=args.headless, dry_run=args.dry_run, target=args.target, report=report)
                     _tally_run(user, counts, errors, total_counts, failures)
                 except AmbiguousProfileError as e:
                     interactive = not args.headless and sys.stdin.isatty()
@@ -370,7 +375,7 @@ def _main() -> None:
                         user.eufy.customer_id = customer_id
                         print("Saved. Syncing your profile now...")
                         try:
-                            counts, errors = _sync_with_network_retry(user, state, backfill_days=backfill, repair_days=args.repair_days, headless=args.headless, dry_run=args.dry_run, target=args.target)
+                            counts, errors = _sync_with_network_retry(user, state, backfill_days=backfill, repair_days=args.repair_days, headless=args.headless, dry_run=args.dry_run, target=args.target, report=report)
                             _tally_run(user, counts, errors, total_counts, failures)
                         except Exception as retry_error:
                             logger.exception("Failed to sync user %s after profile selection", user.name)
@@ -381,13 +386,25 @@ def _main() -> None:
                         for i, p in enumerate(e.profiles, 1):
                             print(profiles._format_profile(p, i))
                         print("")
-                        print("Nothing was synced. Choose your profile with: eufy-sync --select-profile")
+                        print(f"No data synced for {user.name}. Choose a profile with: eufy-sync --select-profile")
                         failures.append((user.name, "multiple Eufy profiles; run eufy-sync --select-profile"))
                 except Exception as e:
                     logger.exception("Failed to sync user %s", user.name)
                     failures.append((user.name, str(e)))
 
             total = sum(total_counts.values())
+
+            if args.dry_run:
+                if total > 0:
+                    print(f"[DRY RUN] {update_counts_summary(total_counts, planned=True)}")
+                elif failures:
+                    print("[DRY RUN] No syncs planned.")
+                else:
+                    print("[DRY RUN] Would sync 0 measurements. Nothing new to sync.")
+                if failures:
+                    fail_names = ", ".join(name for name, _ in failures)
+                    print(f"Could not check: {fail_names}. Run with --verbose for details.")
+                sys.exit(1 if failures else 0)
 
             if failures:
                 from eufy_sync.cli import failure_notify
@@ -398,15 +415,33 @@ def _main() -> None:
                 )
                 multiple_profiles = any("multiple Eufy profiles" in err for _, err in failures)
                 all_transient = all(failure_notify.is_transient_network_error(err) for _, err in failures)
+                completed = ""
+                if total > 0:
+                    completed = f" Synced to {_target_label(total_counts)}."
+                completed += garmin_existing_note(report)
                 if reauth_needed:
                     command = _reauth_repair_command(failures)
-                    platform_support.notify("eufy-sync: re-login needed", f"Run: {command}", command=command)
+                    platform_support.notify(
+                        "eufy-sync: re-login needed",
+                        (completed.strip() + " " if completed else "") + f"Run: {command}",
+                        command=command,
+                    )
                     failure_notify.clear_network_failures()
                 elif password_needed:
-                    platform_support.notify(_password_failure_title(failures), "Run: eufy-sync --update-password", command="eufy-sync --update-password")
+                    platform_support.notify(
+                        _password_failure_title(failures),
+                        (completed.strip() + " " if completed else "")
+                        + "Run: eufy-sync --update-password",
+                        command="eufy-sync --update-password",
+                    )
                     failure_notify.clear_network_failures()
                 elif multiple_profiles:
-                    platform_support.notify("eufy-sync: choose your profile", "Run: eufy-sync --select-profile", command="eufy-sync --select-profile")
+                    platform_support.notify(
+                        "eufy-sync: choose your profile",
+                        (completed.strip() + " " if completed else "")
+                        + "Run: eufy-sync --select-profile",
+                        command="eufy-sync --select-profile",
+                    )
                     failure_notify.clear_network_failures()
                 elif all_transient and args.headless and not args.dry_run:
                     # A scheduled run that only hit network trouble. Stay quiet - the
@@ -416,12 +451,12 @@ def _main() -> None:
                     if failure_notify.should_escalate(count):
                         platform_support.notify(
                             "eufy-sync: network still down",
-                            f"No network for ~{round(hours)}h ({count} runs). "
-                            "Measurements are waiting and will sync when it is back.",
+                            f"Sync has hit network errors for ~{round(hours)}h ({count} runs). "
+                            f"Pending measurements will retry automatically.{completed}",
                         )
                 else:
                     fail_msg = "; ".join(f"{name}: {err[:80]}" for name, err in failures)
-                    platform_support.notify("eufy-sync failed", fail_msg)
+                    platform_support.notify("eufy-sync failed", fail_msg + completed)
                     failure_notify.clear_network_failures()
                 logger.error("Sync failed for: %s", "; ".join(f"{n}: {e[:80]}" for n, e in failures))
             elif not args.dry_run:
@@ -430,27 +465,29 @@ def _main() -> None:
                 from eufy_sync.cli import failure_notify
                 failure_notify.clear_network_failures()
 
-            if args.dry_run:
+            if total > 0 and not failures:
                 target_label = _target_label(total_counts)
-                if total > 0:
-                    print(f"[DRY RUN] Would sync {total} measurement{'s' if total != 1 else ''} to {target_label}.")
-                else:
-                    print("[DRY RUN] Would sync 0 measurements. Nothing new to sync.")
-                sys.exit(1 if failures else 0)
-
-            if total > 0:
-                target_label = _target_label(total_counts)
-                platform_support.notify("eufy-sync", f"Synced {total} measurement{'s' if total != 1 else ''} to {target_label}")
+                platform_support.notify(
+                    "eufy-sync", f"Synced to {target_label}." + garmin_existing_note(report)
+                )
 
             if first_run:
                 if failures:
+                    if total > 0:
+                        print("")
+                        print(update_counts_summary(total_counts) + garmin_existing_note(report))
+                    elif garmin_existing_note(report):
+                        print("")
+                        print(garmin_existing_note(report).strip())
                     print("")
                     print("First sync failed. Fix the issue above, then run eufy-sync again.")
                 else:
                     if total > 0:
-                        target_label = _target_label(total_counts)
                         print("")
-                        print(f"Synced {total} measurements to {target_label}.")
+                        print(update_counts_summary(total_counts) + garmin_existing_note(report))
+                    elif garmin_existing_note(report):
+                        print("")
+                        print(garmin_existing_note(report).strip())
                     maintenance._offer_launch_agent()
                     print("")
                     apps = []
@@ -462,7 +499,7 @@ def _main() -> None:
                         apps.append("Zwift")
                     print(f"You're all set! Check the {' and '.join(apps)} app to see your data.")
             elif not args.verbose:
-                status._print_summary(total_counts, failures, state, config.users)
+                status._print_summary(total_counts, failures, state, config.users, report)
 
             sys.exit(1 if failures else 0)
 

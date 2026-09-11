@@ -38,7 +38,8 @@ def _source(measurements):
     return source
 
 
-def test_zwift_receives_only_latest_valid_fresh_weight(tmp_path: Path):
+@pytest.mark.parametrize("changed", [True, False])
+def test_zwift_receives_only_latest_valid_fresh_weight(tmp_path: Path, changed):
     state = SyncState(tmp_path / "state.db")
     user = _user()
     older = _measurement(85.0, datetime(2026, 5, 10, tzinfo=timezone.utc))
@@ -46,7 +47,7 @@ def test_zwift_receives_only_latest_valid_fresh_weight(tmp_path: Path):
     invalid = _measurement(0.0, latest.timestamp + timedelta(days=1))
     source = _source([invalid, latest, older])
     zwift = MagicMock()
-    zwift.update_weight.return_value = {"verified": True, "changed": True, "weight_grams": 84500}
+    zwift.update_weight.return_value = {"verified": True, "changed": changed, "weight_grams": 84500}
 
     with patch("eufy_sync.sync.EufyClient", return_value=source), \
          patch("eufy_sync.zwift_client.ZwiftClient", return_value=zwift), \

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from eufy_sync.reporting import SyncReport, garmin_existing_note, update_counts_summary
+
 
 def _zwift_token_status(config) -> dict:
     from eufy_sync.zwift_client import ZwiftClient
@@ -13,24 +15,31 @@ def _zwift_token_status(config) -> dict:
         client.close()
 
 
-def _print_summary(total_counts: dict[str, int], failures: list, state, users: list) -> None:
+def _print_summary(
+    total_counts: dict[str, int], failures: list, state, users: list,
+    report: SyncReport | None = None,
+) -> None:
     """Print a single-line sync summary."""
     if failures:
+        if any(total_counts.values()):
+            print(update_counts_summary(total_counts) + garmin_existing_note(report))
+        elif garmin_existing_note(report):
+            print(garmin_existing_note(report).strip())
         fail_names = ", ".join(name for name, _ in failures)
         print(f"Sync failed for: {fail_names}. Run with --verbose for details.")
         return
 
     total = sum(total_counts.values())
     if total > 0:
-        target_names = list(total_counts.keys())
-        if len(target_names) == 1:
-            name = {"garmin": "Garmin Connect", "strava": "Strava", "zwift": "Zwift"}.get(
-                target_names[0], target_names[0].capitalize()
-            )
-            print(f"Synced {total} measurement{'s' if total != 1 else ''} to {name}.")
-        else:
-            parts = [f"{n.capitalize()}: {c}" for n, c in total_counts.items()]
-            print(f"Synced {total} measurement{'s' if total != 1 else ''} ({', '.join(parts)}).")
+        print(update_counts_summary(total_counts) + garmin_existing_note(report))
+        return
+
+    if garmin_existing_note(report):
+        print(garmin_existing_note(report).strip())
+        return
+
+    if report is not None and report.multiple_users:
+        print(f"No new measurements for {len(users)} profiles.")
         return
 
     # No-op sync - build an informative one-liner

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1298,7 +1299,169 @@ def test_dry_run_does_not_notify_and_prints_preview_summary(
 
     out = capsys.readouterr().out
     assert "Synced" not in out
-    assert "[DRY RUN] Would sync 2 measurements to Garmin." in out
+    assert "[DRY RUN] Syncs planned: Garmin 2." in out
+
+
+@pytest.mark.parametrize("counts, expected, skip_dates", [
+    ({"garmin": 1, "strava": 0, "zwift": 0}, "Synced to Garmin.", set()),
+    ({"garmin": 0, "strava": 1, "zwift": 0}, "Synced to Strava.", set()),
+    ({"garmin": 0, "strava": 0, "zwift": 1}, "Synced to Zwift.", set()),
+    ({"garmin": 1, "strava": 1, "zwift": 0}, "Synced to Garmin and Strava.", set()),
+    ({"garmin": 1, "strava": 0, "zwift": 1}, "Synced to Garmin and Zwift.", set()),
+    ({"garmin": 0, "strava": 1, "zwift": 1}, "Synced to Strava and Zwift.", set()),
+    ({"garmin": 1, "strava": 1, "zwift": 1}, "Synced to Garmin, Strava and Zwift.", set()),
+    ({"garmin": 0, "strava": 1, "zwift": 1},
+     "Synced to Strava and Zwift. Garmin already has a weigh-in dated 2026-05-10.",
+     {("default", date(2026, 5, 10))}),
+    ({"garmin": 0, "strava": 1}, "Synced to Strava. Garmin already has weigh-ins for 2 dates.",
+     {("default", date(2026, 5, 10)), ("default", date(2026, 5, 11))}),
+    ({"garmin": 0, "strava": 0}, None, set()),
+    ({"garmin": 0}, None, {("default", date(2026, 5, 10))}),
+])
+def test_notification_reports_only_current_run_updates(
+    counts, expected, skip_dates, tmp_path,
+):
+    from eufy_sync.cli.app import main
+
+    config_path = _write_synced_config(tmp_path)
+    argv = ["eufy-sync", "--config", str(config_path),
+            "--db", str(tmp_path / "state.db"), "--headless"]
+
+    def fake_sync_user(user, state, **kwargs):
+        kwargs["report"].garmin_existing_dates.update(skip_dates)
+        return counts, {}
+
+    with patch("sys.argv", argv), \
+         patch("eufy_sync.cli.setup._migrate_config_passwords"), \
+         patch("eufy_sync.cli.setup._show_upgrade_notice"), \
+         patch("eufy_sync.cli.updater._check_for_updates"), \
+         patch("eufy_sync.cli.status._print_summary"), \
+         patch("eufy_sync.sync.sync_user", side_effect=fake_sync_user), \
+         patch("eufy_sync.platform_support.notify") as notify, \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 0
+    if expected is None:
+        notify.assert_not_called()
+    else:
+        notify.assert_called_once_with("eufy-sync", expected)
+
+
+def test_network_retry_preserves_report_object(skip_scheduled_retry_wait):
+    from eufy_sync.cli.app import _sync_with_network_retry
+    from eufy_sync.reporting import SyncReport
+
+    report = SyncReport()
+    seen_reports = []
+
+    def fake_sync_user(user, state, **kwargs):
+        seen_reports.append(kwargs["report"])
+        if len(seen_reports) == 1:
+            kwargs["report"].garmin_existing_dates.add(("default", date(2026, 5, 10)))
+            return {"garmin": 0}, {"garmin": "connection timed out"}
+        return {"garmin": 0, "strava": 1}, {}
+
+    with patch("eufy_sync.sync.sync_user", side_effect=fake_sync_user):
+        counts, errors = _sync_with_network_retry(
+            None, None, headless=True, report=report,
+        )
+
+    assert counts == {"garmin": 0, "strava": 1}
+    assert errors == {}
+    assert seen_reports == [report, report]
+    assert len(report.garmin_existing_dates) == 1
+
+
+def test_dry_run_failure_never_notifies_or_touches_network_streak(tmp_path, capsys):
+    from eufy_sync.cli import failure_notify
+    from eufy_sync.cli.app import main
+
+    config_path = _write_synced_config(tmp_path)
+    argv = ["eufy-sync", "--config", str(config_path),
+            "--db", str(tmp_path / "state.db"), "--dry-run", "--headless"]
+
+    with patch("sys.argv", argv), \
+         patch("eufy_sync.cli.setup._migrate_config_passwords"), \
+         patch("eufy_sync.cli.setup._show_upgrade_notice"), \
+         patch("eufy_sync.cli.updater._check_for_updates"), \
+         patch("eufy_sync.sync.sync_user", return_value=(
+             {"garmin": 0, "strava": 1}, {"garmin": "connection timed out"}
+         )), \
+         patch("eufy_sync.platform_support.notify") as notify, \
+         patch.object(failure_notify, "record_network_failure") as record, \
+         patch.object(failure_notify, "clear_network_failures") as clear, \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    notify.assert_not_called()
+    record.assert_not_called()
+    clear.assert_not_called()
+    assert capsys.readouterr().out.strip().splitlines() == [
+        "[DRY RUN] Syncs planned: Garmin 0, Strava 1.",
+        "Could not check: default/garmin. Run with --verbose for details.",
+    ]
+
+
+def test_multi_user_run_marks_shared_report_as_multiple_users(tmp_path):
+    from eufy_sync.cli.app import main
+
+    config_path = _write_synced_config(tmp_path)
+    users = [MagicMock(name="one"), MagicMock(name="two")]
+    config = MagicMock(users=users)
+    reports = []
+
+    def fake_sync_user(user, state, **kwargs):
+        reports.append(kwargs["report"])
+        return {"garmin": 0}, {}
+
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(tmp_path / "state.db")]
+    with patch("sys.argv", argv), \
+         patch("eufy_sync.cli.setup._migrate_config_passwords"), \
+         patch("eufy_sync.cli.setup._show_upgrade_notice"), \
+         patch("eufy_sync.cli.updater._check_for_updates"), \
+         patch("eufy_sync.config.load_config", return_value=config), \
+         patch("eufy_sync.cli.status._print_summary"), \
+         patch("eufy_sync.sync.sync_user", side_effect=fake_sync_user), \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 0
+    assert len(reports) == 2
+    assert reports[0] is reports[1]
+    assert reports[0].multiple_users is True
+
+
+def test_first_run_partial_success_prints_counts_before_failure_guidance(tmp_path, capsys):
+    from eufy_sync.cli.app import main
+
+    config_path = tmp_path / "config.yaml"
+
+    def fake_setup(path):
+        _write_config(path, {"users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com", "password": "pw"},
+            "garmin": {"email": "g@example.com", "password": "pw"},
+        }]})
+
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(tmp_path / "state.db")]
+    with patch("sys.argv", argv), \
+         patch("eufy_sync.cli.setup._first_run_setup", side_effect=fake_setup), \
+         patch("eufy_sync.cli.updater._check_for_updates"), \
+         patch("eufy_sync.cli.maintenance._offer_launch_agent") as offer, \
+         patch("eufy_sync.platform_support.notify"), \
+         patch("eufy_sync.sync.sync_user", return_value=(
+             {"garmin": 0, "strava": 1}, {"garmin": "upload failed"}
+         )), \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    offer.assert_not_called()
+    output = capsys.readouterr().out
+    assert "Syncs completed: Garmin 0, Strava 1." in output
+    assert "First sync failed. Fix the issue above, then run eufy-sync again." in output
 
 
 @patch("eufy_sync.cli.status._print_summary")
@@ -1307,8 +1470,9 @@ def test_dry_run_does_not_notify_and_prints_preview_summary(
 @patch("eufy_sync.cli.setup._show_upgrade_notice")
 @patch("eufy_sync.cli.setup._migrate_config_passwords")
 @patch("eufy_sync.credentials._keyring_available", return_value=False)
+@pytest.mark.parametrize("partial", [False, True])
 def test_headless_transient_failure_silent_until_threshold(
-    _keyring, _migrate, _notice, _updates, mock_notify, _summary, tmp_path
+    _keyring, _migrate, _notice, _updates, mock_notify, _summary, tmp_path, partial
 ):
     """A scheduled run that only hit a network blip must not fire a 'failed'
     notification. Only the third consecutive network failure escalates."""
@@ -1318,6 +1482,8 @@ def test_headless_transient_failure_silent_until_threshold(
     db_path = tmp_path / "state.db"
 
     def fake_sync_user(user, state, **kwargs):
+        if partial:
+            return {"garmin": 1}, {"strava": "connection timed out"}
         raise RuntimeError("[Errno 8] nodename nor servname provided, or not known")
 
     argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path), "--headless"]
@@ -1337,7 +1503,11 @@ def test_headless_transient_failure_silent_until_threshold(
     assert mock_notify.call_count == 1  # third escalates, once
     title, msg = mock_notify.call_args[0][0], mock_notify.call_args[0][1]
     assert "network" in title.lower()
-    assert "waiting" in msg.lower()
+    assert msg == (
+        "Sync has hit network errors for ~0h (3 runs). "
+        "Pending measurements will retry automatically."
+        + (" Synced to Garmin." if partial else "")
+    )
 
 
 @patch("eufy_sync.cli.status._print_summary")
@@ -1413,8 +1583,8 @@ def test_per_target_upload_error_still_reaches_the_classifier(
 
     assert exc.value.code == 1
     skip_scheduled_retry_wait.assert_not_called()
-    mock_notify.assert_any_call(
-        "eufy-sync: re-login needed", f"Run: {expected_command}",
+    mock_notify.assert_called_once_with(
+        "eufy-sync: re-login needed", f"Synced to Strava. Run: {expected_command}",
         command=expected_command,
     )
 
