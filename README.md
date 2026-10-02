@@ -76,7 +76,7 @@ If you want to add another target later, follow [Adding Strava](#adding-strava) 
 
 ```bash
 eufy-sync                      # sync new measurements to every configured target
-eufy-sync --status             # show the last sync and token health
+eufy-sync --status             # show the latest synced weigh-in and token health
 eufy-sync --dry-run            # preview a sync without uploading
 eufy-sync --doctor             # check the setup and print fixes
 eufy-sync --history            # show recent sync history

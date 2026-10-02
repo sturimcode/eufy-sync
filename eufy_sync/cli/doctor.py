@@ -281,9 +281,9 @@ def _check_state_db(report, db_path: Path, user) -> None:
             days = ago.days
             hours = int(ago.total_seconds() / 3600)
             if days > 0:
-                report("PASS", "state db", f"last sync {days}d ago")
+                report("PASS", "state db", f"latest weigh-in {days}d ago")
             else:
-                report("PASS", "state db", f"last sync {hours}h ago")
+                report("PASS", "state db", f"latest weigh-in {hours}h ago")
     except Exception as e:
         report("FAIL", "state db", str(e))
     finally:
