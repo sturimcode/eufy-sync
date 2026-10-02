@@ -61,15 +61,17 @@ class SyncState:
                 last_newer_success_at TEXT,
                 PRIMARY KEY(user_name, target, measurement_id)
             );
-            -- What eufy-sync last sent to each Intervals.icu wellness date:
-            -- the fields sent and the readings that made up that weigh-in.
-            -- New in 1.16; CREATE IF NOT EXISTS is the whole migration.
+            -- Per Intervals.icu wellness date: every reading assigned to it
+            -- (with that date, fixed when first seen), the fields last sent,
+            -- and which readings made up the weigh-in that was sent. New in
+            -- 1.16; CREATE IF NOT EXISTS is the whole migration.
             CREATE TABLE IF NOT EXISTS intervals_days (
                 user_name TEXT NOT NULL,
                 local_date TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                readings_json TEXT NOT NULL,
-                sent_at TEXT NOT NULL,
+                readings_json TEXT NOT NULL DEFAULT '[]',
+                payload_json TEXT,
+                winner_json TEXT,
+                sent_at TEXT,
                 PRIMARY KEY(user_name, local_date)
             );
         """)
@@ -209,35 +211,51 @@ class SyncState:
         ]
 
     def get_intervals_days(self, user_name: str, dates) -> dict[date, dict]:
-        """Last-sent record per local date, for the dates asked about. Each
-        value has payload (the fields sent) and readings (their JSON form,
-        see intervals_plan.Reading)."""
+        """Stored record per local date, for the dates asked about. Each value
+        has readings (JSON form, see intervals_plan.Reading), payload (the
+        fields last sent, or None) and winner (keys of the readings that
+        made up that weigh-in, or None)."""
         keys = sorted({d.isoformat() for d in dates})
         if not keys:
             return {}
         placeholders = ",".join("?" for _ in keys)
         cursor = self._conn.execute(
-            f"SELECT local_date, payload_json, readings_json FROM intervals_days"
+            f"SELECT local_date, readings_json, payload_json, winner_json FROM intervals_days"
             f" WHERE user_name = ? AND local_date IN ({placeholders})",
             (user_name, *keys),
         )
         return {
-            date.fromisoformat(day): {"payload": json.loads(payload), "readings": json.loads(readings)}
-            for day, payload, readings in cursor.fetchall()
+            date.fromisoformat(day): {
+                "readings": json.loads(readings),
+                "payload": json.loads(payload) if payload else None,
+                "winner": [tuple(k) for k in json.loads(winner)] if winner else None,
+            }
+            for day, readings, payload, winner in cursor.fetchall()
         }
 
-    def record_intervals_day(
-        self, user_name: str, local_date: date, payload: dict, readings: list[dict], sent_at: str,
-    ) -> None:
+    def save_intervals_readings(self, user_name: str, local_date: date, readings: list[dict]) -> None:
+        """Replace the readings assigned to a date, keeping what was sent."""
         with self._conn:
             self._conn.execute(
-                """INSERT INTO intervals_days (user_name, local_date, payload_json, readings_json, sent_at)
+                """INSERT INTO intervals_days (user_name, local_date, readings_json)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(user_name, local_date) DO UPDATE SET readings_json = excluded.readings_json""",
+                (user_name, local_date.isoformat(), json.dumps(readings)),
+            )
+
+    def record_intervals_sent(
+        self, user_name: str, local_date: date, payload: dict, winner: list[tuple], sent_at: str,
+    ) -> None:
+        """Note that the date now holds payload, from the winner's readings."""
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO intervals_days (user_name, local_date, payload_json, winner_json, sent_at)
                    VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(user_name, local_date) DO UPDATE SET
                        payload_json = excluded.payload_json,
-                       readings_json = excluded.readings_json,
+                       winner_json = excluded.winner_json,
                        sent_at = excluded.sent_at""",
-                (user_name, local_date.isoformat(), json.dumps(payload), json.dumps(readings), sent_at),
+                (user_name, local_date.isoformat(), json.dumps(payload), json.dumps(winner), sent_at),
             )
 
     def mark_upgraded(self, user_name: str, measurement_id: str, target: str) -> None:

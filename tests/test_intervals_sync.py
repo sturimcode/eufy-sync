@@ -277,14 +277,22 @@ def test_triage_drops_a_queued_weigh_in_its_date_has_moved_past(tmp_path: Path):
     user = _user()
     earlier, later = _m(80.0, 2), _m(80.5, 2, 60)
     _run(user, state, [later])
+    # The earlier weigh-in was seen and stored for the same date, then failed.
+    day = later.timestamp.astimezone().date()
+    stored = state.get_intervals_days("default", [day])[day]["readings"]
+    seen = {**stored[0], "id": earlier.measurement_id, "ts": earlier.timestamp.isoformat(), "kg": 80.0}
+    state.save_intervals_readings("default", day, [*stored, seen])
     state.record_upload_failure("default", "intervals", earlier.measurement_id,
                                 earlier.timestamp.isoformat(), 80.0, NOON.isoformat())
+    # One this run cannot place stays queued.
+    state.record_upload_failure("default", "intervals", "unknown",
+                                earlier.timestamp.isoformat(), 70.0, NOON.isoformat())
 
     counts, errors, intervals, _ = _run(user, state, [])
 
     assert errors == {} and counts == {"intervals": 0}
     intervals.update_wellness.assert_not_called()
-    assert _rows(state) == {}
+    assert set(_rows(state)) == {("intervals", "unknown")}
     state.close()
 
 
@@ -490,10 +498,11 @@ def test_no_put_when_a_new_weigh_in_has_the_same_values(tmp_path: Path):
 
     assert errors == {} and counts == {"intervals": 0}
     intervals.update_wellness.assert_not_called()
-    # The date's record now names the newer weigh-in.
+    # The date's record now names the newer weigh-in as what it holds.
     day = second.timestamp.astimezone().date()
-    readings = state.get_intervals_days("default", [day])[day]["readings"]
-    assert [r["id"] for r in readings] == [second.measurement_id]
+    record = state.get_intervals_days("default", [day])[day]
+    assert [k[0] for k in record["winner"]] == [second.measurement_id]
+    assert {r["id"] for r in record["readings"]} == {first.measurement_id, second.measurement_id}
     state.close()
 
 
@@ -506,4 +515,133 @@ def test_new_table_is_created_on_an_existing_database(tmp_path: Path):
         conn.execute("DROP TABLE intervals_days")
     state = SyncState(path)
     assert state.get_intervals_days("default", [NOON.date()]) == {}
+    state.close()
+
+
+# --- follow-up review: dates, retries by identity, losers, raw waits ----------
+
+
+@pytest.fixture
+def local_tz(monkeypatch):
+    """Set the machine timezone for the test, and restore it afterwards."""
+    import time as time_module
+
+    def use(name: str) -> None:
+        monkeypatch.setenv("TZ", name)
+        time_module.tzset()
+
+    yield use
+    monkeypatch.undo()
+    time_module.tzset()
+
+
+def test_a_timezone_change_does_not_move_a_sent_weigh_in(tmp_path: Path, local_tz):
+    """UTC, then UTC+2: A (23:30 UTC) stays on the date it was sent to, and
+    an older B fetched later cannot replace it there."""
+    from datetime import timezone as tz
+
+    state = SyncState(tmp_path / "s.db")
+    user = _user()
+    day = (datetime.now(tz.utc) - timedelta(days=3)).date()
+    a = EufyMeasurement("a", "cust", "dev", datetime.combine(day, time(23, 30), tz.utc), 80.0, body_fat_pct=20.0)
+    b = EufyMeasurement("b", "cust", "dev", datetime.combine(day, time(10, 0), tz.utc), 81.0, body_fat_pct=21.0)
+
+    local_tz("UTC")
+    _, _, intervals, _ = _run(user, state, [a], backfill_days=30)
+    assert _sent(intervals) == [(day.isoformat(), 80.0, 20.0)]
+
+    local_tz("Etc/GMT-2")  # UTC+2: A's timestamp now reads as the next day
+    counts, errors, intervals, _ = _run(user, state, [b], backfill_days=30)
+    assert errors == {} and counts == {"intervals": 0}
+    intervals.update_wellness.assert_not_called()
+
+    counts, _, intervals, _ = _run(user, state, [a, b], backfill_days=30)
+    assert counts == {"intervals": 0}
+    stored = state.get_intervals_days("default", [day, day + timedelta(days=1)])
+    assert set(stored) == {day}
+    assert {r["id"] for r in stored[day]["readings"]} == {"a", "b"}
+    state.close()
+
+
+def test_a_newer_failure_survives_a_fetch_of_only_the_older_weigh_in(tmp_path: Path):
+    state = SyncState(tmp_path / "s.db")
+    user = _user()
+    a, b = _m(80.0, 2, -240), _m(81.0, 2, 360)
+    _run(user, state, [a])
+    _run(user, state, [a, b], fail_weights={81.0})
+    assert ("intervals", b.measurement_id) in _rows(state)
+
+    # Only A comes back. B is still known for the date, so it is still the
+    # date's weigh-in; its failed retry is not cleared by A being in place.
+    counts, errors, intervals, _ = _run(user, state, [a], fail_weights={81.0})
+    assert [w for _, w, _ in _sent(intervals)] == [81.0] * 3
+    assert ("intervals", b.measurement_id) in _rows(state)
+
+    counts, errors, intervals, _ = _run(user, state, [a])
+    assert errors == {} and counts == {"intervals": 1}
+    assert _sent(intervals) == [(_day(b), 81.0, 20.0)]
+    assert _rows(state) == {}
+    state.close()
+
+
+def _crp():
+    p = EufyMeasurement("p", "cust", "dev", NOON - timedelta(days=2), 80.0, body_fat_pct=19.0)
+    c = EufyMeasurement("c", "cust", "dev", p.timestamp + timedelta(minutes=1), 81.0, body_fat_pct=22.0)
+    r = EufyMeasurement("r", "cust", "dev", p.timestamp + timedelta(minutes=2), 80.0, weight_only=True)
+    return c, r, p
+
+
+def test_an_earlier_partner_found_later_gives_the_combined_fetchs_winner(tmp_path: Path):
+    """C (processed, 10:01, 81 kg) and R (raw, 10:02, 80 kg) arrive first; R
+    is newest. P (processed, 10:00, 80 kg) arrives alone later and is R's
+    partner, so that weigh-in started at 10:00 and C is now the newest."""
+    c, r, p = _crp()
+    split = SyncState(tmp_path / "split.db")
+    user = _user()
+    _, _, intervals, _ = _run(user, split, [c, r])
+    assert _sent(intervals) == [(_day(r), 80.0, None)]
+    _, _, intervals, _ = _run(user, split, [p])
+    assert _sent(intervals) == [(_day(c), 81.0, 22.0)]
+
+    together = SyncState(tmp_path / "together.db")
+    _, _, intervals, _ = _run(user, together, [c, r, p])
+    assert _sent(intervals) == [(_day(c), 81.0, 22.0)]
+
+    day = c.timestamp.astimezone().date()
+    for state in (split, together):
+        assert state.get_intervals_days("default", [day])[day]["payload"] == {"weight": 81.0, "bodyFat": 22.0}
+        state.close()
+
+
+def test_a_newer_weigh_in_retires_the_dates_older_raw_wait(tmp_path: Path):
+    state = SyncState(tmp_path / "s.db")
+    user = _user()
+    morning_raw = _m(80.0, 2, -240, weight_only=True)
+    _run(user, state, [morning_raw])
+    assert state.get_oldest_weight_only_timestamp("default", "intervals") is not None
+
+    evening = _m(79.5, 2, 360, body_fat=19.0)
+    counts, _, intervals, _ = _run(user, state, [morning_raw, evening])
+    assert counts == {"intervals": 1}
+    assert state.get_oldest_weight_only_timestamp("default", "intervals") is None
+
+    # The morning's processed record turning up later changes nothing.
+    morning_full = EufyMeasurement("morning-full", "cust", "dev", morning_raw.timestamp - timedelta(seconds=20),
+                                   80.0, body_fat_pct=20.0)
+    counts, _, intervals, _ = _run(user, state, [morning_full])
+    assert counts == {"intervals": 0}
+    intervals.update_wellness.assert_not_called()
+    state.close()
+
+
+def test_a_failing_winner_replaces_older_entries_but_not_its_own(tmp_path: Path):
+    state = SyncState(tmp_path / "s.db")
+    user = _user()
+    earlier, later = _m(80.0, 2), _m(80.5, 2, 60)
+    _run(user, state, [earlier], fail_weights={80.0})
+    assert set(_rows(state)) == {("intervals", earlier.measurement_id)}
+
+    _run(user, state, [earlier, later], fail_weights={80.0, 80.5})
+
+    assert set(_rows(state)) == {("intervals", later.measurement_id)}
     state.close()

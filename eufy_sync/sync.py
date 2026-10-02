@@ -165,51 +165,88 @@ def _triage_retries(
     return given_up, capped
 
 
+def _intervals_load_window(timestamps) -> set:
+    """Dates whose stored records may hold these readings. A reading's stored
+    date is within a day of its UTC date in any timezone, and a raw or
+    processed partner can sit across one more midnight."""
+    return {
+        ts.astimezone(timezone.utc).date() + timedelta(days=offset)
+        for ts in timestamps for offset in range(-2, 3)
+    }
+
+
 def _intervals_retry_superseded(user_name: str, state: SyncState, row: dict) -> bool:
-    """Whether a queued Intervals.icu retry is for a weigh-in that a newer
-    one has since replaced on its date. A queued entry carries the start of
-    its weigh-in, so its local date is the date it was meant for."""
-    from eufy_sync.intervals_plan import Reading, WeighIn, same_weigh_in
+    """Whether a queued Intervals.icu retry is for a weigh-in older than the
+    one its date last settled on. The date is the one stored with the
+    queued reading, not today's reading of its timestamp."""
+    from eufy_sync.intervals_plan import Reading, WeighIn, belongs_to
 
     taken = datetime.fromisoformat(row["measurement_timestamp"])
-    day = taken.astimezone().date()
-    record = state.get_intervals_days(user_name, [day]).get(day)
-    if record is None or not record["readings"]:
-        return False
-    holder = WeighIn([Reading.from_json(r) for r in record["readings"]])
-    if same_weigh_in(taken, row["weight_kg"], row["measurement_id"], holder):
-        return False
-    return holder.started > taken
+    mid, kg = row["measurement_id"], row["weight_kg"]
+    for record in state.get_intervals_days(user_name, _intervals_load_window([taken])).values():
+        readings = [Reading.from_json(r) for r in record["readings"]]
+        if not any(belongs_to(taken, kg, mid, WeighIn([r])) for r in readings):
+            continue
+        if not record["winner"]:
+            return False
+        winner_keys = set(record["winner"])
+        holder = WeighIn([r for r in readings if r.key in winner_keys])
+        return bool(holder.readings) and not belongs_to(taken, kg, mid, holder) and holder.started > taken
+    return False
 
 
-def _record_intervals_day(
-    user_name: str, state: SyncState, day, weigh_in, payload: dict, queued: list[dict], *, uploaded: bool,
+def _clear_settled_retries(
+    user_name: str, state: SyncState, plan, winner, weigh_ins, queued: list[dict], keep_id: str | None = None,
 ) -> None:
-    """Bookkeeping once a date holds weigh_in's values: the per-date record,
-    sync_log rows (history, the fetch cursor, and the weight-only reach-back),
-    and the date's retry entries."""
+    """Clear queued entries that a date's winner settles: entries for the
+    winner's own readings, and entries for weigh-ins on that date that
+    started before it. A newer failure, or an entry this run cannot place,
+    stays queued."""
+    from eufy_sync.intervals_plan import belongs_to
+
+    for row in queued:
+        mid = row["measurement_id"]
+        if mid == keep_id:
+            continue
+        taken, kg = datetime.fromisoformat(row["measurement_timestamp"]), row["weight_kg"]
+        if belongs_to(taken, kg, mid, winner):
+            state.clear_upload_retry(user_name, "intervals", mid)
+            continue
+        owner = next((w for w in weigh_ins if belongs_to(taken, kg, mid, w)), None)
+        if owner is not None and owner.day == plan.day and owner.started < winner.started:
+            state.clear_upload_retry(user_name, "intervals", mid)
+
+
+def _settle_intervals_day(
+    user_name: str, state: SyncState, plan, weigh_ins, payload: dict, queued: list[dict], *, uploaded: bool,
+) -> None:
+    """Bookkeeping once a date holds its winner's values: what was sent,
+    sync_log rows (history, the fetch cursor, the weight-only reach-back),
+    retired raw waits, and the date's settled retries."""
+    winner = plan.winner
     now = datetime.now(timezone.utc).isoformat()
-    state.record_intervals_day(user_name, day, payload, [r.to_json() for r in weigh_in.readings], now)
-    response = json.dumps({"date": day.isoformat(), **payload})
-    for r in weigh_in.readings:
+    state.record_intervals_sent(user_name, plan.day, payload, [list(r.key) for r in winner.readings], now)
+    response = json.dumps({"date": plan.day.isoformat(), **payload})
+    for r in winner.readings:
         if r.fetched and not state.is_synced(user_name, r.measurement_id, "intervals"):
             state.record_sync(
                 user_name=user_name, measurement_id=r.measurement_id,
                 measurement_timestamp=r.timestamp.isoformat(), weight_kg=r.weight_kg,
                 synced_at=now, target="intervals", response=response, weight_only=r.weight_only,
             )
-    if any(not r.weight_only for r in weigh_in.readings):
-        # The processed record is in; its raw reading no longer waits.
-        for r in weigh_in.readings:
+    # A raw reading stops waiting for its processed record once that record
+    # is in, or once a newer weigh-in holds the date: it can never be sent.
+    for w in plan.weigh_ins:
+        if w is winner and not w.processed:
+            continue
+        for r in w.readings:
             if r.weight_only:
                 state.mark_upgraded(user_name, r.measurement_id, "intervals")
-    for row in queued:
-        if datetime.fromisoformat(row["measurement_timestamp"]).astimezone().date() == day:
-            state.clear_upload_retry(user_name, "intervals", row["measurement_id"])
+    _clear_settled_retries(user_name, state, plan, winner, weigh_ins, queued)
     if uploaded:
         # Evidence for the give-up rule, as for Garmin: the target took a
         # weigh-in newer than every older queued failure.
-        state.note_newer_upload(user_name, "intervals", weigh_in.started, now)
+        state.note_newer_upload(user_name, "intervals", winner.started, now)
 
 
 def _sync_intervals(
@@ -220,13 +257,14 @@ def _sync_intervals(
     """Bring every Intervals.icu date this run touched to its desired state
     (see intervals_plan). Returns (dates sent, error message or None).
 
-    A date is sent only when its desired values differ from what was last
-    sent there, or on --repair-days. Order of fetching cannot matter: the
-    desired state already accounts for every known reading of the date.
-    Failures follow the other targets' rules: permanent ones stop the target
-    unqueued, retryable ones queue the date under its source reading's id
-    and stop the target, and a capped date lets later dates through."""
-    from eufy_sync.intervals_plan import Reading, desired_by_date
+    The readings of every touched date, with their dates, are stored before
+    anything is sent, so a failed date keeps its dates and its losers. A
+    date is sent only when its winner's values differ from what was last
+    sent there, or on --repair-days. Failures follow the other targets'
+    rules: permanent ones stop the target unqueued, retryable ones queue the
+    date under its winner's source reading and stop the target, and a capped
+    date lets later dates through."""
+    from eufy_sync.intervals_plan import Reading, plan_days
 
     readings = []
     for m in fetched:
@@ -240,27 +278,27 @@ def _sync_intervals(
     if not readings:
         return 0, None
 
-    # A raw/processed pair can straddle midnight, so the neighbouring dates'
-    # records can hold half of a weigh-in fetched now.
-    nearby = {
-        r.timestamp.astimezone().date() + timedelta(days=offset)
-        for r in readings for offset in (-1, 0, 1)
-    }
-    stored = state.get_intervals_days(user.name, nearby)
+    stored = state.get_intervals_days(user.name, _intervals_load_window(r.timestamp for r in readings))
     for record in stored.values():
         readings.extend(Reading.from_json(r) for r in record["readings"])
-    desired = desired_by_date(readings)
+    plans = plan_days(readings)
+    weigh_ins = [w for plan in plans.values() for w in plan.weigh_ins]
+    if not dry_run:
+        for day, plan in plans.items():
+            state.save_intervals_readings(user.name, day, [r.to_json() for r in plan.readings])
     queued = [row for row in state.get_upload_retries(user.name) if row["target"] == "intervals"]
 
     sent = 0
-    for day in sorted(desired):
-        weigh_in = desired[day]
-        source = weigh_in.source
-        payload = weigh_in.payload
+    for day in sorted(plans):
+        plan = plans[day]
+        winner = plan.winner
+        if winner is None:
+            continue
+        source, payload = winner.source, winner.payload
         last = stored.get(day)
         if not repair and last is not None and last["payload"] == payload:
             if not dry_run:
-                _record_intervals_day(user.name, state, day, weigh_in, payload, queued, uploaded=False)
+                _settle_intervals_day(user.name, state, plan, weigh_ins, payload, queued, uploaded=False)
             logger.debug("Intervals.icu already holds %s for %s", payload, day)
             continue
         key = ("intervals", source.measurement_id)
@@ -285,16 +323,11 @@ def _sync_intervals(
                 return sent, str(e)
             attempts = state.record_upload_failure(
                 user_name=user.name, target="intervals", measurement_id=source.measurement_id,
-                measurement_timestamp=weigh_in.started.isoformat(), weight_kg=source.weight_kg,
+                measurement_timestamp=winner.started.isoformat(), weight_kg=source.weight_kg,
                 failed_at=datetime.now(timezone.utc).isoformat(),
             )
-            # One entry per date: older weigh-ins queued for it are moot now.
-            for row in queued:
-                if (
-                    row["measurement_id"] != source.measurement_id
-                    and datetime.fromisoformat(row["measurement_timestamp"]).astimezone().date() == day
-                ):
-                    state.clear_upload_retry(user.name, "intervals", row["measurement_id"])
+            # This entry now stands for the date; the ones it settles go.
+            _clear_settled_retries(user.name, state, plan, winner, weigh_ins, queued, keep_id=source.measurement_id)
             logger.info(
                 "Intervals.icu will retry %s on the next run (failed %d time%s)",
                 day.isoformat(), attempts, "" if attempts == 1 else "s",
@@ -305,7 +338,7 @@ def _sync_intervals(
                 continue
             return sent, str(e)
 
-        _record_intervals_day(user.name, state, day, weigh_in, payload, queued, uploaded=True)
+        _settle_intervals_day(user.name, state, plan, weigh_ins, payload, queued, uploaded=True)
         capped_errors.pop("intervals", None)
         sent += 1
         detail = "weight and body fat" if "bodyFat" in payload else "weight only"

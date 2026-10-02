@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import itertools
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
-from eufy_sync.intervals_plan import Reading, desired_by_date, group_weigh_ins
+from eufy_sync.intervals_plan import Reading, group_weigh_ins, plan_days
 
 NOON = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0) - timedelta(days=2)
 
@@ -42,26 +42,56 @@ def test_a_pair_across_midnight_belongs_to_the_earlier_date():
     midnight = datetime.combine((NOON + timedelta(days=1)).date(), time()).astimezone()
     raw = Reading("x", midnight - timedelta(seconds=10), 80.0, None, True)
     full = Reading("x", midnight + timedelta(seconds=10), 80.0, 19.5, False)
-    desired = desired_by_date([full, raw])
-    assert list(desired) == [raw.timestamp.astimezone().date()]
-    assert desired[raw.timestamp.astimezone().date()].payload == {"weight": 80.0, "bodyFat": 19.5}
+    plans = plan_days([full, raw])
+    day = raw.timestamp.astimezone().date()
+    assert list(plans) == [day]
+    assert plans[day].winner.payload == {"weight": 80.0, "bodyFat": 19.5}
+    assert {r.assigned for r in plans[day].readings} == {day}
 
 
 def test_dates_known_only_from_what_was_sent_are_left_alone():
     stored = _r("old", 0, 80.0, fetched=False)
     tomorrow = Reading("new", NOON + timedelta(days=1), 79.0, 20.0, False)
-    desired = desired_by_date([stored, tomorrow])
-    assert list(desired) == [tomorrow.timestamp.astimezone().date()]
+    plans = plan_days([stored, tomorrow])
+    assert list(plans) == [tomorrow.timestamp.astimezone().date()]
 
 
 def test_the_newest_weigh_in_of_a_date_wins_including_what_was_sent():
     sent_later = _r("later", 3600, 80.0, fetched=False)
     fetched_earlier = _r("earlier", 0, 81.0)
-    (weigh_in,) = desired_by_date([fetched_earlier, sent_later]).values()
-    assert weigh_in.source.measurement_id == "later"
+    (plan,) = plan_days([fetched_earlier, sent_later]).values()
+    assert plan.winner.source.measurement_id == "later"
 
 
 def test_reading_json_round_trip():
     r = _r("p", 0, 80.0, bf=19.5)
     back = Reading.from_json(r.to_json())
     assert back == Reading(r.measurement_id, r.timestamp, r.weight_kg, r.body_fat_pct, r.weight_only, fetched=False)
+    dated = Reading.from_json({**r.to_json(), "date": "2026-10-01"})
+    assert dated.assigned == date(2026, 10, 1)
+
+
+def test_a_stored_date_is_kept_whatever_the_local_date_says_now():
+    stored = Reading("a", NOON, 80.0, 20.0, False, fetched=False, assigned=date(2000, 1, 1))
+    fetched_copy = Reading("a", NOON, 80.0, 20.0, False)
+    plans = plan_days([fetched_copy, stored])
+    assert list(plans) == [date(2000, 1, 1)]
+
+
+def test_a_late_partner_keeps_the_existing_date():
+    midnight = datetime.combine((NOON + timedelta(days=1)).date(), time()).astimezone()
+    processed = Reading("p", midnight + timedelta(seconds=10), 80.0, 19.5, False, fetched=False,
+                        assigned=(midnight + timedelta(seconds=10)).date())
+    raw = Reading("r", midnight - timedelta(seconds=10), 80.0, None, True)
+    plans = plan_days([processed, raw])
+    assert list(plans) == [processed.assigned]
+    assert {r.assigned for r in plans[processed.assigned].readings} == {processed.assigned}
+
+
+def test_joining_readings_with_different_dates_touches_both():
+    a = Reading("x", NOON, 80.0, None, True, fetched=False, assigned=date(2000, 1, 1))
+    b = Reading("x", NOON + timedelta(seconds=20), 80.0, 19.5, False, fetched=False, assigned=date(2000, 1, 2))
+    plans = plan_days([a, b])
+    assert set(plans) == {date(2000, 1, 1), date(2000, 1, 2)}
+    assert plans[date(2000, 1, 2)].winner is None
+    assert plans[date(2000, 1, 1)].winner.payload == {"weight": 80.0, "bodyFat": 19.5}
