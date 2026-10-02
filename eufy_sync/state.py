@@ -197,6 +197,29 @@ class SyncState:
             if datetime.fromisoformat(ts).astimezone().date() == local_date
         ]
 
+    def syncs_on_date(self, user_name: str, target: str, local_date: date) -> list[dict]:
+        """Every recorded sync to target for a local calendar date, as dicts
+        with measurement_id, measurement_timestamp (a datetime), weight_kg and
+        weight_only. Windowed in SQL, exact date check in Python, as in
+        has_synced_on_date."""
+        lo, hi = _date_window(local_date)
+        cursor = self._conn.execute(
+            """SELECT eufy_measurement_id, measurement_timestamp, weight_kg, weight_only
+               FROM sync_log
+               WHERE user_name = ? AND target = ?
+                 AND measurement_timestamp >= ? AND measurement_timestamp < ?""",
+            (user_name, target, lo, hi),
+        )
+        rows = []
+        for mid, ts, kg, weight_only in cursor.fetchall():
+            taken = datetime.fromisoformat(ts)
+            if taken.astimezone().date() == local_date:
+                rows.append({
+                    "measurement_id": mid, "measurement_timestamp": taken,
+                    "weight_kg": kg, "weight_only": bool(weight_only),
+                })
+        return rows
+
     def mark_upgraded(self, user_name: str, measurement_id: str, target: str) -> None:
         """Clear a sync's weight-only flag once its full body-comp record has
         replaced it in the target. The row stays, so the raw record itself

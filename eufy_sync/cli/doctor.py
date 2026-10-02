@@ -19,6 +19,7 @@ from eufy_sync.config import load_config
 from eufy_sync.credentials import active_store_label
 from eufy_sync.eufy_client import EufyClient
 from eufy_sync.garmin_client import GarminClient
+from eufy_sync.intervals_client import IntervalsClient
 from eufy_sync.state import SyncState
 from eufy_sync.strava_client import StravaClient
 from eufy_sync.zwift_client import ZwiftClient
@@ -73,6 +74,8 @@ def _run_doctor(config_path: Path, db_path: Path) -> int:
         targets.append("strava")
     if user.zwift:
         targets.append("zwift")
+    if user.intervals:
+        targets.append("intervals")
     report("PASS", "config", f"valid ({len(config.users)} user, targets: {', '.join(targets)})")
 
     # 2. profile
@@ -95,6 +98,10 @@ def _run_doctor(config_path: Path, db_path: Path) -> int:
     # 6b. zwift account read access
     if user.zwift:
         _check_zwift_session(report, user)
+
+    # 6c. intervals.icu API key
+    if user.intervals:
+        _check_intervals_key(report, user)
 
     # 7. eufy cloud
     _check_eufy_cloud(report, eufy_client)
@@ -219,11 +226,27 @@ def _check_zwift_session(report, user) -> None:
                 client.close()
 
 
+def _check_intervals_key(report, user) -> None:
+    client = None
+    try:
+        client = IntervalsClient(user.intervals)
+        client.authenticate()
+        client.check_connection()
+        report("PASS", "intervals key", f"works for athlete {user.intervals.athlete_id} (live read check)")
+    except Exception as e:
+        _report_connection_error(report, "intervals key", e)
+    finally:
+        if client is not None:
+            with suppress(Exception):
+                client.close()
+
+
 def _report_connection_error(report, label: str, error: Exception) -> None:
     msg = str(error)
     # Network and server failures should not tell the user to reset a login.
     fix = next((f"eufy-sync {hint}" for hint in (
         "--update-password", "--reauth garmin", "--setup-strava", "--reauth zwift",
+        "--setup-intervals",
     ) if hint in msg), None)
     report("FAIL", label, msg, fix)
 

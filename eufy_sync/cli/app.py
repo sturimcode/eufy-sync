@@ -9,7 +9,7 @@ from time import sleep
 
 from eufy_sync import platform_support
 from eufy_sync.cli import doctor, maintenance, profiles, setup, shared, status, updater
-from eufy_sync.reporting import SyncReport, garmin_existing_note, update_counts_summary
+from eufy_sync.reporting import SyncReport, display_name, garmin_existing_note, update_counts_summary
 
 logger = logging.getLogger("eufy_sync")
 NETWORK_RETRY_DELAY = 60
@@ -18,7 +18,11 @@ _REAUTH_TARGETS = frozenset(("garmin", "strava", "zwift"))
 
 def _target_label(total_counts: dict[str, int]) -> str:
     """Human label for the targets that received data, e.g. "Garmin and Strava"."""
-    names = [n.capitalize() for n in total_counts if total_counts[n] > 0]
+    return _join_names([display_name(n) for n in total_counts if total_counts[n] > 0])
+
+
+def _join_names(names: list[str]) -> str:
+    """"A", "A and B", or "A, B and C"."""
     if len(names) < 3:
         return " and ".join(names)
     return f"{', '.join(names[:-1])} and {names[-1]}"
@@ -146,7 +150,7 @@ def _main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="eufy-sync",
-        description="Sync Eufy smart scale data to Garmin Connect, Strava, and Zwift",
+        description="Sync Eufy smart scale data to Garmin Connect, Strava, Zwift, and Intervals.icu",
     )
     parser.add_argument("--version", "-V", action="version", version=f"eufy-sync {__version__}")
     parser.add_argument("--status", action="store_true", help="Show sync status and token health")
@@ -157,7 +161,9 @@ def _main() -> None:
     parser.add_argument("--setup-strava", action="store_true", help="Connect Strava to your account")
     parser.add_argument("--setup-zwift", action="store_true", help="Connect experimental Zwift weight sync")
     parser.add_argument("--disconnect-zwift", action="store_true", help="Disconnect Zwift weight sync")
-    parser.add_argument("--target", choices=("garmin", "strava", "zwift"), default=None,
+    parser.add_argument("--setup-intervals", action="store_true", help="Connect Intervals.icu or replace its API key")
+    parser.add_argument("--disconnect-intervals", action="store_true", help="Disconnect Intervals.icu")
+    parser.add_argument("--target", choices=("garmin", "strava", "zwift", "intervals"), default=None,
                         help="Sync only one configured target")
     parser.add_argument("--select-profile", action="store_true", help="Choose which Eufy profile to sync")
     parser.add_argument("--update-password", action="store_true", help="Change stored passwords")
@@ -275,6 +281,16 @@ def _main() -> None:
     if args.disconnect_zwift:
         with _credential_lock("--disconnect-zwift"):
             maintenance._disconnect_zwift(config_path)
+        return
+
+    if args.setup_intervals:
+        with _credential_lock("--setup-intervals"):
+            setup._setup_intervals(config_path)
+        return
+
+    if args.disconnect_intervals:
+        with _credential_lock("--disconnect-intervals"):
+            maintenance._disconnect_intervals(config_path)
         return
 
     # Handle profile selection
@@ -447,6 +463,7 @@ def _main() -> None:
                     "--update-password" in err or "changed your Eufy password" in err
                     for _, err in failures
                 )
+                intervals_setup_needed = any("--setup-intervals" in err for _, err in failures)
                 multiple_profiles = any("multiple Eufy profiles" in err for _, err in failures)
                 all_transient = all(failure_notify.is_transient_network_error(err) for _, err in failures)
                 completed = ""
@@ -467,6 +484,14 @@ def _main() -> None:
                         (completed.strip() + " " if completed else "")
                         + "Run: eufy-sync --update-password",
                         command="eufy-sync --update-password",
+                    )
+                    failure_notify.clear_network_failures()
+                elif intervals_setup_needed:
+                    platform_support.notify(
+                        "eufy-sync: Intervals.icu key rejected",
+                        (completed.strip() + " " if completed else "")
+                        + "Run: eufy-sync --setup-intervals",
+                        command="eufy-sync --setup-intervals",
                     )
                     failure_notify.clear_network_failures()
                 elif multiple_profiles:
@@ -531,7 +556,9 @@ def _main() -> None:
                         apps.append("Strava")
                     if any(u.zwift for u in config.users):
                         apps.append("Zwift")
-                    print(f"You're all set! Check the {' and '.join(apps)} app to see your data.")
+                    if any(u.intervals for u in config.users):
+                        apps.append("Intervals.icu")
+                    print(f"You're all set! Check the {_join_names(apps)} app to see your data.")
             elif not args.verbose:
                 status._print_summary(total_counts, failures, state, config.users, report)
 

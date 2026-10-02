@@ -237,6 +237,8 @@ _CREDENTIAL_COMMANDS = [
     (["--setup-strava"], "eufy_sync.cli.setup._setup_strava", "--setup-strava"),
     (["--setup-zwift"], "eufy_sync.cli.setup._setup_zwift", "--setup-zwift"),
     (["--disconnect-zwift"], "eufy_sync.cli.maintenance._disconnect_zwift", "--disconnect-zwift"),
+    (["--setup-intervals"], "eufy_sync.cli.setup._setup_intervals", "--setup-intervals"),
+    (["--disconnect-intervals"], "eufy_sync.cli.maintenance._disconnect_intervals", "--disconnect-intervals"),
     (["--select-profile"], "eufy_sync.cli.profiles._select_profile", "--select-profile"),
     (["--update-password"], "eufy_sync.cli.maintenance._update_password", "--update-password"),
     (["--reauth"], "eufy_sync.cli.maintenance._reauth", "--reauth"),

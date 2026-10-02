@@ -239,7 +239,7 @@ def test_target_zwift_never_constructs_or_authenticates_other_services(tmp_path:
 @pytest.mark.parametrize(
     ("target", "message"),
     [
-        ("fitbit", "Unknown sync target 'fitbit'. Choose garmin, strava, or zwift."),
+        ("fitbit", "Unknown sync target 'fitbit'. Choose garmin, strava, zwift, or intervals."),
         ("garmin", "Sync target 'garmin' is not configured for user 'default'."),
     ],
 )

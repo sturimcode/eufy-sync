@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "eufy-sync"
 version = "1.15.0"
-description = "Sync Eufy smart scale data to Garmin Connect, Strava, and Zwift"
+description = "Sync Eufy smart scale data to Garmin Connect, Strava, Zwift, and Intervals.icu"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
@@ -14,6 +14,7 @@ keywords = [
     "garmin connect",
     "strava",
     "zwift",
+    "intervals.icu",
     "eufy",
     "eufylife",
     "smart scale",

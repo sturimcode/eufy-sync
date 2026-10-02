@@ -12,7 +12,7 @@ from garminconnect import GarminConnectTooManyRequestsError
 from eufy_sync import state as state_module
 from eufy_sync.config import UserConfig
 from eufy_sync.eufy_client import AmbiguousProfileError, EufyClient, EufyMeasurement
-from eufy_sync.reporting import SyncReport
+from eufy_sync.reporting import SyncReport, display_name
 from eufy_sync.state import SyncState
 from eufy_sync.transform import transform
 
@@ -98,6 +98,62 @@ def _retry(fn, description: str):
             time.sleep(delay)
 
 
+def _local_date(m: EufyMeasurement):
+    """The calendar date a weigh-in belongs to: the machine's local date, the
+    same convention as Garmin's same-date guard."""
+    return m.timestamp.astimezone().date()
+
+
+def _same_weigh_in(a_ts: datetime, a_kg: float, b_ts: datetime, b_kg: float) -> bool:
+    """Whether two records are close enough in time and weight to be the raw
+    and processed versions of one weigh-in (the issue #48 bounds)."""
+    return (
+        abs((a_ts - b_ts).total_seconds()) <= UPGRADE_MAX_SECONDS
+        and abs(a_kg - b_kg) <= UPGRADE_MAX_WEIGHT_KG
+    )
+
+
+def _intervals_daily_picks(measurements: list[EufyMeasurement]) -> set[str]:
+    """Intervals.icu keeps one wellness record per date, so each local date
+    gets one measurement: its newest. When the newest is a raw weight-only
+    record and the processed record of the same weigh-in is also here, the
+    processed one is sent instead, since only it carries body fat."""
+    by_date: dict = {}
+    for m in measurements:
+        by_date.setdefault(_local_date(m), []).append(m)
+    picks = set()
+    for day in by_date.values():
+        newest = max(day, key=lambda m: m.timestamp)
+        if newest.weight_only:
+            full = [
+                m for m in day
+                if not m.weight_only
+                and _same_weigh_in(m.timestamp, m.weight_kg, newest.timestamp, newest.weight_kg)
+            ]
+            if full:
+                newest = max(full, key=lambda m: m.timestamp)
+        picks.add(newest.measurement_id)
+    return picks
+
+
+def _intervals_superseded(
+    measurement_id: str, timestamp: datetime, weight_kg: float, weight_only: bool, day_rows: list[dict],
+) -> bool:
+    """Whether a newer weigh-in for the same date already reached
+    Intervals.icu. Sending this one would overwrite it with older values.
+    A raw weight-only record of the same weigh-in does not count: the
+    processed record replaces it and adds body fat."""
+    for row in day_rows:
+        if row["measurement_id"] == measurement_id or row["measurement_timestamp"] <= timestamp:
+            continue
+        if row["weight_only"] and not weight_only and _same_weigh_in(
+            row["measurement_timestamp"], row["weight_kg"], timestamp, weight_kg,
+        ):
+            continue
+        return True
+    return False
+
+
 def _triage_retries(
     user_name: str, state: SyncState, target_names: list[str], dry_run: bool,
 ) -> tuple[set[tuple[str, str]], dict[tuple[str, str], bool]]:
@@ -135,6 +191,17 @@ def _triage_retries(
                 if not dry_run:
                     state.clear_upload_retry(user_name, target, mid)
                 continue
+        if target == "intervals":
+            # One record per date: a newer weigh-in that reached the same
+            # date already replaced this one there. The queue does not keep
+            # weight_only, so treat the entry as a full record; that only
+            # keeps it longer, never drops one that still matters.
+            taken = datetime.fromisoformat(row["measurement_timestamp"])
+            day_rows = state.syncs_on_date(user_name, target, taken.astimezone().date())
+            if _intervals_superseded(mid, taken, row["weight_kg"], False, day_rows):
+                if not dry_run:
+                    state.clear_upload_retry(user_name, target, mid)
+                continue
         newer_success = row["last_newer_success_at"]
         target_healthy = (
             newer_success is not None
@@ -150,7 +217,7 @@ def _triage_retries(
                 "%s the %s upload of %.2f kg from %s: it has failed for %d days (%d attempts) "
                 "while newer weigh-ins uploaded, most recently at %s",
                 "Would give up on" if dry_run else "Giving up on",
-                target.capitalize(), row["weight_kg"], row["measurement_timestamp"],
+                display_name(target), row["weight_kg"], row["measurement_timestamp"],
                 int((now - first_failed) // 86400), row["attempts"], newer_success,
             )
         elif row["attempts"] >= MAX_RETRY_ATTEMPTS or first_failed < oldest_allowed:
@@ -172,10 +239,10 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
     already calls synced (issue #58): the target can have lost data we
     recorded as delivered, and only the target knows that.
     """
-    supported_targets = ("garmin", "strava", "zwift")
+    supported_targets = ("garmin", "strava", "zwift", "intervals")
     if target is not None and target not in supported_targets:
         raise ValueError(
-            f"Unknown sync target '{target}'. Choose garmin, strava, or zwift."
+            f"Unknown sync target '{target}'. Choose garmin, strava, zwift, or intervals."
         )
     if target is not None and getattr(user, target) is None:
         raise ValueError(
@@ -195,6 +262,9 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
     if user.zwift and target in (None, "zwift"):
         from eufy_sync.zwift_client import ZwiftClient
         all_targets.append(("zwift", ZwiftClient(user.zwift)))
+    if user.intervals and target in (None, "intervals"):
+        from eufy_sync.intervals_client import IntervalsClient
+        all_targets.append(("intervals", IntervalsClient(user.intervals)))
 
     targets: list[tuple[str, object]] = []
 
@@ -245,7 +315,9 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 ts = state.get_latest_sync_timestamp(user.name, name)
                 if ts is None:
                     logger.info("No prior syncs to %s for %s, backfilling 7 days", name, user.name)
-                if name == "garmin":
+                # Per-date history targets reach back for a raw weigh-in still
+                # waiting for its processed record, and for queued failures.
+                if name in ("garmin", "intervals"):
                     pending_ts = state.get_oldest_weight_only_timestamp(
                         user.name, name, since=int(time.time()) - UPGRADE_LOOKBACK_DAYS * 86400,
                     )
@@ -263,7 +335,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                             logger.info(
                                 "Some queued %s uploads are older than %d days and still waiting; "
                                 "the regular fetch no longer reaches them (--backfill-days does)",
-                                name.capitalize(), RETRY_ABANDON_DAYS + RETRY_REACH_BACK_MARGIN_DAYS,
+                                display_name(name), RETRY_ABANDON_DAYS + RETRY_REACH_BACK_MARGIN_DAYS,
                             )
                             retry_ts = floor
                         ts = min(ts if ts is not None else default_cursor, retry_ts)
@@ -319,6 +391,9 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
             key=lambda m: m.timestamp,
         )
         current_weight_latest = valid_fetched[-1] if valid_fetched else None
+        intervals_picks = _intervals_daily_picks(
+            [m for m in measurements if transform(m) is not None]
+        )
 
         # Backfill can return older, unsynced readings alongside a newest
         # reading that dedup will skip, or omit the newest reading entirely.
@@ -345,7 +420,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 target_measurement = current_weight_latest if target_name in current_weight_timestamps else m
                 if target_measurement is None:
                     continue
-                if target_name == "garmin" and body_comp is None:
+                if target_name in ("garmin", "intervals") and body_comp is None:
                     logger.warning("Skipping invalid measurement: %s (%.1f kg)", m.measurement_id, m.weight_kg)
                     continue
                 if (
@@ -353,7 +428,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     and current_weight_timestamps[target_name] is not None
                     and target_measurement.timestamp.timestamp() < current_weight_timestamps[target_name]
                 ):
-                    logger.debug("Skipping %s history older than its current weight: %s", target_name.capitalize(), target_measurement.measurement_id)
+                    logger.debug("Skipping %s history older than its current weight: %s", display_name(target_name), target_measurement.measurement_id)
                     continue
                 if target_name in current_weight_timestamps and m.measurement_id != target_measurement.measurement_id:
                     continue
@@ -365,8 +440,26 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     and (target_name, target_measurement.measurement_id) in given_up
                     and target_measurement.measurement_id not in pending
                 ):
-                    logger.debug("Skipping %s upload that was given up: %s", target_name.capitalize(), target_measurement.measurement_id)
+                    logger.debug("Skipping %s upload that was given up: %s", display_name(target_name), target_measurement.measurement_id)
                     continue
+
+                # Intervals.icu keeps one wellness record per date, and a PUT
+                # replaces that date's values. Send only the date's newest
+                # weigh-in, and never one older than what the date already
+                # holds from us. A processed record that replaces raw
+                # weight-only rows on its date resends even when its id is
+                # already recorded (issue #48: the ids can match).
+                intervals_replaces: list[str] = []
+                if target_name == "intervals":
+                    if m.measurement_id not in intervals_picks:
+                        logger.debug("Skipping Intervals.icu for %s: a newer weigh-in that day is sent instead", m.measurement_id)
+                        continue
+                    day_rows = state.syncs_on_date(user.name, "intervals", _local_date(m))
+                    if _intervals_superseded(m.measurement_id, m.timestamp, m.weight_kg, m.weight_only, day_rows):
+                        logger.debug("Skipping Intervals.icu for %s: a newer weigh-in for that date was already sent", m.measurement_id)
+                        continue
+                    if not m.weight_only:
+                        intervals_replaces = [r["measurement_id"] for r in day_rows if r["weight_only"]]
 
                 # Still consulted in repair mode: it decides whether the sync
                 # is recorded below, since re-uploading a known id must not
@@ -411,7 +504,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                         ]
                         if len(matches) == 1:
                             upgrade_row = matches[0]
-                elif synced_already and not repair:
+                elif synced_already and not repair and m.measurement_id not in intervals_replaces:
                     logger.debug("Already synced to %s: %s", target_name, m.measurement_id)
                     continue
 
@@ -486,10 +579,17 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                             lambda: client.upload_body_composition(body_comp),  # noqa: B023
                             f"Garmin upload ({m.measurement_id})",
                         )
+                    elif target_name == "intervals":
+                        result = attempt(
+                            lambda: client.update_wellness(  # noqa: B023
+                                _local_date(m), body_comp.weight, body_comp.percent_fat,  # noqa: B023
+                            ),
+                            f"Intervals.icu wellness update ({m.measurement_id})",
+                        )
                     else:
                         result = attempt(
                             lambda: client.update_weight(target_measurement.weight_kg),  # noqa: B023
-                            f"{target_name.capitalize()} weight update ({target_measurement.measurement_id})",
+                            f"{display_name(target_name)} weight update ({target_measurement.measurement_id})",
                         )
                     response_str = json.dumps(result) if result else None
 
@@ -509,6 +609,9 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                         logger.info("Upgraded weight-only entry to full body comp for %s", m.timestamp.astimezone().date())
                     if target_name == "garmin" and (upgrade_row is not None or m.measurement_id in pending):
                         state.clear_pending_upgrade(user.name, m.measurement_id)
+                    for replaced_id in intervals_replaces:
+                        # That date now holds this record's values.
+                        state.mark_upgraded(user.name, replaced_id, "intervals")
                     if target_name in current_weight_timestamps:
                         state.clear_upload_retries_through(user.name, target_name, target_measurement.timestamp)
                     else:
@@ -520,7 +623,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                         )
                     capped_errors.pop(target_name, None)
                 except UnsupportedMeasurementError as e:
-                    logger.warning("Skipping %s for %s: %s", target_name.capitalize(), user.name, e)
+                    logger.warning("Skipping %s for %s: %s", display_name(target_name), user.name, e)
                     continue
                 except Exception as e:
                     logger.error("Upload to %s failed for %s: %s", target_name, user.name, e)
@@ -557,14 +660,19 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                             )
                         logger.info(
                             "%s will retry %s on the next run (failed %d time%s)",
-                            target_name.capitalize(), target_measurement.measurement_id, attempts, "" if attempts == 1 else "s",
+                            display_name(target_name), target_measurement.measurement_id, attempts, "" if attempts == 1 else "s",
                         )
                     continue
 
                 counts[target_name] += 1
                 lb = target_measurement.weight_kg * 2.20462
-                detail = "full body comp" if target_name == "garmin" and not m.weight_only else "weight only"
-                logger.info("Synced %.2f kg (%.1f lb) → %s (%s)", target_measurement.weight_kg, lb, target_name.capitalize(), detail)
+                if target_name == "garmin" and not m.weight_only:
+                    detail = "full body comp"
+                elif target_name == "intervals" and isinstance(result, dict) and "bodyFat" in result:
+                    detail = "weight and body fat"
+                else:
+                    detail = "weight only"
+                logger.info("Synced %.2f kg (%.1f lb) → %s (%s)", target_measurement.weight_kg, lb, display_name(target_name), detail)
 
                 # Small delay between uploads to avoid rate limiting
                 time.sleep(1 if target_name == "garmin" else 0.5)

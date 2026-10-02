@@ -34,12 +34,19 @@ class ZwiftConfig:
 
 
 @dataclass
+class IntervalsConfig:
+    athlete_id: str
+    api_key: str
+
+
+@dataclass
 class UserConfig:
     name: str
     eufy: EufyConfig
     garmin: GarminConfig | None = None
     strava: StravaConfig | None = None
     zwift: ZwiftConfig | None = None
+    intervals: IntervalsConfig | None = None
 
 
 @dataclass
@@ -118,6 +125,27 @@ def _get_strava_secret(user_name: str, yaml_secret: str | None, migrate: bool = 
     )
 
 
+def _get_intervals_key(user_name: str, yaml_key: str | None, migrate: bool = True) -> str:
+    """Resolve the Intervals.icu API key: credential store first, then a YAML
+    fallback (normally a ${VAR} reference on a headless machine).
+
+    Like the Strava secret, the fix is its own setup command rather than
+    --update-password, which only handles account passwords."""
+    from eufy_sync.credentials import get_password
+
+    stored = get_password(f"{user_name}:intervals", migrate=migrate)
+    if stored:
+        return stored
+
+    if yaml_key:
+        return yaml_key
+
+    raise ValueError(
+        f"No Intervals.icu API key found for user '{user_name}'. "
+        f"Run: eufy-sync --setup-intervals"
+    )
+
+
 def load_config(path: Path, migrate: bool = True) -> AppConfig:
     """Parse the config and resolve its secrets.
 
@@ -170,10 +198,24 @@ def load_config(path: Path, migrate: bool = True) -> AppConfig:
                 password=_get_password(name, "zwift", u["zwift"]["email"], u["zwift"].get("password"), migrate),
             )
 
-        if not garmin and not strava and not zwift:
+        intervals = None
+        if "intervals" in u:
+            section = u["intervals"] or {}
+            athlete_id = section.get("athlete_id")
+            if athlete_id is None or not str(athlete_id).strip():
+                raise ValueError(
+                    f"The intervals section for user '{name}' has no athlete_id. "
+                    f"Run: eufy-sync --setup-intervals"
+                )
+            intervals = IntervalsConfig(
+                athlete_id=str(athlete_id).strip(),
+                api_key=_get_intervals_key(name, section.get("api_key"), migrate),
+            )
+
+        if not garmin and not strava and not zwift and not intervals:
             raise ValueError(
                 f"User '{name}' has no sync targets configured. "
-                f"Add a 'garmin', 'strava', and/or 'zwift' section to your config."
+                f"Add a 'garmin', 'strava', 'zwift', and/or 'intervals' section to your config."
             )
 
         users.append(UserConfig(
@@ -186,6 +228,7 @@ def load_config(path: Path, migrate: bool = True) -> AppConfig:
             garmin=garmin,
             strava=strava,
             zwift=zwift,
+            intervals=intervals,
         ))
 
     return AppConfig(users=users)

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from eufy_sync.reporting import SyncReport, garmin_existing_note, update_counts_summary
+from eufy_sync.reporting import SyncReport, display_name, garmin_existing_note, update_counts_summary
 
 
 def _zwift_token_status(config) -> dict:
@@ -94,6 +94,11 @@ def _print_summary(
         else:
             parts.append("Zwift not connected")
 
+    if user.intervals:
+        # The config only loads with a saved key, and a key has no expiry to
+        # report; --doctor checks it against the API.
+        parts.append("Intervals.icu key saved")
+
     print(" | ".join(parts))
     print(
         "If you weighed in recently and it isn't here, open the Eufy app so it "
@@ -112,7 +117,7 @@ def _retry_queue_line(state, user) -> str | None:
     total = sum(waiting.values())
     if not total:
         return None
-    names = ", ".join(target.capitalize() for target in sorted(waiting))
+    names = ", ".join(display_name(target) for target in sorted(waiting))
     return f"{total} upload{'' if total == 1 else 's'} waiting to retry ({names})"
 
 
@@ -180,6 +185,12 @@ def _show_status(state, users: list) -> None:
             else:
                 print("Zwift auth: not connected - run: eufy-sync --reauth zwift")
 
+        if user.intervals:
+            print(
+                f"Intervals.icu auth: API key saved for athlete {user.intervals.athlete_id} "
+                "(check it with --doctor; replace it with --setup-intervals)"
+            )
+
 
 def _show_history(state, users: list, limit: int = 14) -> None:
     """Print recent sync history as a table."""
@@ -198,9 +209,10 @@ def _show_history(state, users: list, limit: int = 14) -> None:
         target_cols = sorted(all_targets)
 
         # Header
+        widths = {t: max(8, len(t)) for t in target_cols}
         header = f"{'Date':<12} {'Weight':<22}"
         for t in target_cols:
-            header += f" {t.capitalize():<8}"
+            header += f" {t.capitalize():<{widths[t]}}"
         print(header)
         print("-" * len(header))
 
@@ -215,7 +227,7 @@ def _show_history(state, users: list, limit: int = 14) -> None:
             row = f"{date_str:<12} {weight_str:<22}"
             for t in target_cols:
                 mark = "✓" if t in entry["targets"] else "-"
-                row += f" {mark:<8}"
+                row += f" {mark:<{widths[t]}}"
             print(row)
 
         print("")

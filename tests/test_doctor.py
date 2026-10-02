@@ -529,3 +529,63 @@ def test_garmin_and_strava_skipped_when_not_configured(tmp_path, monkeypatch, ca
     assert "garmin session" not in out
     assert "strava token" not in out
     assert code == 0
+
+
+def _with_intervals(monkeypatch):
+    from eufy_sync.config import IntervalsConfig
+    app_config = _app_config()
+    app_config.users[0].intervals = IntervalsConfig(athlete_id="i12345", api_key="the-key")
+    monkeypatch.setattr(doctor, "load_config", MagicMock(return_value=app_config))
+    client = MagicMock()
+    monkeypatch.setattr(doctor, "IntervalsClient", MagicMock(return_value=client))
+    return client
+
+
+def test_intervals_key_passes_a_live_read(tmp_path, monkeypatch, capsys):
+    config_path, db_path = _patch_all_pass(tmp_path, monkeypatch)
+    client = _with_intervals(monkeypatch)
+
+    assert doctor._run_doctor(config_path, db_path) == 0
+
+    out = capsys.readouterr().out
+    assert "targets: garmin, strava, intervals" in out
+    assert "PASS  intervals key  works for athlete i12345 (live read check)" in out
+    assert "the-key" not in out
+    client.authenticate.assert_called_once_with()
+    client.check_connection.assert_called_once_with()
+    client.close.assert_called_once_with()
+
+
+def test_intervals_rejected_key_fails_with_setup_fix(tmp_path, monkeypatch, capsys):
+    config_path, db_path = _patch_all_pass(tmp_path, monkeypatch)
+    client = _with_intervals(monkeypatch)
+    client.check_connection.side_effect = RuntimeError(
+        "Intervals.icu rejected the API key (HTTP 401). Run: eufy-sync --setup-intervals"
+    )
+
+    assert doctor._run_doctor(config_path, db_path) == 1
+
+    out = capsys.readouterr().out
+    assert "FAIL  intervals key" in out
+    assert "fix: eufy-sync --setup-intervals" in out
+    client.close.assert_called_once_with()
+
+
+def test_intervals_network_failure_suggests_no_setup(tmp_path, monkeypatch, capsys):
+    config_path, db_path = _patch_all_pass(tmp_path, monkeypatch)
+    client = _with_intervals(monkeypatch)
+    client.check_connection.side_effect = RuntimeError("All connection attempts failed")
+
+    assert doctor._run_doctor(config_path, db_path) == 1
+
+    out = capsys.readouterr().out
+    assert "FAIL  intervals key" in out
+    assert "--setup-intervals" not in out
+
+
+def test_intervals_check_skipped_when_not_configured(tmp_path, monkeypatch, capsys):
+    config_path, db_path = _patch_all_pass(tmp_path, monkeypatch)
+    monkeypatch.setattr(doctor, "IntervalsClient", MagicMock(side_effect=AssertionError("not configured")))
+
+    assert doctor._run_doctor(config_path, db_path) == 0
+    assert "intervals" not in capsys.readouterr().out

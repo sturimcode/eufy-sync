@@ -49,12 +49,14 @@ def _first_run_setup(config_path: Path) -> None:
     garmin_answer = input("Connect Garmin? [Y/n] ").strip()
     strava_answer = input("Connect Strava? [y/N] ").strip()
     zwift_answer = input("Connect experimental Zwift weight sync? [y/N] ").strip()
+    intervals_answer = input("Connect Intervals.icu? [y/N] ").strip()
     connect_garmin = not garmin_answer.lower().startswith("n")
     connect_strava = strava_answer.lower().startswith("y")
     connect_zwift = zwift_answer.lower().startswith("y")
+    connect_intervals = intervals_answer.lower().startswith("y")
 
-    if not connect_garmin and not connect_strava and not connect_zwift:
-        print("Error: You must configure at least one sync target (Garmin, Strava, or Zwift).")
+    if not connect_garmin and not connect_strava and not connect_zwift and not connect_intervals:
+        print("Error: You must configure at least one sync target (Garmin, Strava, Zwift, or Intervals.icu).")
         sys.exit(1)
 
     # Collect credentials only for the selected targets.
@@ -87,6 +89,11 @@ def _first_run_setup(config_path: Path) -> None:
         user_config["garmin"] = {"email": garmin_email}
     if strava_config:
         user_config["strava"] = {"client_id": strava_config["client_id"]}
+    # Checked before Zwift, which saves its login as soon as it validates.
+    intervals_key = None
+    if connect_intervals:
+        intervals_key, athlete_id = _prompt_intervals_key(retry_command="eufy-sync")
+        user_config["intervals"] = {"athlete_id": athlete_id}
     if connect_zwift:
         _connect_zwift(user_config, retry_command="eufy-sync")
 
@@ -97,6 +104,8 @@ def _first_run_setup(config_path: Path) -> None:
     from eufy_sync.credentials import active_store_label, store_password
     if strava_config:
         store_password(f"{user_name}:strava", strava_config["client_secret"])
+    if intervals_key:
+        store_password(f"{user_name}:intervals", intervals_key)
     print(f"Passwords saved to the {active_store_label()}.")
 
     # On a shared account, pick the right person before the first sync.
@@ -126,6 +135,8 @@ def _first_run_setup(config_path: Path) -> None:
         targets.append("Strava")
     if connect_zwift:
         targets.append("Zwift")
+    if connect_intervals:
+        targets.append("Intervals.icu")
     print(f"Saved. Running first sync to {' and '.join(targets)} (last 7 days)...")
     if garmin_email:
         print("Logging in to Garmin (a browser may open if the direct login is rate-limited).")
@@ -201,7 +212,8 @@ def _setup_strava(config_path: Path) -> None:
     print("Strava connected! Future syncs will update both targets.")
 
 
-def _zwift_setup_password(prompt: str) -> str:
+def _secret_prompt(prompt: str) -> str:
+    """Read a secret without echoing it, or stop if the terminal would echo."""
     with warnings.catch_warnings():
         warnings.simplefilter("error", getpass.GetPassWarning)
         try:
@@ -241,7 +253,7 @@ def _connect_zwift(user: dict, retry_command: str = "eufy-sync --setup-zwift") -
         if not email:
             print("Error: Zwift email is required.")
             sys.exit(1)
-        password = _zwift_setup_password("Zwift password: ")
+        password = _secret_prompt("Zwift password: ")
         if not password:
             print("Error: Zwift password is required.")
             sys.exit(1)
@@ -281,7 +293,7 @@ def _setup_zwift(config_path: Path) -> None:
         if not eufy_email:
             print("Error: Eufy email is required.")
             sys.exit(1)
-        eufy_password = _zwift_setup_password("Eufy password: ")
+        eufy_password = _secret_prompt("Eufy password: ")
         if not eufy_password:
             print("Error: Eufy password is required.")
             sys.exit(1)
@@ -313,6 +325,61 @@ def _setup_zwift(config_path: Path) -> None:
 
     shared._write_config(config_path, config)
     print("Zwift connected. Experimental sync will update current weight only.")
+
+
+def _prompt_intervals_key(retry_command: str = "eufy-sync --setup-intervals") -> tuple[str, str]:
+    """Ask for an Intervals.icu API key and check it with a read.
+
+    Returns (api_key, athlete_id). The athlete id comes from the API ("0" in
+    the path means the key's own athlete), so nobody has to look it up.
+    Nothing is saved here; on failure this exits before the caller saves."""
+    print("")
+    print("  Intervals.icu")
+    print("  Get your API key from Developer Settings, near the bottom of https://intervals.icu/settings.")
+    print("  Each sync sets weight, and body fat when the scale measured it, on that day's wellness record.")
+    print("  The key is stored in the credential store and is never written to config.yaml.")
+    print("")
+    api_key = _secret_prompt("Intervals.icu API key: ").strip()
+    if not api_key:
+        print("Error: The Intervals.icu API key is required.")
+        sys.exit(1)
+
+    from eufy_sync.config import IntervalsConfig
+    from eufy_sync.intervals_client import OWN_ATHLETE, IntervalsClient
+
+    client = IntervalsClient(IntervalsConfig(athlete_id=OWN_ATHLETE, api_key=api_key))
+    try:
+        athlete_id = client.athlete_id()
+    except Exception as e:
+        print(f"Intervals.icu connection failed: {e}")
+        print(f"Nothing was enabled. Retry with: {retry_command}")
+        sys.exit(1)
+    finally:
+        with suppress(Exception):
+            client.close()
+    print(f"Intervals.icu key works for athlete {athlete_id}.")
+    return api_key, athlete_id
+
+
+def _setup_intervals(config_path: Path) -> None:
+    """Add Intervals.icu, or replace its API key, after the key passes a read."""
+    if not config_path.exists():
+        print("No config found. Run eufy-sync first to set up.")
+        sys.exit(1)
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    user = config["users"][0]
+    user_name = user.get("name", "default")
+    api_key, athlete_id = _prompt_intervals_key()
+
+    from eufy_sync.credentials import store_password
+    store_password(f"{user_name}:intervals", api_key)
+    # Only the athlete id belongs in the YAML; drop any key written there.
+    user["intervals"] = {"athlete_id": athlete_id}
+    shared._write_config(config_path, config)
+    print("Intervals.icu connected. Future syncs will update its wellness records.")
 
 
 def _migrate_config_passwords(config_path: Path) -> None:
@@ -358,6 +425,13 @@ def _migrate_config_passwords(config_path: Path) -> None:
         if secret and not re.fullmatch(r"\$\{\w+\}", secret):
             store_password(f"{name}:strava", secret)
             del user["strava"]["client_secret"]
+            changed = True
+
+        # A hand-written Intervals.icu API key gets the same treatment.
+        api_key = (user.get("intervals") or {}).get("api_key")
+        if api_key and not re.fullmatch(r"\$\{\w+\}", api_key):
+            store_password(f"{name}:intervals", api_key)
+            del user["intervals"]["api_key"]
             changed = True
 
     if changed:

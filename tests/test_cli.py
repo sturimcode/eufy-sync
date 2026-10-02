@@ -704,7 +704,7 @@ def test_first_run_setup_keeps_the_strava_secret_out_of_the_yaml(_keyring, tmp_p
     from eufy_sync.credentials import get_password
 
     config_path = tmp_path / "config.yaml"
-    answers = ["e@example.com", "n", "y", "n", "12345", "sekrit"]
+    answers = ["e@example.com", "n", "y", "n", "n", "12345", "sekrit"]
 
     with patch("builtins.input", side_effect=answers), \
          patch("getpass.getpass", return_value="eufy-pw"), \
@@ -725,7 +725,7 @@ def test_first_run_setup_allows_zwift_only(_keyring, tmp_path, capsys):
 
     config_path = tmp_path / "config.yaml"
     client = MagicMock()
-    answers = ["e@example.com", "n", "n", "y", "z@example.com"]
+    answers = ["e@example.com", "n", "n", "y", "n", "z@example.com"]
 
     with patch("sys.stdin.isatty", return_value=True), \
          patch("builtins.input", side_effect=answers), \
@@ -752,7 +752,7 @@ def test_first_run_setup_allows_garmin_and_zwift(_keyring, tmp_path):
 
     config_path = tmp_path / "config.yaml"
     client = MagicMock()
-    answers = ["e@example.com", "y", "n", "y", "g@example.com", "z@example.com"]
+    answers = ["e@example.com", "y", "n", "y", "n", "g@example.com", "z@example.com"]
 
     with patch("sys.stdin.isatty", return_value=True), \
          patch("builtins.input", side_effect=answers), \
@@ -777,7 +777,7 @@ def test_first_run_setup_allows_all_three_targets(_keyring, tmp_path):
     config_path = tmp_path / "config.yaml"
     client = MagicMock()
     answers = [
-        "e@example.com", "y", "y", "y", "g@example.com",
+        "e@example.com", "y", "y", "y", "n", "g@example.com",
         "12345", "strava-secret", "z@example.com",
     ]
 
@@ -802,7 +802,7 @@ def test_first_run_setup_rejects_no_targets_without_storing_credentials(_keyring
     from eufy_sync.credentials import get_password
 
     config_path = tmp_path / "config.yaml"
-    with patch("builtins.input", side_effect=["e@example.com", "n", "n", "n"]), \
+    with patch("builtins.input", side_effect=["e@example.com", "n", "n", "n", "n"]), \
          patch("getpass.getpass", return_value="eufy-pw"), \
          pytest.raises(SystemExit):
         _first_run_setup(config_path)
@@ -819,7 +819,7 @@ def test_first_run_setup_failed_zwift_validation_writes_nothing(_keyring, tmp_pa
     config_path = tmp_path / "config.yaml"
     client = MagicMock()
     client.authenticate.side_effect = RuntimeError("account rejected")
-    answers = ["e@example.com", "n", "n", "y", "z@example.com"]
+    answers = ["e@example.com", "n", "n", "y", "n", "z@example.com"]
 
     with patch("sys.stdin.isatty", return_value=True), \
          patch("builtins.input", side_effect=answers), \
@@ -843,7 +843,7 @@ def test_zwift_only_first_run_syncs_and_offers_scheduler(_keyring, tmp_path):
     config_path = tmp_path / "config.yaml"
     db_path = tmp_path / "state.db"
     client = MagicMock()
-    answers = ["e@example.com", "n", "n", "y", "z@example.com"]
+    answers = ["e@example.com", "n", "n", "y", "n", "z@example.com"]
     argv = ["eufy-sync", "--config", str(config_path), "--db", str(db_path)]
 
     with patch("sys.argv", argv), \

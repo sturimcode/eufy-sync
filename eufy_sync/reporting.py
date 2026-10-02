@@ -4,6 +4,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 
+# Target names whose plain capitalization is not the service's name.
+_DISPLAY_NAMES = {"intervals": "Intervals.icu"}
+
+
+def display_name(target: str) -> str:
+    """The service name a person reads, e.g. "Intervals.icu" for intervals."""
+    return _DISPLAY_NAMES.get(target, target.capitalize())
+
 
 @dataclass
 class SyncReport:
@@ -33,5 +41,5 @@ def garmin_existing_note(report: SyncReport | None) -> str:
 def update_counts_summary(counts: dict[str, int], *, planned: bool = False) -> str:
     """Describe per-target updates while preserving insertion order."""
     label = "Syncs planned" if planned else "Syncs completed"
-    parts = [f"{name.capitalize()} {count}" for name, count in counts.items()]
+    parts = [f"{display_name(name)} {count}" for name, count in counts.items()]
     return f"{label}: {', '.join(parts)}."

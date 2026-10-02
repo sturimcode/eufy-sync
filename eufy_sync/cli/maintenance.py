@@ -230,6 +230,27 @@ def _disconnect_zwift(config_path: Path) -> None:
     print("Zwift disconnected. Other sync targets are unchanged.")
 
 
+def _disconnect_intervals(config_path: Path) -> None:
+    """Remove only the Intervals.icu configuration and its API key."""
+    if not config_path.exists():
+        print("No config found. Run eufy-sync first to set up.")
+        sys.exit(1)
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    user = config["users"][0]
+    if "intervals" not in user:
+        print("Intervals.icu is not configured.")
+        return
+
+    user_name = user.get("name", "default")
+    del user["intervals"]
+    shared._write_config(config_path, config)
+
+    from eufy_sync.credentials import delete_password
+    delete_password(f"{user_name}:intervals")
+    print("Intervals.icu disconnected. Other sync targets are unchanged.")
+
+
 def _install_launch_agent() -> None:
     """Install the scheduled-sync agent for the current platform."""
     platform_support.install_agent()
@@ -324,7 +345,7 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
                 for name in user_names:
                     # "strava" here is the API app's client secret, not an account
                     # password; it moved into the vault alongside the other two.
-                    for suffix in ["eufy", "garmin", "strava", "zwift"]:
+                    for suffix in ["eufy", "garmin", "strava", "zwift", "intervals"]:
                         delete_password(f"{name}:{suffix}")
                 delete_token("eufy")
                 delete_token("garmin")
