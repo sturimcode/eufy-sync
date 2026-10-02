@@ -318,3 +318,17 @@ def test_self_update_keeps_the_browser_extra_when_installed(monkeypatch):
         _self_update()
 
     assert mock_run.call_args.args[0] == ["uv", "tool", "install", "--force", "--refresh-package", "eufy-sync", "eufy-sync[browser]==9.9.9"]
+
+
+def test_an_install_ahead_of_pypi_is_not_offered_a_downgrade(capsys):
+    from eufy_sync.cli import updater
+
+    assert updater.is_newer("1.15.0", "1.14.0")
+    assert not updater.is_newer("1.14.0", "1.15.0")
+    assert not updater.is_newer("1.15.0", "1.15.0")
+    with patch.object(updater, "_latest_pypi_version", return_value="1.14.0"), \
+         patch("eufy_sync.__version__", "1.15.0"), \
+         patch.object(updater.subprocess, "run") as run:
+        updater._self_update()
+    run.assert_not_called()
+    assert "Already on the latest version" in capsys.readouterr().out
