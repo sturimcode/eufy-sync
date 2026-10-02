@@ -138,3 +138,104 @@ def test_sync_runs_and_releases_the_lock_for_the_next_run(
     assert exc.value.code == 0
     with lock.single_instance() as acquired:
         assert acquired is True
+
+
+# ---------------------------------------------------------------------------
+# Commands that change credentials, tokens, or config wait for a running sync
+# ---------------------------------------------------------------------------
+
+# (extra argv, function the command runs, flag named in the retry hint)
+_CREDENTIAL_COMMANDS = [
+    (["--uninstall"], "eufy_sync.cli.maintenance._uninstall", "--uninstall"),
+    (["--use-file-store"], "eufy_sync.credentials.use_file_store", "--use-file-store"),
+    (["--use-keychain"], "eufy_sync.credentials.use_keychain_store", "--use-keychain"),
+    (["--update"], "eufy_sync.cli.updater._self_update", "--update"),
+    (["--setup-strava"], "eufy_sync.cli.setup._setup_strava", "--setup-strava"),
+    (["--setup-zwift"], "eufy_sync.cli.setup._setup_zwift", "--setup-zwift"),
+    (["--disconnect-zwift"], "eufy_sync.cli.maintenance._disconnect_zwift", "--disconnect-zwift"),
+    (["--select-profile"], "eufy_sync.cli.profiles._select_profile", "--select-profile"),
+    (["--update-password"], "eufy_sync.cli.maintenance._update_password", "--update-password"),
+    (["--reauth"], "eufy_sync.cli.maintenance._reauth", "--reauth"),
+    (["--reauth", "garmin"], "eufy_sync.cli.maintenance._reauth", "--reauth"),
+    # No config: the first-run wizard, which stores passwords and logs in.
+    ([], "eufy_sync.cli.setup._first_run_setup", "eufy-sync"),
+]
+
+
+def _command_argv(tmp_path: Path, extra: list[str]) -> list[str]:
+    # The config path does not exist, so a bare run reaches first-run setup.
+    return ["eufy-sync", "--config", str(tmp_path / "missing.yaml"), *extra]
+
+
+@pytest.mark.parametrize("extra, target, flag", _CREDENTIAL_COMMANDS)
+def test_credential_command_refuses_while_a_sync_holds_the_lock(tmp_path, capsys, extra, target, flag):
+    from eufy_sync.cli.app import main
+
+    with lock.single_instance() as held:
+        assert held is True
+        with patch(target) as command, \
+             patch("sys.argv", _command_argv(tmp_path, extra)), \
+             pytest.raises(SystemExit) as exc:
+            main()
+
+    assert exc.value.code == 1
+    command.assert_not_called()
+    assert f"Retry {flag} when it finishes" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("extra, target, flag", _CREDENTIAL_COMMANDS)
+def test_credential_command_runs_while_holding_the_lock(tmp_path, extra, target, flag):
+    from eufy_sync.cli.app import main
+
+    seen = []
+
+    def check_lock(*args, **kwargs):
+        with lock.single_instance() as other:
+            seen.append(other)
+
+    with patch(target, side_effect=check_lock), \
+         patch("sys.argv", _command_argv(tmp_path, extra)):
+        try:
+            main()
+        except SystemExit:
+            pass  # several of these commands exit on their own
+
+    assert seen == [False]   # a sync starting mid-command would have been kept out
+    with lock.single_instance() as acquired:
+        assert acquired is True   # and the lock is free again afterwards
+
+
+@pytest.mark.parametrize("extra, target, flag", _CREDENTIAL_COMMANDS)
+def test_credential_command_refuses_when_the_lock_file_cannot_open(tmp_path, capsys, extra, target, flag):
+    from eufy_sync.cli.app import main
+
+    with patch("eufy_sync.cli.lock.os.open", side_effect=OSError("read-only")), \
+         patch(target) as command, \
+         patch("sys.argv", _command_argv(tmp_path, extra)), \
+         pytest.raises(SystemExit) as exc:
+        main()
+
+    assert exc.value.code == 1
+    command.assert_not_called()
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+@patch("eufy_sync.platform_support.agent_installed", return_value=False)
+@patch("eufy_sync.cli.maintenance.sys.stdin")
+@patch("builtins.input", return_value="y")
+def test_uninstall_under_the_lock_still_removes_the_whole_data_dir(
+    _input, mock_stdin, _agent, _keyring, tmp_path
+):
+    """--uninstall holds the lock file open while it sweeps the data dir, and
+    Windows cannot delete an open file. The sweep skips it and the command
+    removes it after release, so nothing is left behind."""
+    from eufy_sync.cli.app import main
+
+    mock_stdin.isatty.return_value = True
+    config_path = _write_synced_config(shared.DATA_DIR)
+    with patch("sys.argv", ["eufy-sync", "--uninstall", "--config", str(config_path)]):
+        main()
+
+    assert not config_path.exists()
+    assert not lock.lock_path().exists()
+    assert not shared.DATA_DIR.exists()

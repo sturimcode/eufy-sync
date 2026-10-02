@@ -73,17 +73,91 @@ def test_token_status_valid_with_blob(monkeypatch):
     assert auth.token_status()["state"] == "valid"
 
 
-def test_force_reauth_clears_token_logs_in_and_saves(monkeypatch):
+def test_force_reauth_logs_in_and_saves(monkeypatch):
     auth = _auth()
     calls = []
-    monkeypatch.setattr(auth, "_clear_token", lambda: calls.append("clear"))
     monkeypatch.setattr(auth, "_save_token", lambda g: calls.append("save"))
     fake_garmin = MagicMock()
     with patch("eufy_sync.garmin_auth.Garmin", return_value=fake_garmin):
         result = auth.force_reauth()
     assert result is fake_garmin
     fake_garmin.login.assert_called_once()
-    assert calls == ["clear", "save"]   # cleared before login, saved after
+    assert calls == ["save"]
+
+
+NEW_BLOB = {"di_token": "new", "di_refresh_token": "new-r", "di_client_id": "cid"}
+
+
+def _store_old_token():
+    from eufy_sync.credentials import store_token
+    store_token("garmin", dict(BLOB))
+
+
+def _stored_token():
+    from eufy_sync.credentials import get_token
+    return get_token("garmin")
+
+
+def test_force_reauth_keeps_the_stored_token_when_login_fails(monkeypatch):
+    # A cancelled MFA prompt or a passing Garmin error must not cost the
+    # session that was stored before the attempt.
+    from eufy_sync.garmin_auth import GarminLoginCancelled
+    _store_old_token()
+    auth = _auth()
+    fake = MagicMock()
+    fake.login.side_effect = GarminLoginCancelled("no code")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        with pytest.raises(PermanentSyncError):
+            auth.force_reauth()
+    assert _stored_token() == BLOB
+
+
+def test_force_reauth_replaces_the_stored_token_on_success():
+    _store_old_token()
+    auth = _auth()
+    fake = MagicMock()
+    fake.client.dumps.return_value = json.dumps(NEW_BLOB)
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        auth.force_reauth()
+    assert _stored_token() == NEW_BLOB
+
+
+def test_silent_reauth_keeps_the_stored_token_when_garmin_wants_mfa(monkeypatch):
+    # The headless case from the field: a 403 looked like a dead session, the
+    # relogin hit an MFA demand, and the working token used to be gone.
+    from eufy_sync.garmin_auth import GarminLoginCancelled
+    _store_old_token()
+    _fail_on_browser(monkeypatch)
+    auth = _auth()
+    fake = MagicMock()
+    fake.login.side_effect = GarminLoginCancelled("mfa")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        with pytest.raises(PermanentSyncError):
+            auth.silent_reauth()
+    assert _stored_token() == BLOB
+
+
+def test_silent_reauth_keeps_the_stored_token_on_a_transient_failure(monkeypatch):
+    _store_old_token()
+    _fail_on_browser(monkeypatch)
+    auth = _auth()
+    fake = MagicMock()
+    fake.login.side_effect = ConnectionError("Connection reset by peer")
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        with pytest.raises(ConnectionError):
+            auth.silent_reauth()
+    assert _stored_token() == BLOB
+
+
+def test_silent_reauth_replaces_the_stored_token_on_success(monkeypatch):
+    _store_old_token()
+    _fail_on_browser(monkeypatch)
+    auth = _auth()
+    fake = MagicMock()
+    fake.client.dumps.return_value = json.dumps(NEW_BLOB)
+    with patch("eufy_sync.garmin_auth.Garmin", return_value=fake):
+        assert auth.silent_reauth() is fake
+    assert _stored_token() == NEW_BLOB
 
 
 def test_login_falls_back_to_fresh_when_blob_unusable(monkeypatch):
@@ -315,10 +389,9 @@ def test_headless_mfa_prompt_cancels_without_reading_input(monkeypatch):
         _headless_mfa_prompt()
 
 
-def test_silent_reauth_clears_token_logs_in_and_saves(monkeypatch):
+def test_silent_reauth_logs_in_and_saves(monkeypatch):
     auth = _auth()
     calls = []
-    monkeypatch.setattr(auth, "_clear_token", lambda: calls.append("clear"))
     monkeypatch.setattr(auth, "_save_token", lambda g: calls.append("save"))
     _fail_on_browser(monkeypatch)
     fake = MagicMock()
@@ -326,13 +399,12 @@ def test_silent_reauth_clears_token_logs_in_and_saves(monkeypatch):
         result = auth.silent_reauth()
     assert result is fake
     fake.login.assert_called_once()
-    assert calls == ["clear", "save"]
+    assert calls == ["save"]
 
 
 def test_silent_reauth_mfa_demand_names_reauth(monkeypatch):
     from eufy_sync.garmin_auth import GarminLoginCancelled
     auth = _auth()
-    monkeypatch.setattr(auth, "_clear_token", lambda: None)
     _fail_on_browser(monkeypatch)
     fake = MagicMock()
     fake.login.side_effect = GarminLoginCancelled("mfa")
@@ -345,7 +417,6 @@ def test_silent_reauth_mfa_demand_names_reauth(monkeypatch):
 def test_force_reauth_falls_back_to_browser(monkeypatch):
     from garminconnect import GarminConnectTooManyRequestsError
     auth = _auth()
-    monkeypatch.setattr(auth, "_clear_token", lambda: None)
     monkeypatch.setattr(auth, "_save_token", lambda g: None)
     fake = MagicMock()
     fake.login.side_effect = GarminConnectTooManyRequestsError("429")
