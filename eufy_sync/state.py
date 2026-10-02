@@ -58,10 +58,23 @@ class SyncState:
                 last_failed_at TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 1,
                 gave_up INTEGER NOT NULL DEFAULT 0,
+                last_newer_success_at TEXT,
                 PRIMARY KEY(user_name, target, measurement_id)
             );
         """)
         self._conn.commit()
+        self._migrate_retry_newer_success_column()
+
+    def _migrate_retry_newer_success_column(self) -> None:
+        """Add last_newer_success_at to an upload_retries table created
+        before it existed. NULL (no newer upload seen yet) is the safe value
+        for old rows: it can only delay a give-up, never cause one."""
+        cursor = self._conn.execute("PRAGMA table_info(upload_retries)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if not columns or "last_newer_success_at" in columns:
+            return
+        with self._conn:
+            self._conn.execute("ALTER TABLE upload_retries ADD COLUMN last_newer_success_at TEXT")
 
     def _migrate_if_needed(self) -> None:
         """Migrate v1 schema (garmin-only) to v2 (multi-target), then v2 to v3
@@ -248,7 +261,7 @@ class SyncState:
     def get_upload_retries(self, user_name: str) -> list[dict]:
         cursor = self._conn.execute(
             """SELECT target, measurement_id, measurement_timestamp, weight_kg,
-                      first_failed_at, attempts, gave_up
+                      first_failed_at, attempts, gave_up, last_newer_success_at
                FROM upload_retries WHERE user_name = ?""",
             (user_name,),
         )
@@ -257,9 +270,31 @@ class SyncState:
                 "target": target, "measurement_id": mid, "measurement_timestamp": ts,
                 "weight_kg": kg, "first_failed_at": first_failed_at,
                 "attempts": attempts, "gave_up": bool(gave_up),
+                "last_newer_success_at": last_newer_success_at,
             }
-            for target, mid, ts, kg, first_failed_at, attempts, gave_up in cursor.fetchall()
+            for target, mid, ts, kg, first_failed_at, attempts, gave_up, last_newer_success_at
+            in cursor.fetchall()
         ]
+
+    def note_newer_upload(self, user_name: str, target: str, timestamp: datetime, uploaded_at: str) -> None:
+        """Record that a measurement taken at timestamp reached the target, on
+        every waiting entry for an older measurement. The give-up rule needs
+        this: a target that keeps taking newer weigh-ins is up, so an old
+        entry that still fails is the measurement's problem, not Garmin's.
+        Compared in Python because the stored strings mix UTC offsets."""
+        rows = self._conn.execute(
+            """SELECT measurement_id, measurement_timestamp FROM upload_retries
+               WHERE user_name = ? AND target = ? AND gave_up = 0""",
+            (user_name, target),
+        ).fetchall()
+        older = [mid for mid, ts in rows if datetime.fromisoformat(ts) < timestamp]
+        if older:
+            with self._conn:
+                self._conn.executemany(
+                    """UPDATE upload_retries SET last_newer_success_at = ?
+                       WHERE user_name = ? AND target = ? AND measurement_id = ?""",
+                    [(uploaded_at, user_name, target, mid) for mid in older],
+                )
 
     def get_oldest_waiting_retry_timestamp(self, user_name: str, target: str) -> int | None:
         """Epoch seconds of the oldest measurement still due a retry to the

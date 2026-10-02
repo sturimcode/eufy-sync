@@ -1,6 +1,6 @@
 """Failed uploads: the fetch cursor brings them back, the retry queue counts
-the attempts and gives up on a measurement that would otherwise hold back
-every newer one."""
+the attempts, lets newer ones past a measurement that keeps failing, and
+gives it up only after a month in which newer ones kept landing."""
 from __future__ import annotations
 
 import logging
@@ -17,7 +17,9 @@ from eufy_sync.eufy_client import EufyMeasurement
 from eufy_sync.state import SyncState
 from eufy_sync.sync import (
     MAX_RETRY_ATTEMPTS,
+    RETRY_ABANDON_DAYS,
     RETRY_MAX_AGE_DAYS,
+    RETRY_REACH_BACK_MARGIN_DAYS,
     PermanentSyncError,
     UnsupportedMeasurementError,
     sync_user,
@@ -46,15 +48,20 @@ def _user(garmin: bool = True, strava: bool = False) -> UserConfig:
     )
 
 
-def _run(user, state, history, fail_weights=(), garmin_error=None, strava_error=None, garmin_upload=None, **kwargs):
+def _run(user, state, history, fail_weights=(), garmin_error=None, strava_error=None, garmin_upload=None,
+         fetches=None, **kwargs):
     """One sync run against a fake Eufy that honors the fetch cursor the way
     the real one does (timestamp >= after). Uploads of a weight listed in
     fail_weights raise the given error (a Garmin 503 by default).
-    garmin_upload, when given, replaces the fake Garmin upload outright."""
+    garmin_upload, when given, replaces the fake Garmin upload outright.
+    fetches, when given, collects each fetch's after_timestamp."""
+    def fetch(after_timestamp=None):
+        if fetches is not None:
+            fetches.append(after_timestamp)
+        return [m for m in history if after_timestamp is None or m.timestamp.timestamp() >= after_timestamp]
+
     fake_eufy = MagicMock()
-    fake_eufy.fetch_measurements.side_effect = lambda after_timestamp=None: [
-        m for m in history if after_timestamp is None or m.timestamp.timestamp() >= after_timestamp
-    ]
+    fake_eufy.fetch_measurements.side_effect = fetch
 
     garmin_upload_override = garmin_upload
 
@@ -149,70 +156,118 @@ def _cap(state, measurement, *, attempts=MAX_RETRY_ATTEMPTS, first_failed=NOW):
     state._conn.commit()
 
 
-def test_poison_measurement_is_given_up_once_a_newer_one_uploads(tmp_path: Path, caplog):
-    """(b) The target is healthy and one measurement keeps failing: the first
-    run where it is past its cap, a newer one lands, and its retry after that
-    fails too gives it up."""
+def _backdate(state, measurement, days_ago):
+    """Make an entry look as if it first failed days_ago."""
+    state._conn.execute(
+        "UPDATE upload_retries SET first_failed_at = ? WHERE measurement_id = ?",
+        ((NOW - timedelta(days=days_ago)).isoformat(), measurement.measurement_id),
+    )
+    state._conn.commit()
+
+
+def test_capped_entry_is_tried_each_run_without_blocking_newer_ones(tmp_path: Path):
+    """A measurement past its cap is tried once a run, in order; its failure
+    lets the newer ones through, and it stays queued with its attempts
+    counting. One short of the cap still stops the target, as before."""
     state = SyncState(tmp_path / "s.db")
     user = _user()
     poison, m2, m3 = _m(80.0, 3), _m(81.0, 2), _m(82.0, 1)
     _cap(state, poison, attempts=MAX_RETRY_ATTEMPTS - 1)
 
-    # One short of the cap: it still stops Garmin, as today.
     _, errors, garmin, _ = _run(user, state, [poison, m2, m3], fail_weights={80.0})
-    assert _garmin_weights(garmin) == [80.0] * 3  # in-run retries only
+    assert _garmin_weights(garmin) == [80.0] * 3  # in-run retries, then stop
     assert "503" in errors["garmin"]
-    assert _rows(state)[("garmin", poison.measurement_id)]["gave_up"] is False
 
+    _, errors, garmin, _ = _run(user, state, [poison, m2, m3], fail_weights={80.0})
+    assert errors == {}
+    # One try for the capped one, then the newer ones land.
+    assert _garmin_weights(garmin) == [80.0, 81.0, 82.0]
+    row = _rows(state)[("garmin", poison.measurement_id)]
+    assert row["gave_up"] is False
+    assert row["attempts"] == MAX_RETRY_ATTEMPTS + 1
+    assert row["last_newer_success_at"] is not None
+
+    # The cursor moved past it; the next run still reaches back for it alone.
+    _, errors, garmin, _ = _run(user, state, [poison, m2, m3], fail_weights={80.0})
+    assert errors == {}
+    assert _garmin_weights(garmin) == [80.0]
+    assert _rows(state)[("garmin", poison.measurement_id)]["attempts"] == MAX_RETRY_ATTEMPTS + 2
+    state.close()
+
+
+def test_poison_entry_with_a_healthy_target_is_given_up_after_thirty_days(tmp_path: Path, caplog):
+    state = SyncState(tmp_path / "s.db")
+    user = _user()
+    poison, m2, m3 = _m(80.0, RETRY_ABANDON_DAYS + 1), _m(81.0, 2), _m(82.0, 1)
+    _cap(state, poison, attempts=1, first_failed=NOW - timedelta(days=RETRY_ABANDON_DAYS + 1))
+
+    # Old enough, but no newer weigh-in has landed since it first failed.
     with caplog.at_level(logging.WARNING, logger="eufy_sync"):
         _, errors, garmin, _ = _run(user, state, [poison, m2, m3], fail_weights={80.0})
-
     assert errors == {}
-    # Tried in order, moved past, tried again once 81.0 proved Garmin up.
-    assert _garmin_weights(garmin) == [80.0] * 3 + [81.0] + [80.0] * 3 + [82.0]
+    assert _garmin_weights(garmin) == [80.0, 81.0, 82.0]
+    assert "Giving up" not in caplog.text
+    assert _rows(state)[("garmin", poison.measurement_id)]["gave_up"] is False
+
+    # Now both hold: given up before it is sent again.
+    with caplog.at_level(logging.WARNING, logger="eufy_sync"):
+        _, errors, garmin, _ = _run(user, state, [poison, m2, m3], fail_weights={80.0})
+    assert errors == {}
+    assert _garmin_weights(garmin) == []
     assert "Giving up on the Garmin upload of 80.00 kg" in caplog.text
     assert _rows(state)[("garmin", poison.measurement_id)]["gave_up"] is True
     assert state.waiting_upload_retries("default") == {}
 
-    # Given up for good: a later run that reaches back to it skips it.
-    _, _, garmin, _ = _run(user, state, [poison, m2, m3], backfill_days=7)
+    # Given up for good: a backfill that reaches it skips it.
+    _, _, garmin, _ = _run(user, state, [poison, m2, m3], backfill_days=40)
     assert _garmin_weights(garmin) == []
     state.close()
 
 
-def test_poison_measurement_past_the_age_cap_is_given_up_the_same_way(tmp_path: Path, caplog):
-    """The age cap counts from the first failure: two weeks of failing."""
+def test_intermittent_failures_on_a_capped_entry_do_not_give_it_up_before_thirty_days(tmp_path: Path, caplog):
+    """Newer weigh-ins keep landing while a capped one hits 5xx after 5xx:
+    under 30 days that is not enough to give it up, and when Garmin finally
+    takes it, it is delivered."""
     state = SyncState(tmp_path / "s.db")
     user = _user()
-    old, new = _m(80.0, RETRY_MAX_AGE_DAYS + 1), _m(81.0, 1)
-    _cap(state, old, attempts=1, first_failed=NOW - timedelta(days=RETRY_MAX_AGE_DAYS + 1))
+    head = _m(80.0, 21)
+    _cap(state, head, first_failed=NOW - timedelta(days=RETRY_ABANDON_DAYS - 1))
+    newer = [_m(81.0, 3), _m(82.0, 2), _m(83.0, 1)]
 
     with caplog.at_level(logging.WARNING, logger="eufy_sync"):
-        _, errors, garmin, _ = _run(user, state, [old, new], fail_weights={80.0}, backfill_days=30)
+        for d in range(1, 4):
+            _, errors, garmin, _ = _run(user, state, [head] + newer[:d], fail_weights={80.0})
+            assert errors == {}
+            assert _garmin_weights(garmin)[0] == 80.0
+    assert "Giving up" not in caplog.text
+    row = _rows(state)[("garmin", head.measurement_id)]
+    assert row["gave_up"] is False and row["last_newer_success_at"] is not None
 
+    _, errors, garmin, _ = _run(user, state, [head] + newer)
     assert errors == {}
-    assert _garmin_weights(garmin) == [80.0] * 3 + [81.0] + [80.0] * 3
-    assert "Giving up on the Garmin upload of 80.00 kg" in caplog.text
-    assert _rows(state)[("garmin", old.measurement_id)]["gave_up"] is True
+    assert _garmin_weights(garmin) == [80.0]
+    assert state.is_synced("default", head.measurement_id, "garmin")
+    assert _rows(state) == {}
     state.close()
 
 
 def test_capped_entry_stays_pending_when_newer_ones_fail_too(tmp_path: Path):
-    """(c) The newer measurements fail as well, so the target is down: the
+    """The newer measurements fail as well, so the target is down: the
     capped entry keeps counting attempts and nothing is given up."""
     state = SyncState(tmp_path / "s.db")
     user = _user()
     head, m2, m3 = _m(80.0, RETRY_MAX_AGE_DAYS + 1), _m(81.0, 2), _m(82.0, 1)
-    _cap(state, head)
+    _cap(state, head, first_failed=NOW - timedelta(days=RETRY_ABANDON_DAYS + 5))
 
     _, errors, garmin, _ = _run(user, state, [head, m2, m3], fail_weights={80.0, 81.0, 82.0}, backfill_days=30)
 
     assert "503" in errors["garmin"]
     # It moved past the capped head, then stopped at the next failure.
-    assert _garmin_weights(garmin) == [80.0] * 3 + [81.0] * 3
+    assert _garmin_weights(garmin) == [80.0] + [81.0] * 3
     rows = _rows(state)
     assert rows[("garmin", head.measurement_id)]["gave_up"] is False
     assert rows[("garmin", head.measurement_id)]["attempts"] == MAX_RETRY_ATTEMPTS + 1
+    assert rows[("garmin", head.measurement_id)]["last_newer_success_at"] is None
     assert rows[("garmin", m2.measurement_id)]["attempts"] == 1
     assert ("garmin", m3.measurement_id) not in rows
     state.close()
@@ -229,70 +284,6 @@ def test_capped_entry_that_is_the_newest_stays_pending_and_reports(tmp_path: Pat
 
     assert "503" in errors["garmin"]
     assert _rows(state)[("garmin", only.measurement_id)]["gave_up"] is False
-    state.close()
-
-
-def test_capped_failure_is_retried_and_uploaded_when_garmin_recovers_mid_run(tmp_path: Path, caplog):
-    """A capped measurement fails while Garmin is still down; Garmin comes
-    back before the newer one is sent. The newer one landing earns the
-    capped one another try, which now succeeds: nothing is given up."""
-    state = SyncState(tmp_path / "s.db")
-    user = _user()
-    head, newer = _m(80.0, 3), _m(81.0, 1)
-    _cap(state, head)
-    calls = []
-
-    def recovering(body_comp):
-        calls.append(round(body_comp.weight, 2))
-        if len(calls) <= 3:
-            raise RuntimeError("Garmin returned 503")
-        return {"ok": True}
-
-    with caplog.at_level(logging.WARNING, logger="eufy_sync"):
-        counts, errors, garmin, _ = _run(user, state, [head, newer], garmin_upload=recovering, backfill_days=7)
-
-    assert errors == {}
-    assert counts["garmin"] == 2
-    assert calls == [80.0] * 3 + [81.0, 80.0]
-    assert state.is_synced("default", head.measurement_id, "garmin")
-    assert _rows(state) == {}
-    assert "Giving up" not in caplog.text
-    state.close()
-
-
-def test_capped_retry_after_a_newer_upload_that_hits_a_rate_limit_keeps_the_entry(tmp_path: Path):
-    """A permanent failure on the extra try says nothing about the
-    measurement: Garmin stops for the run, the entry stays queued, and the
-    next run reaches back past the advanced cursor to deliver it."""
-    from garminconnect import GarminConnectTooManyRequestsError
-
-    state = SyncState(tmp_path / "s.db")
-    user = _user()
-    state.record_sync("default", "before", (NOW - timedelta(days=4)).isoformat(), 79.0, NOW.isoformat())
-    head, newer, newest = _m(80.0, 3), _m(81.0, 2), _m(82.0, 1)
-    _cap(state, head)
-    calls = []
-
-    def limited(body_comp):
-        calls.append(round(body_comp.weight, 2))
-        if len(calls) <= 3:
-            raise RuntimeError("Garmin returned 503")
-        if len(calls) == 5:
-            raise GarminConnectTooManyRequestsError("Garmin upload rate limited")
-        return {"ok": True}
-
-    counts, errors, _, _ = _run(user, state, [head, newer, newest], garmin_upload=limited)
-
-    assert "rate limited" in errors["garmin"]
-    assert calls == [80.0] * 3 + [81.0, 80.0]
-    assert counts["garmin"] == 1
-    row = _rows(state)[("garmin", head.measurement_id)]
-    assert row["gave_up"] is False
-    # The cursor moved to 81.0, yet the queued 80.0 is fetched and sent.
-    counts, errors, garmin, _ = _run(user, state, [head, newer, newest])
-    assert errors == {}
-    assert _garmin_weights(garmin) == [80.0, 82.0]
-    assert _rows(state) == {}
     state.close()
 
 
@@ -334,30 +325,63 @@ def test_backfilled_old_measurement_is_not_capped_on_its_first_failures(tmp_path
     state.close()
 
 
-def test_three_week_outage_then_recovery_delivers_everything_in_order(tmp_path: Path):
-    """(a) Garmin is down for three weeks while a weigh-in arrives every day.
-    Every entry passes both caps, but no newer upload ever lands during the
-    outage, so nothing is given up and recovery delivers it all in order."""
+def test_forty_day_outage_then_recovery_delivers_everything_and_gives_up_nothing(tmp_path: Path):
+    """Garmin is down for 40 days while a weigh-in arrives every day. Every
+    old entry passes both caps and the abandon age, but nothing newer ever
+    lands during the outage, so nothing is given up and recovery delivers it
+    all in order."""
     state = SyncState(tmp_path / "s.db")
     user = _user()
-    before = _m(79.0, 22)
+    before = _m(79.0, 41)
     state.record_sync("default", before.measurement_id, before.timestamp.isoformat(), 79.0, NOW.isoformat())
-    days = [_m(round(80.0 + d / 10, 2), 21 - d) for d in range(21)]
+    days = [_m(round(80.0 + d / 10, 2), 40 - d) for d in range(40)]
     weights = [m.weight_kg for m in days]
 
-    for d in range(1, 22):
+    for d in range(1, 41):
         _, errors, _, _ = _run(user, state, days[:d], fail_weights=set(weights))
         assert "503" in errors["garmin"]
-    state._conn.execute("UPDATE upload_retries SET attempts = ?", (MAX_RETRY_ATTEMPTS,))
-    state._conn.commit()
-    _run(user, state, days, fail_weights=set(weights))
-    assert not any(r["gave_up"] for r in _rows(state).values())
+        # Each entry first failed on the day it was taken, so the old ones
+        # pass the caps and later runs move past them.
+        for m in days[:d]:
+            _backdate(state, m, (NOW - m.timestamp).days)
+    _, errors, _, _ = _run(user, state, days, fail_weights=set(weights))
+    assert "503" in errors["garmin"]
+    rows = _rows(state).values()
+    assert sum(1 for r in rows if r["first_failed_at"] < (NOW - timedelta(days=RETRY_ABANDON_DAYS)).isoformat()) >= 9
+    assert not any(r["gave_up"] for r in rows)
+    assert all(r["last_newer_success_at"] is None for r in rows)
 
     _, errors, garmin, _ = _run(user, state, days)
 
     assert errors == {}
     assert _garmin_weights(garmin) == weights
     assert _rows(state) == {}
+    state.close()
+
+
+def test_reach_back_for_a_waiting_entry_is_bounded(tmp_path: Path, caplog):
+    """A queued failure inside the window pulls the fetch back to it; one
+    older than the abandon window plus the margin, whose target never took
+    anything newer, cannot be given up, stays queued, and does not drag the
+    fetch further back."""
+    state = SyncState(tmp_path / "s.db")
+    user = _user()
+    recent = _m(80.0, 20)
+    _cap(state, recent, attempts=1)
+    fetches: list[int] = []
+
+    _run(user, state, [], fetches=fetches)
+    assert fetches[-1] == int(recent.timestamp.timestamp())
+
+    ancient = _m(79.0, 90)
+    _cap(state, ancient, attempts=MAX_RETRY_ATTEMPTS, first_failed=NOW - timedelta(days=90))
+    with caplog.at_level(logging.INFO, logger="eufy_sync"):
+        _run(user, state, [], fetches=fetches)
+
+    floor = NOW.timestamp() - (RETRY_ABANDON_DAYS + RETRY_REACH_BACK_MARGIN_DAYS) * 86400
+    assert abs(fetches[-1] - floor) < 120
+    assert caplog.text.count("still waiting") == 1
+    assert _rows(state)[("garmin", ancient.measurement_id)]["gave_up"] is False
     state.close()
 
 
@@ -446,9 +470,9 @@ def test_dry_run_predicts_without_touching_the_queue(tmp_path: Path, capsys):
     garmin.upload_body_composition.assert_not_called()
     assert _rows(state) == before
     out = capsys.readouterr().out
-    # The capped one would be tried and given up only if a newer one lands;
-    # the given-up one would not be sent at all.
-    assert "Would retry garmin: 80.0 kg" in out and "given up if it fails again" in out
+    # The capped one would be tried without holding back newer ones; the
+    # given-up one would not be sent at all.
+    assert "Would retry garmin: 80.0 kg" in out and "newer ones still upload" in out
     assert "81.0 kg" not in out
     state.close()
 
@@ -497,6 +521,42 @@ def test_existing_database_gains_the_retry_table(tmp_path: Path):
     # Reopening is a no-op for the schema and keeps the queued entry.
     state = SyncState(db_path)
     assert state.waiting_upload_retries("default") == {"garmin": 1}
+    state.close()
+
+
+def test_retry_table_without_the_newer_success_column_gains_it(tmp_path: Path):
+    """An upload_retries table from an earlier 1.15 build lacks
+    last_newer_success_at. Opening the database adds it as NULL, which can
+    only delay a give-up, and keeps the queued rows."""
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE upload_retries (
+            user_name TEXT NOT NULL,
+            target TEXT NOT NULL,
+            measurement_id TEXT NOT NULL,
+            measurement_timestamp TEXT NOT NULL,
+            weight_kg REAL,
+            first_failed_at TEXT NOT NULL,
+            last_failed_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 1,
+            gave_up INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(user_name, target, measurement_id)
+        );
+    """)
+    conn.execute(
+        "INSERT INTO upload_retries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("default", "garmin", "m1", "2026-08-01T08:00:00+00:00", 80.0,
+         "2026-08-01T09:00:00+00:00", "2026-08-01T09:00:00+00:00", 90, 0),
+    )
+    conn.commit()
+    conn.close()
+
+    state = SyncState(db_path)
+    [row] = state.get_upload_retries("default")
+    assert row["attempts"] == 90 and row["last_newer_success_at"] is None
+    state.note_newer_upload("default", "garmin", NOW, NOW.isoformat())
+    assert state.get_upload_retries("default")[0]["last_newer_success_at"] == NOW.isoformat()
     state.close()
 
 
