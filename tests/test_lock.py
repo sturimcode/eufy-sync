@@ -110,8 +110,10 @@ def test_sync_skips_and_exits_zero_when_a_run_is_in_progress(
     out = capsys.readouterr().out
     assert "another eufy-sync run is in progress" in out.lower()
     mock_notify.assert_not_called()
-    # The skip happens before any other sync-path work.
+    # The skip happens before any other sync-path work, including the
+    # password migration, which writes the credential vault.
     mock_updates.assert_not_called()
+    _migrate.assert_not_called()
 
 
 @patch("eufy_sync.cli.status._print_summary")
@@ -138,6 +140,87 @@ def test_sync_runs_and_releases_the_lock_for_the_next_run(
     assert exc.value.code == 0
     with lock.single_instance() as acquired:
         assert acquired is True
+
+
+class _DictKeyring:
+    def __init__(self):
+        self.data = {}
+        self.writes = []
+
+    def get_password(self, service, account):
+        return self.data.get((service, account))
+
+    def set_password(self, service, account, password):
+        self.writes.append(account)
+        self.data[(service, account)] = password
+
+    def delete_password(self, service, account):
+        self.writes.append(account)
+        self.data.pop((service, account), None)
+
+
+@pytest.mark.parametrize("flag", [["--status"], ["--history"]])
+def test_status_and_history_read_credentials_without_writing_the_vault(flag, tmp_path, monkeypatch):
+    """--status and --history run without the sync lock, so they must not
+    write the vault: a sync may be saving it at that moment. Plaintext YAML
+    passwords stay in the YAML and legacy per-password keychain items are
+    read where they are, both left for the next locked run to migrate."""
+    from eufy_sync import credentials
+    from eufy_sync.cli.app import main
+
+    store = _DictKeyring()
+    monkeypatch.setattr("keyring.get_password", store.get_password)
+    monkeypatch.setattr("keyring.set_password", store.set_password)
+    monkeypatch.setattr("keyring.delete_password", store.delete_password)
+    monkeypatch.setattr(credentials, "_keyring_available", lambda: True)
+    monkeypatch.setattr(credentials, "CRED_FILE", tmp_path / "credentials.json")
+    store.data[(credentials.SERVICE_NAME, "default:garmin")] = "legacy-pw"
+
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {
+        "users": [{
+            "name": "default",
+            "eufy": {"email": "e@example.com", "password": "yaml-pw"},
+            "garmin": {"email": "g@example.com"},
+        }],
+    })
+    before = config_path.read_text()
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(tmp_path / "state.db"), *flag]
+
+    with patch("sys.argv", argv), patch("eufy_sync.cli.setup._show_upgrade_notice"):
+        main()
+
+    assert store.writes == []
+    assert store.data[(credentials.SERVICE_NAME, "default:garmin")] == "legacy-pw"
+    assert config_path.read_text() == before
+
+
+@patch("eufy_sync.cli.status._print_summary")
+@patch("eufy_sync.platform_support.notify")
+@patch("eufy_sync.cli.updater._check_for_updates")
+@patch("eufy_sync.cli.setup._show_upgrade_notice")
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+def test_sync_runs_the_password_migration_while_holding_the_lock(
+    _keyring, _notice, _updates, _notify, _summary, tmp_path
+):
+    """The migration writes the vault, so it runs inside the sync lock."""
+    from eufy_sync.cli.app import main
+
+    config_path = _write_synced_config(tmp_path)
+    argv = ["eufy-sync", "--config", str(config_path), "--db", str(tmp_path / "state.db"), "--headless"]
+    held = {}
+
+    def migrate(path):
+        with lock.single_instance() as other:
+            held["by_us"] = other is False
+
+    with patch("eufy_sync.cli.setup._migrate_config_passwords", side_effect=migrate), \
+         patch("eufy_sync.sync.sync_user", return_value=({"garmin": 1}, {})), \
+         patch("sys.argv", argv), \
+         pytest.raises(SystemExit):
+        main()
+
+    assert held == {"by_us": True}
 
 
 # ---------------------------------------------------------------------------

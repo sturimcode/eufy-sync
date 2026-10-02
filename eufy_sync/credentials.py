@@ -445,9 +445,12 @@ def _save_vault(vault: dict) -> None:
 # --- Public API: passwords ---------------------------------------------------
 
 
-def get_password(account: str) -> str | None:
+def get_password(account: str, migrate: bool = True) -> str | None:
     """Return a stored password, migrating it from the legacy keychain item
-    (one account per password) into the vault on first access."""
+    (one account per password) into the vault on first access.
+
+    migrate=False still returns a legacy item but leaves it where it is, so a
+    caller that does not hold the sync lock never writes the vault."""
     vault = _load_vault()
     if account in vault["passwords"]:
         return vault["passwords"][account]
@@ -459,6 +462,8 @@ def get_password(account: str) -> str | None:
         except Exception:
             legacy = None
         if legacy is not None:
+            if not migrate:
+                return legacy
             vault["passwords"][account] = legacy
             _save_vault(vault)
             try:

@@ -72,12 +72,17 @@ def _walk_and_interpolate(obj: dict | list | str) -> dict | list | str:
     return obj
 
 
-def _get_password(user_name: str, service: str, email: str, yaml_password: str | None) -> str:
-    """Resolve password: credential store first, then YAML fallback."""
+def _get_password(
+    user_name: str, service: str, email: str, yaml_password: str | None, migrate: bool = True
+) -> str:
+    """Resolve password: credential store first, then YAML fallback.
+
+    migrate=False reads a legacy keychain item without moving it into the
+    vault, for callers that run without the sync lock."""
     from eufy_sync.credentials import get_password
 
     key = f"{user_name}:{service}"
-    stored = get_password(key)
+    stored = get_password(key, migrate=migrate)
     if stored:
         return stored
 
@@ -90,7 +95,7 @@ def _get_password(user_name: str, service: str, email: str, yaml_password: str |
     )
 
 
-def _get_strava_secret(user_name: str, yaml_secret: str | None) -> str:
+def _get_strava_secret(user_name: str, yaml_secret: str | None, migrate: bool = True) -> str:
     """Resolve the Strava API client secret: credential store first, then the
     YAML fallback for configs not yet migrated.
 
@@ -100,7 +105,7 @@ def _get_strava_secret(user_name: str, yaml_secret: str | None) -> str:
     """
     from eufy_sync.credentials import get_password
 
-    stored = get_password(f"{user_name}:strava")
+    stored = get_password(f"{user_name}:strava", migrate=migrate)
     if stored:
         return stored
 
@@ -113,7 +118,12 @@ def _get_strava_secret(user_name: str, yaml_secret: str | None) -> str:
     )
 
 
-def load_config(path: Path) -> AppConfig:
+def load_config(path: Path, migrate: bool = True) -> AppConfig:
+    """Parse the config and resolve its secrets.
+
+    The default migrates legacy keychain items into the vault, which writes
+    the vault, so it belongs inside the sync lock. Unlocked read-only
+    commands (--status, --history) pass migrate=False."""
     with open(path) as f:
         raw = yaml.safe_load(f)
 
@@ -143,21 +153,21 @@ def load_config(path: Path) -> AppConfig:
         if "garmin" in u:
             garmin = GarminConfig(
                 email=u["garmin"]["email"],
-                password=_get_password(name, "garmin", u["garmin"]["email"], u["garmin"].get("password")),
+                password=_get_password(name, "garmin", u["garmin"]["email"], u["garmin"].get("password"), migrate),
             )
 
         strava = None
         if "strava" in u:
             strava = StravaConfig(
                 client_id=str(u["strava"]["client_id"]),
-                client_secret=_get_strava_secret(name, u["strava"].get("client_secret")),
+                client_secret=_get_strava_secret(name, u["strava"].get("client_secret"), migrate),
             )
 
         zwift = None
         if "zwift" in u:
             zwift = ZwiftConfig(
                 email=u["zwift"]["email"],
-                password=_get_password(name, "zwift", u["zwift"]["email"], u["zwift"].get("password")),
+                password=_get_password(name, "zwift", u["zwift"]["email"], u["zwift"].get("password"), migrate),
             )
 
         if not garmin and not strava and not zwift:
@@ -170,7 +180,7 @@ def load_config(path: Path) -> AppConfig:
             name=name,
             eufy=EufyConfig(
                 email=u["eufy"]["email"],
-                password=_get_password(name, "eufy", u["eufy"]["email"], u["eufy"].get("password")),
+                password=_get_password(name, "eufy", u["eufy"]["email"], u["eufy"].get("password"), migrate),
                 customer_id=str(u["eufy"]["customer_id"]) if u["eufy"].get("customer_id") is not None else None,
             ),
             garmin=garmin,
