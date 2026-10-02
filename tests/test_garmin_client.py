@@ -921,38 +921,94 @@ def test_upload_409_is_not_confirmed_by_an_untimed_entry(entry):
 
 
 @pytest.mark.parametrize("status", [500, 502, 503])
-def test_upload_409_stays_retryable_when_the_confirming_lookup_fails(status):
-    from garminconnect import GarminConnectConnectionError
+def test_upload_409_lookup_that_keeps_failing_waits_for_the_next_run(status):
+    """Only the lookup is repeated, a bounded number of times, and the error
+    that escapes is one sync's _retry does not retry in-run."""
+    from eufy_sync.sync import RetryNextRunError, _is_permanent
 
-    from eufy_sync.sync import _is_permanent
-
-    garmin, adapter = _real_garmin([CONFLICT_409, (status, {"Content-Type": "application/json"}, b"{}")])
+    failing = (status, {"Content-Type": "application/json"}, b"{}")
+    garmin, adapter = _real_garmin([CONFLICT_409] + [failing] * garmin_client._CONFIRM_LOOKUP_ATTEMPTS)
     client = _client_on(garmin)
     cffi = _FakeCffi([])
     with patch.object(garmin_client, "_new_impersonating_session", cffi.session), \
-            patch.object(client._auth, "silent_reauth") as reauth:
-        with pytest.raises(GarminConnectConnectionError) as exc:
+            patch.object(client._auth, "silent_reauth") as reauth, \
+            patch.object(garmin_client.time, "sleep") as sleep:
+        with pytest.raises(RetryNextRunError) as exc:
             client.upload_body_composition(BC)
     assert not _is_permanent(exc.value)
     reauth.assert_not_called()
-    # One POST, one GET; nothing replayed through curl_cffi.
-    assert [r.method for r in adapter.sent] == ["POST", "GET"]
+    # One POST, then only the GET is repeated; nothing replayed through curl_cffi.
+    assert [r.method for r in adapter.sent] == ["POST"] + ["GET"] * garmin_client._CONFIRM_LOOKUP_ATTEMPTS
     assert cffi.calls == []
+    assert sleep.call_count == garmin_client._CONFIRM_LOOKUP_ATTEMPTS - 1
 
 
-def test_upload_409_lookup_network_failure_stays_retryable():
+def test_upload_409_lookup_that_recovers_confirms_without_resending_the_upload():
+    held = {"samplePk": 1, "weight": 86200.0, "timestampGMT": _millis(BC_INSTANT)}
+    failing = (503, {"Content-Type": "application/json"}, b"{}")
+    garmin, adapter = _real_garmin([CONFLICT_409, failing, _ok({"dateWeightList": [held]})])
+    client = _client_on(garmin)
+    with patch.object(garmin_client.time, "sleep"):
+        assert client.upload_body_composition(BC) == {"status": "duplicate"}
+    assert [r.method for r in adapter.sent] == ["POST", "GET", "GET"]
+
+
+def test_upload_409_lookup_network_failure_waits_for_the_next_run():
     from garminconnect import GarminConnectConnectionError
 
-    from eufy_sync.sync import _is_permanent
+    from eufy_sync.sync import RetryNextRunError, _is_permanent
 
     fake = MagicMock()
     fake.add_body_composition.side_effect = GarminConnectConnectionError("API Error 409 - Duplicate")
     fake.get_daily_weigh_ins.side_effect = GarminConnectConnectionError("Connection error: timed out")
     client = _client_with_fake_garmin(fake)
-    with pytest.raises(GarminConnectConnectionError, match="timed out") as exc:
-        client.upload_body_composition(BC)
+    with patch.object(garmin_client.time, "sleep"):
+        with pytest.raises(RetryNextRunError, match="timed out") as exc:
+            client.upload_body_composition(BC)
     assert not _is_permanent(exc.value)
     fake.add_body_composition.assert_called_once()
+    assert fake.get_daily_weigh_ins.call_count == garmin_client._CONFIRM_LOOKUP_ATTEMPTS
+
+
+def test_unconfirmed_409_posts_once_per_sync_run_and_queues_the_measurement(tmp_path):
+    """Through sync_user: a lookup that keeps failing produces exactly one
+    POST in the run, and the measurement waits in the retry queue."""
+    from garminconnect import GarminConnectConnectionError
+
+    from eufy_sync.config import EufyConfig, GarminConfig, UserConfig
+    from eufy_sync.eufy_client import EufyMeasurement
+    from eufy_sync.state import SyncState
+    from eufy_sync.sync import sync_user
+
+    taken = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=2)
+    m = EufyMeasurement(
+        measurement_id="m1", customer_id="cust", device_id="dev", timestamp=taken, weight_kg=86.2,
+    )
+    fake = MagicMock()
+    fake.add_body_composition.side_effect = GarminConnectConnectionError("API Error 409 - Duplicate")
+    fake.get_daily_weigh_ins.side_effect = GarminConnectConnectionError("Connection error: timed out")
+    fake.get_body_composition.return_value = {"dateWeightList": []}
+    client = _client_with_fake_garmin(fake)
+    client.authenticate = MagicMock()
+    eufy = MagicMock()
+    eufy.fetch_measurements.return_value = [m]
+    user = UserConfig(
+        name="default",
+        eufy=EufyConfig(email="e@example.com", password="pw"),
+        garmin=GarminConfig(email="g@example.com", password="pw"),
+    )
+    state = SyncState(tmp_path / "s.db")
+
+    with patch("eufy_sync.sync.EufyClient", return_value=eufy), \
+            patch("eufy_sync.garmin_client.GarminClient", return_value=client), \
+            patch("eufy_sync.sync.time.sleep"), \
+            patch.object(garmin_client.time, "sleep"):
+        counts, errors = sync_user(user, state, headless=True)
+
+    fake.add_body_composition.assert_called_once()
+    assert counts["garmin"] == 0 and "409" in errors["garmin"]
+    assert state.waiting_upload_retries("default") == {"garmin": 1}
+    state.close()
 
 
 def test_upload_409_lookup_rate_limit_ends_garmin_for_the_run():

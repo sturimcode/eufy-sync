@@ -296,6 +296,26 @@ def test_capped_retry_after_a_newer_upload_that_hits_a_rate_limit_keeps_the_entr
     state.close()
 
 
+def test_unconfirmed_409_is_not_reposted_in_the_same_run(tmp_path: Path):
+    """RetryNextRunError skips _retry's in-run retries: one POST, then the
+    measurement waits in the queue, and Garmin stops for the run as for any
+    uncapped failure."""
+    from eufy_sync.sync import RetryNextRunError
+
+    state = SyncState(tmp_path / "s.db")
+    user = _user()
+    m1, m2 = _m(80.0, 2), _m(81.0, 1)
+
+    _, errors, garmin, _ = _run(
+        user, state, [m1, m2], fail_weights={80.0},
+        garmin_error=RetryNextRunError("409 lookup kept failing"),
+    )
+    assert _garmin_weights(garmin) == [80.0]
+    assert "409" in errors["garmin"]
+    assert _rows(state)[("garmin", m1.measurement_id)]["attempts"] == 1
+    state.close()
+
+
 def test_backfilled_old_measurement_is_not_capped_on_its_first_failures(tmp_path: Path):
     """A weigh-in from a month ago reached by --backfill gets the full two
     weeks from its first failure, not from when it was taken."""

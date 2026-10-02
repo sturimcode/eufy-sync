@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import datetime, timezone
 
 from garminconnect import (
@@ -33,6 +34,10 @@ logger = logging.getLogger(__name__)
 # far short of a separate weigh-in.
 _WEIGHT_TOLERANCE_KG = 0.1
 _TIMESTAMP_TOLERANCE_SECONDS = 120
+# The lookup that confirms a 409 is retried on its own, a few times with a
+# short pause, rather than by sync's _retry, which would resend the upload.
+_CONFIRM_LOOKUP_ATTEMPTS = 3
+_CONFIRM_LOOKUP_BACKOFF_SECONDS = 2
 
 
 def _entry_instants(entry: dict) -> list[datetime]:
@@ -575,12 +580,13 @@ class GarminClient:
 
         The lookup gets the same recovery as any other read (fingerprint
         fallback, the sticky curl_cffi path, the run's one relogin), and
-        only it is repeated, never the upload. When the lookup itself fails,
-        the answer is unknown, so the measurement is left to be tried again:
-        a 5xx or network failure goes to _retry and the retry queue, and a
-        429 ends Garmin for this run like an upload 429 does. Only a lookup
-        that answers and lacks the weigh-in is PermanentSyncError."""
-        from eufy_sync.sync import PermanentSyncError
+        only it is repeated, never the upload. A 5xx or network failure is
+        retried here a few times with a short pause; if the answer is still
+        unknown, RetryNextRunError sends the measurement to the retry queue
+        without sync's _retry posting it again this run. A 429 ends Garmin
+        for this run like an upload 429 does. Only a lookup that answers and
+        lacks the weigh-in is PermanentSyncError."""
+        from eufy_sync.sync import PermanentSyncError, RetryNextRunError
 
         uploaded_at = datetime.fromisoformat(body_comp.timestamp)
         if uploaded_at.tzinfo is None:
@@ -595,27 +601,37 @@ class GarminClient:
             ]  # Garmin stores grams
             return bool(_timed_entries_at(near, uploaded_at))
 
-        try:
-            found = self._call_with_reauth(lookup)
-        except GarminConnectTooManyRequestsError:
-            raise
-        except (GarminConnectAuthenticationError, GarminConnectConnectionError) as e:
-            if e is self._reauth_error:
+        for attempt in range(_CONFIRM_LOOKUP_ATTEMPTS):
+            try:
+                found = self._call_with_reauth(lookup)
+                break
+            except GarminConnectTooManyRequestsError:
                 raise
-            status = _status_code(e)
-            logger.warning(
-                "Garmin answered the upload with 409 Conflict, and the lookup to confirm it "
-                "already holds the weigh-in failed: %s", e,
-            )
-            if status == 429:
-                raise GarminConnectTooManyRequestsError(
-                    f"Garmin rate limited the lookup confirming a 409 upload: {e}"
-                ) from e
-            if isinstance(e, GarminConnectAuthenticationError) or status in (401, 403):
-                # Refused after the fallback and the relogin, like an upload
-                # would be: the same advice applies.
-                self._classify_upload_failure(e)
-            raise
+            except (GarminConnectAuthenticationError, GarminConnectConnectionError, OSError) as e:
+                if e is self._reauth_error:
+                    raise
+                status = _status_code(e)
+                if status == 429:
+                    raise GarminConnectTooManyRequestsError(
+                        f"Garmin rate limited the lookup confirming a 409 upload: {e}"
+                    ) from e
+                if isinstance(e, GarminConnectAuthenticationError) or status in (401, 403):
+                    # Refused after the fallback and the relogin, like an upload
+                    # would be: the same advice applies.
+                    self._classify_upload_failure(e)
+                    raise
+                if attempt == _CONFIRM_LOOKUP_ATTEMPTS - 1:
+                    logger.warning(
+                        "Garmin answered the upload with 409 Conflict, and the lookup to confirm it "
+                        "already holds the weigh-in failed %d times: %s", _CONFIRM_LOOKUP_ATTEMPTS, e,
+                    )
+                    raise RetryNextRunError(
+                        f"Garmin answered the upload with 409 Conflict, but the lookup to confirm "
+                        f"it holds the weigh-in kept failing ({e}); trying again next run"
+                    ) from e
+                delay = _CONFIRM_LOOKUP_BACKOFF_SECONDS * (2 ** attempt)
+                logger.info("Lookup confirming a 409 upload failed (%s); retrying in %ds", e, delay)
+                time.sleep(delay)
         if not found:
             raise PermanentSyncError(
                 f"Garmin answered the body comp upload with 409 Conflict ({conflict}), but has no "

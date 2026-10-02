@@ -46,6 +46,14 @@ class PermanentSyncError(RuntimeError):
     """Raised for failures that retries can't fix (bad password, revoked token)."""
 
 
+class RetryNextRunError(RuntimeError):
+    """Retryable, but not within this run: _retry raises it straight through
+    and the measurement goes to the retry queue. Used when Garmin answered an
+    upload with 409 and the lookup confirming it kept failing. Replaying the
+    POST now would cost another upload for the same unanswered question; the
+    next run's POST 409s again and repeats the lookup."""
+
+
 class UnsupportedMeasurementError(PermanentSyncError):
     """A target cannot accept this one measurement (e.g. outside its weight
     range). The measurement is skipped; the target itself stays healthy."""
@@ -71,7 +79,7 @@ def _retry(fn, description: str):
         try:
             return fn()
         except Exception as e:
-            if _is_permanent(e):
+            if _is_permanent(e) or isinstance(e, RetryNextRunError):
                 raise
             if attempt == MAX_RETRIES - 1:
                 raise
