@@ -22,15 +22,13 @@ def _config(path):
     }))
 
 
-def test_setup_zwift_reuses_probe_credentials_and_writes_no_secret(tmp_path, capsys):
+def test_setup_zwift_reuses_configured_credentials_and_writes_no_secret(tmp_path, capsys):
     path = tmp_path / "config.yaml"
     _config(path)
+    config = yaml.safe_load(path.read_text())
+    config["users"][0]["zwift"] = {"email": "z@example.com"}
+    path.write_text(yaml.safe_dump(config))
     credentials.store_password("default:zwift", "private-value")
-    credentials.store_token("zwift_probe", {
-        "email": "z@example.com",
-        "user_name": "default",
-        "password_account": "default:zwift",
-    })
     client = MagicMock()
 
     with patch("eufy_sync.zwift_client.ZwiftClient", return_value=client), \
@@ -93,15 +91,11 @@ def test_disconnect_zwift_preserves_other_config_and_arbitrary_probe_account(tmp
     assert "zwift_probe" not in vault["tokens"]
 
 
-def test_setup_zwift_ignores_probe_metadata_for_another_user(tmp_path, capsys):
+def test_setup_zwift_without_saved_credentials_needs_a_terminal(tmp_path, capsys):
     path = tmp_path / "config.yaml"
     _config(path)
-    credentials.store_password("other:zwift", "other-password")
-    credentials.store_token("zwift_probe", {
-        "email": "other@example.com",
-        "user_name": "other",
-        "password_account": "other:zwift",
-    })
+    # A saved password alone, with no configured Zwift email, is not enough.
+    credentials.store_password("default:zwift", "orphaned-password")
 
     with patch("sys.stdin.isatty", return_value=False), \
          patch("builtins.input", side_effect=AssertionError("must refuse before prompting")), \
