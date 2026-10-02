@@ -247,17 +247,32 @@ class SyncState:
 
     def get_upload_retries(self, user_name: str) -> list[dict]:
         cursor = self._conn.execute(
-            """SELECT target, measurement_id, measurement_timestamp, weight_kg, attempts, gave_up
+            """SELECT target, measurement_id, measurement_timestamp, weight_kg,
+                      first_failed_at, attempts, gave_up
                FROM upload_retries WHERE user_name = ?""",
             (user_name,),
         )
         return [
             {
                 "target": target, "measurement_id": mid, "measurement_timestamp": ts,
-                "weight_kg": kg, "attempts": attempts, "gave_up": bool(gave_up),
+                "weight_kg": kg, "first_failed_at": first_failed_at,
+                "attempts": attempts, "gave_up": bool(gave_up),
             }
-            for target, mid, ts, kg, attempts, gave_up in cursor.fetchall()
+            for target, mid, ts, kg, first_failed_at, attempts, gave_up in cursor.fetchall()
         ]
+
+    def get_oldest_waiting_retry_timestamp(self, user_name: str, target: str) -> int | None:
+        """Epoch seconds of the oldest measurement still due a retry to the
+        target, or None. Compared in Python because the stored strings mix
+        UTC offsets."""
+        rows = self._conn.execute(
+            """SELECT measurement_timestamp FROM upload_retries
+               WHERE user_name = ? AND target = ? AND gave_up = 0""",
+            (user_name, target),
+        ).fetchall()
+        if not rows:
+            return None
+        return int(min(datetime.fromisoformat(ts).timestamp() for (ts,) in rows))
 
     def waiting_upload_retries(self, user_name: str) -> dict[str, int]:
         """Per-target count of failed uploads still due a retry."""

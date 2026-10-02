@@ -30,10 +30,14 @@ UPGRADE_MAX_WEIGHT_KG = 0.1
 UPGRADE_LOOKBACK_DAYS = 14
 # A failed upload is retried because the fetch cursor stays behind it, so a
 # measurement that never uploads would block every newer one to that target.
-# Past two weeks (the same reach as upgrades) or two weeks' worth of
-# scheduled runs at one every 4 hours, a failing measurement no longer stops
-# the target, and it is given up only once a newer one uploads in the same
-# run. An outage fails the newer ones too, so it never costs a measurement.
+# Two weeks after its first failure (the same reach as upgrades), or after two
+# weeks' worth of scheduled runs at one every 4 hours, a failing measurement
+# no longer stops the target. The age counts from the first failure, not from
+# when the weigh-in was taken, so an old measurement reached by a backfill
+# gets the same two weeks. A capped measurement is given up only when a newer
+# one uploads in the same run and the capped one then fails once more: an
+# outage fails the newer ones too, and a recovery mid-run lets the retry
+# through, so neither costs a measurement.
 RETRY_MAX_AGE_DAYS = UPGRADE_LOOKBACK_DAYS
 MAX_RETRY_ATTEMPTS = 84
 
@@ -100,6 +104,7 @@ def _triage_retries(
                 state.clear_upload_retry(user_name, target, mid)
             continue
         taken_at = datetime.fromisoformat(row["measurement_timestamp"]).timestamp()
+        first_failed = datetime.fromisoformat(row["first_failed_at"]).timestamp()
         if target in ("strava", "zwift"):
             latest = state.get_latest_sync_timestamp(user_name, target)
             if latest is not None and taken_at <= latest:
@@ -109,9 +114,66 @@ def _triage_retries(
                 continue
         if row["gave_up"]:
             given_up.add((target, mid))
-        elif row["attempts"] >= MAX_RETRY_ATTEMPTS or taken_at < oldest_allowed:
+        elif row["attempts"] >= MAX_RETRY_ATTEMPTS or first_failed < oldest_allowed:
             capped.add((target, mid))
     return given_up, capped
+
+
+def _retry_capped_garmin_uploads(
+    user_name: str, state: SyncState, client, stuck: list[EufyMeasurement],
+) -> tuple[int, BaseException | None]:
+    """Try each capped measurement that failed earlier in this run once more,
+    now that a newer one has reached Garmin. Returns (uploaded, error): error
+    is a permanent failure that ends Garmin for the run, or None.
+
+    A newer upload landing shows Garmin is up, and it may have come back only
+    moments ago, so a capped failure from before then is not yet proof the
+    measurement itself is the problem. Each retry goes through _retry and the
+    client's single relogin like any upload. Only a measurement that fails
+    again with a retryable error is given up. A permanent failure (a rate
+    limit, a refused session) says nothing about the measurement, so it stays
+    queued, and the fetch cursor reaches back for it on the next run."""
+    uploaded = 0
+    for m in stuck:
+        body_comp = transform(m)
+        try:
+            result = _retry(
+                lambda: client.upload_body_composition(body_comp),  # noqa: B023
+                f"Garmin upload ({m.measurement_id}, after a newer one landed)",
+            )
+        except UnsupportedMeasurementError as e:
+            logger.warning("Skipping Garmin for %s: %s", user_name, e)
+            state.give_up_upload_retry(user_name, "garmin", m.measurement_id)
+            continue
+        except Exception as e:
+            if _is_permanent(e):
+                logger.error("Upload to garmin failed for %s: %s", user_name, e)
+                return uploaded, e
+            state.give_up_upload_retry(user_name, "garmin", m.measurement_id)
+            logger.warning(
+                "Giving up on the Garmin upload of %.2f kg from %s: it failed again after a newer one uploaded (%s)",
+                m.weight_kg, m.timestamp.isoformat(), e,
+            )
+            continue
+        if not state.is_synced(user_name, m.measurement_id, "garmin"):
+            state.record_sync(
+                user_name=user_name,
+                measurement_id=m.measurement_id,
+                measurement_timestamp=m.timestamp.isoformat(),
+                weight_kg=m.weight_kg,
+                synced_at=datetime.now(timezone.utc).isoformat(),
+                target="garmin",
+                response=json.dumps(result) if result else None,
+                weight_only=m.weight_only,
+            )
+        state.clear_upload_retry(user_name, "garmin", m.measurement_id)
+        uploaded += 1
+        logger.info(
+            "Synced %.2f kg (%.1f lb) → Garmin (%s, on a retry after a newer one uploaded)",
+            m.weight_kg, m.weight_kg * 2.20462, "weight only" if m.weight_only else "full body comp",
+        )
+        time.sleep(1)
+    return uploaded, None
 
 
 def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False, repair_days: int | None = None, target: str | None = None, report: SyncReport | None = None) -> tuple[dict[str, int], dict[str, str]]:
@@ -206,12 +268,19 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                         # Processed data can arrive after newer weigh-ins have
                         # advanced the cursor. Include small timestamp shifts.
                         ts = min(ts, pending_ts - UPGRADE_MAX_SECONDS) if ts is not None else pending_ts - UPGRADE_MAX_SECONDS
+                    retry_ts = state.get_oldest_waiting_retry_timestamp(user.name, name)
+                    if retry_ts is not None:
+                        # A queued failure can sit behind the cursor when a
+                        # newer upload landed after it in the same run (see
+                        # _retry_capped_garmin_uploads); reach back for it.
+                        ts = min(ts if ts is not None else default_cursor, retry_ts)
                 cursors.append(ts if ts is not None else default_cursor)
             after_timestamp = min(cursors)
 
         given_up, capped = _triage_retries(user.name, state, [name for name, _ in targets], dry_run)
         # Capped measurements that failed again this run, per target, waiting
-        # for a newer upload to prove the target itself is healthy.
+        # for a newer upload to prove the target itself is healthy before one
+        # last try.
         capped_failures: dict[str, list[EufyMeasurement]] = {}
         capped_errors: dict[str, str] = {}
 
@@ -360,7 +429,7 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     if (target_name, target_measurement.measurement_id) in capped:
                         print(
                             f"[DRY RUN] Would retry {target_name}: {target_measurement.weight_kg:.1f} kg at {target_measurement.timestamp}"
-                            " (given up if it fails and a newer one uploads)"
+                            " (given up if it fails again after a newer one uploads)"
                         )
                         counts[target_name] += 1
                         continue
@@ -449,14 +518,6 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                         state.clear_upload_retries_through(user.name, target_name, target_measurement.timestamp)
                     else:
                         state.clear_upload_retry(user.name, target_name, m.measurement_id)
-                    # The target took a newer measurement, so the older ones
-                    # that failed past their cap are the problem, not it.
-                    for stuck in capped_failures.pop(target_name, []):
-                        state.give_up_upload_retry(user.name, target_name, stuck.measurement_id)
-                        logger.warning(
-                            "Giving up on the %s upload of %.2f kg from %s: it keeps failing while newer ones upload",
-                            target_name.capitalize(), stuck.weight_kg, stuck.timestamp.isoformat(),
-                        )
                     capped_errors.pop(target_name, None)
                 except UnsupportedMeasurementError as e:
                     logger.warning("Skipping %s for %s: %s", target_name.capitalize(), user.name, e)
@@ -506,6 +567,18 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
 
                 # Small delay between uploads to avoid rate limiting
                 time.sleep(1 if target_name == "garmin" else 0.5)
+
+                # The target took a newer measurement, so it is up now. Give
+                # each capped failure from earlier in the run one more try;
+                # only one that fails again is given up. A current-weight
+                # target already dropped its older entries above.
+                stuck = capped_failures.pop(target_name, [])
+                if stuck and target_name == "garmin":
+                    landed, failure = _retry_capped_garmin_uploads(user.name, state, client, stuck)
+                    counts[target_name] += landed
+                    if failure is not None:
+                        errors[target_name] = str(failure)
+                        targets = [t for t in targets if t[0] != target_name]
 
             if not targets:
                 # Every target dropped out; the remaining measurements have
