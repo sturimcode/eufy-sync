@@ -213,12 +213,14 @@ class ZwiftClient:
 
     @staticmethod
     def _grams(weight_kg: float) -> int:
+        # Retrying cannot change the weight, so these are skipped, not retried.
+        from eufy_sync.sync import UnsupportedMeasurementError
         try:
             value = Decimal(str(weight_kg))
         except (InvalidOperation, ValueError) as exc:
-            raise ValueError("Zwift weight must be a finite number") from exc
+            raise UnsupportedMeasurementError("Zwift weight must be a finite number") from exc
         if not value.is_finite() or value < Decimal("30") or value > Decimal("300"):
-            raise ValueError("Zwift weight must be between 30 and 300 kg")
+            raise UnsupportedMeasurementError(f"Zwift only accepts 30 to 300 kg, got {weight_kg} kg")
         return int((value * 1000).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
     @staticmethod

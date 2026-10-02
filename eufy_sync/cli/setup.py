@@ -217,19 +217,10 @@ def _connect_zwift(user: dict, retry_command: str = "eufy-sync --setup-zwift") -
 
     from eufy_sync import credentials
     vault = credentials._load_vault()
-    probe = vault.get("tokens", {}).get("zwift_probe")
     password_account = f"{user_name}:zwift"
     existing = user.get("zwift") or {}
     existing_email = existing.get("email")
     existing_password = vault.get("passwords", {}).get(password_account)
-    probe_is_current_user = (
-        isinstance(probe, dict)
-        and probe.get("user_name") == user_name
-        and probe.get("password_account") == password_account
-        and (not existing_email or probe.get("email") == existing_email)
-    )
-    probe_email = probe.get("email") if probe_is_current_user else None
-    probe_password = vault.get("passwords", {}).get(password_account) if probe_is_current_user else None
 
     print("")
     print("  Experimental Zwift weight sync")
@@ -242,13 +233,9 @@ def _connect_zwift(user: dict, retry_command: str = "eufy-sync --setup-zwift") -
         email = existing_email
         password = existing_password
         print(f"Using the configured Zwift account for {email}.")
-    elif probe_email and probe_password:
-        email = probe_email
-        password = probe_password
-        print(f"Using the validated Zwift account for {email}.")
     else:
         if not sys.stdin.isatty():
-            print("No validated Zwift credentials were found. Run setup in an interactive terminal.")
+            print("No saved Zwift credentials were found. Run setup in an interactive terminal.")
             sys.exit(1)
         email = input("Zwift email: ").strip()
         if not email:

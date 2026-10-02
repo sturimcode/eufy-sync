@@ -179,7 +179,7 @@ def test_self_update_uses_uv_when_installed_via_uv_tool():
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
         _self_update()
 
-    assert mock_run.call_args.args[0] == ["uv", "tool", "install", "--force", "eufy-sync==9.9.9"]
+    assert mock_run.call_args.args[0] == ["uv", "tool", "install", "--force", "--refresh-package", "eufy-sync", "eufy-sync==9.9.9"]
 
 
 def test_self_update_uses_uv_for_windows_uv_tool_path():
@@ -317,4 +317,4 @@ def test_self_update_keeps_the_browser_extra_when_installed(monkeypatch):
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
         _self_update()
 
-    assert mock_run.call_args.args[0] == ["uv", "tool", "install", "--force", "eufy-sync[browser]==9.9.9"]
+    assert mock_run.call_args.args[0] == ["uv", "tool", "install", "--force", "--refresh-package", "eufy-sync", "eufy-sync[browser]==9.9.9"]
