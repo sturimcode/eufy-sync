@@ -30,8 +30,10 @@ UPGRADE_MAX_WEIGHT_KG = 0.1
 UPGRADE_LOOKBACK_DAYS = 14
 # A failed upload is retried because the fetch cursor stays behind it, so a
 # measurement that never uploads would block every newer one to that target.
-# Give up after two weeks (the same reach as upgrades) or after two weeks'
-# worth of scheduled runs at one every 4 hours, whichever comes first.
+# Past two weeks (the same reach as upgrades) or two weeks' worth of
+# scheduled runs at one every 4 hours, a failing measurement no longer stops
+# the target, and it is given up only once a newer one uploads in the same
+# run. An outage fails the newer ones too, so it never costs a measurement.
 RETRY_MAX_AGE_DAYS = UPGRADE_LOOKBACK_DAYS
 MAX_RETRY_ATTEMPTS = 84
 
@@ -75,15 +77,19 @@ def _retry(fn, description: str):
             time.sleep(delay)
 
 
-def _given_up_retries(user_name: str, state: SyncState, target_names: list[str], dry_run: bool) -> set[tuple[str, str]]:
-    """Tidy the retry queue for this run's targets and return the
-    (target, measurement_id) pairs that must not be uploaded again.
+def _triage_retries(
+    user_name: str, state: SyncState, target_names: list[str], dry_run: bool,
+) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """Tidy the retry queue for this run's targets. Returns (given_up,
+    capped): pairs of (target, measurement_id) never to upload again, and
+    pairs past a cap whose next failure must not stop their target.
 
     The queue does not replay anything itself: the per-target cursor already
     re-fetches a failed measurement. The queue counts the attempts, so a
     measurement that keeps failing stops holding back newer ones.
     """
     given_up: set[tuple[str, str]] = set()
+    capped: set[tuple[str, str]] = set()
     oldest_allowed = time.time() - RETRY_MAX_AGE_DAYS * 86400
     for row in state.get_upload_retries(user_name):
         target, mid = row["target"], row["measurement_id"]
@@ -103,21 +109,9 @@ def _given_up_retries(user_name: str, state: SyncState, target_names: list[str],
                 continue
         if row["gave_up"]:
             given_up.add((target, mid))
-            continue
-        if row["attempts"] >= MAX_RETRY_ATTEMPTS:
-            reason = f"it failed {row['attempts']} times"
-        elif taken_at < oldest_allowed:
-            reason = f"it is more than {RETRY_MAX_AGE_DAYS} days old"
-        else:
-            continue
-        logger.warning(
-            "Giving up on the %s upload of %.2f kg from %s: %s",
-            target.capitalize(), row["weight_kg"], row["measurement_timestamp"], reason,
-        )
-        if not dry_run:
-            state.give_up_upload_retry(user_name, target, mid)
-        given_up.add((target, mid))
-    return given_up
+        elif row["attempts"] >= MAX_RETRY_ATTEMPTS or taken_at < oldest_allowed:
+            capped.add((target, mid))
+    return given_up, capped
 
 
 def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False, repair_days: int | None = None, target: str | None = None, report: SyncReport | None = None) -> tuple[dict[str, int], dict[str, str]]:
@@ -215,7 +209,11 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 cursors.append(ts if ts is not None else default_cursor)
             after_timestamp = min(cursors)
 
-        given_up = _given_up_retries(user.name, state, [name for name, _ in targets], dry_run)
+        given_up, capped = _triage_retries(user.name, state, [name for name, _ in targets], dry_run)
+        # Capped measurements that failed again this run, per target, waiting
+        # for a newer upload to prove the target itself is healthy.
+        capped_failures: dict[str, list[EufyMeasurement]] = {}
+        capped_errors: dict[str, str] = {}
 
         pending = {}
         pending_previous_ids = {}
@@ -359,6 +357,13 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     continue
 
                 if dry_run:
+                    if (target_name, target_measurement.measurement_id) in capped:
+                        print(
+                            f"[DRY RUN] Would retry {target_name}: {target_measurement.weight_kg:.1f} kg at {target_measurement.timestamp}"
+                            " (given up if it fails and a newer one uploads)"
+                        )
+                        counts[target_name] += 1
+                        continue
                     print(f"[DRY RUN] Would sync to {target_name}: {target_measurement.weight_kg:.1f} kg at {target_measurement.timestamp}")
                     counts[target_name] += 1
                     continue
@@ -444,20 +449,37 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                         state.clear_upload_retries_through(user.name, target_name, target_measurement.timestamp)
                     else:
                         state.clear_upload_retry(user.name, target_name, m.measurement_id)
+                    # The target took a newer measurement, so the older ones
+                    # that failed past their cap are the problem, not it.
+                    for stuck in capped_failures.pop(target_name, []):
+                        state.give_up_upload_retry(user.name, target_name, stuck.measurement_id)
+                        logger.warning(
+                            "Giving up on the %s upload of %.2f kg from %s: it keeps failing while newer ones upload",
+                            target_name.capitalize(), stuck.weight_kg, stuck.timestamp.isoformat(),
+                        )
+                    capped_errors.pop(target_name, None)
                 except UnsupportedMeasurementError as e:
                     logger.warning("Skipping %s for %s: %s", target_name.capitalize(), user.name, e)
                     continue
                 except Exception as e:
                     logger.error("Upload to %s failed for %s: %s", target_name, user.name, e)
-                    # str(e) carries the actionable text the CLI keys its
-                    # notification off (e.g. the "--reauth" hint), so it must
-                    # reach the caller unwrapped.
-                    errors[target_name] = str(e)
-                    targets = [t for t in targets if t[0] != target_name]
+                    retryable = not _is_permanent(e) and upgrade_row is None and m.measurement_id not in pending
+                    move_past = retryable and (target_name, target_measurement.measurement_id) in capped
+                    if move_past:
+                        # Past its cap: try the newer measurements instead of
+                        # stopping here. Reported only if none of them land.
+                        capped_failures.setdefault(target_name, []).append(target_measurement)
+                        capped_errors[target_name] = str(e)
+                    else:
+                        # str(e) carries the actionable text the CLI keys its
+                        # notification off (e.g. the "--reauth" hint), so it
+                        # must reach the caller unwrapped.
+                        errors[target_name] = str(e)
+                        targets = [t for t in targets if t[0] != target_name]
                     # Permanent and auth failures need the user, not a retry.
                     # A replacement for a weight-only entry already has its
                     # own store (pending_upgrades) and must never be given up.
-                    if not _is_permanent(e) and upgrade_row is None and m.measurement_id not in pending:
+                    if retryable:
                         attempts = state.record_upload_failure(
                             user_name=user.name,
                             target=target_name,
@@ -490,6 +512,10 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 # nowhere to go.
                 break
 
+        # No newer measurement landed after a capped failure: either nothing
+        # newer exists or the target is down. Keep the entry; report it.
+        for target_name, message in capped_errors.items():
+            errors.setdefault(target_name, message)
         return counts, errors
 
     finally:
