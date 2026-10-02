@@ -61,6 +61,17 @@ class SyncState:
                 last_newer_success_at TEXT,
                 PRIMARY KEY(user_name, target, measurement_id)
             );
+            -- What eufy-sync last sent to each Intervals.icu wellness date:
+            -- the fields sent and the readings that made up that weigh-in.
+            -- New in 1.16; CREATE IF NOT EXISTS is the whole migration.
+            CREATE TABLE IF NOT EXISTS intervals_days (
+                user_name TEXT NOT NULL,
+                local_date TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                readings_json TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                PRIMARY KEY(user_name, local_date)
+            );
         """)
         self._conn.commit()
         self._migrate_retry_newer_success_column()
@@ -197,28 +208,37 @@ class SyncState:
             if datetime.fromisoformat(ts).astimezone().date() == local_date
         ]
 
-    def syncs_on_date(self, user_name: str, target: str, local_date: date) -> list[dict]:
-        """Every recorded sync to target for a local calendar date, as dicts
-        with measurement_id, measurement_timestamp (a datetime), weight_kg and
-        weight_only. Windowed in SQL, exact date check in Python, as in
-        has_synced_on_date."""
-        lo, hi = _date_window(local_date)
+    def get_intervals_days(self, user_name: str, dates) -> dict[date, dict]:
+        """Last-sent record per local date, for the dates asked about. Each
+        value has payload (the fields sent) and readings (their JSON form,
+        see intervals_plan.Reading)."""
+        keys = sorted({d.isoformat() for d in dates})
+        if not keys:
+            return {}
+        placeholders = ",".join("?" for _ in keys)
         cursor = self._conn.execute(
-            """SELECT eufy_measurement_id, measurement_timestamp, weight_kg, weight_only
-               FROM sync_log
-               WHERE user_name = ? AND target = ?
-                 AND measurement_timestamp >= ? AND measurement_timestamp < ?""",
-            (user_name, target, lo, hi),
+            f"SELECT local_date, payload_json, readings_json FROM intervals_days"
+            f" WHERE user_name = ? AND local_date IN ({placeholders})",
+            (user_name, *keys),
         )
-        rows = []
-        for mid, ts, kg, weight_only in cursor.fetchall():
-            taken = datetime.fromisoformat(ts)
-            if taken.astimezone().date() == local_date:
-                rows.append({
-                    "measurement_id": mid, "measurement_timestamp": taken,
-                    "weight_kg": kg, "weight_only": bool(weight_only),
-                })
-        return rows
+        return {
+            date.fromisoformat(day): {"payload": json.loads(payload), "readings": json.loads(readings)}
+            for day, payload, readings in cursor.fetchall()
+        }
+
+    def record_intervals_day(
+        self, user_name: str, local_date: date, payload: dict, readings: list[dict], sent_at: str,
+    ) -> None:
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO intervals_days (user_name, local_date, payload_json, readings_json, sent_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(user_name, local_date) DO UPDATE SET
+                       payload_json = excluded.payload_json,
+                       readings_json = excluded.readings_json,
+                       sent_at = excluded.sent_at""",
+                (user_name, local_date.isoformat(), json.dumps(payload), json.dumps(readings), sent_at),
+            )
 
     def mark_upgraded(self, user_name: str, measurement_id: str, target: str) -> None:
         """Clear a sync's weight-only flag once its full body-comp record has

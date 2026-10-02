@@ -65,6 +65,15 @@ def _raise_for_status(response: httpx.Response, action: str) -> None:
     raise RuntimeError(f"Temporary Intervals.icu failure during {action} (HTTP {status})")
 
 
+def wellness_payload(weight_kg: float, body_fat_pct: float | None) -> dict[str, float]:
+    """The fields to send. A missing or non-finite body fat is left out,
+    so the PUT leaves any value already on that date untouched."""
+    payload = {"weight": round(float(weight_kg), 2)}
+    if body_fat_pct is not None and math.isfinite(body_fat_pct):
+        payload["bodyFat"] = round(float(body_fat_pct), 1)
+    return payload
+
+
 class IntervalsClient:
     """Writes weight and body fat to Intervals.icu wellness records."""
 
@@ -115,21 +124,12 @@ class IntervalsClient:
                 f"{SETUP_HINT}"
             )
 
-    @staticmethod
-    def wellness_payload(weight_kg: float, body_fat_pct: float | None) -> dict[str, float]:
-        """The fields to send. A missing or non-finite body fat is left out,
-        so the PUT leaves any value already on that date untouched."""
-        payload = {"weight": round(float(weight_kg), 2)}
-        if body_fat_pct is not None and math.isfinite(body_fat_pct):
-            payload["bodyFat"] = round(float(body_fat_pct), 1)
-        return payload
-
     def update_wellness(self, day: date, weight_kg: float, body_fat_pct: float | None = None) -> dict[str, Any]:
         """Write one local date's weight (and body fat when known).
 
         Returns what was sent, not the response: the wellness record also
         holds sleep, HRV, and other data this tool has no reason to keep."""
-        payload = self.wellness_payload(weight_kg, body_fat_pct)
+        payload = wellness_payload(weight_kg, body_fat_pct)
         response = self._client.put(
             f"/athlete/{quote(self.config.athlete_id, safe='')}/wellness/{day.isoformat()}", json=payload,
         )

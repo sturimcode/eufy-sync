@@ -114,7 +114,7 @@ Strava requires an active subscription to create a new API application. This is 
 
 Setup reads your athlete profile with the key before saving anything, so a mistyped key changes nothing. It looks up your athlete ID on its own. The key goes into the credential store; `config.yaml` holds only the athlete ID.
 
-Intervals.icu keeps one wellness record per day. Each sync sets that day's weight, plus body fat when the scale measured it. If you weigh in twice in one day, the later weigh-in wins. The day is your computer's local date, the same date Garmin gets. Sleep, HRV, and the other wellness fields are left alone. Intervals.icu has no fields for muscle mass, bone mass, or the rest of Garmin's body composition, so those stay in Garmin.
+Intervals.icu keeps one wellness record per day. Each sync sets that day's weight, plus body fat when the scale measured it. If you weigh in twice in one day, the later weigh-in wins, whichever order Eufy returns them in. A day is sent again only when its values change. The day is your computer's local date, the same date Garmin gets. In the rare case that Eufy's raw and processed records of one weigh-in fall on either side of midnight, the weigh-in counts for the earlier day. Sleep, HRV, and the other wellness fields are left alone. Intervals.icu has no fields for muscle mass, bone mass, or the rest of Garmin's body composition, so those stay in Garmin.
 
 The first sync looks back seven days. To fill in older days, run `eufy-sync --target intervals --backfill-days 30`. If Intervals.icu stops accepting the key, a notification asks you to run `eufy-sync --setup-intervals` again. `eufy-sync --disconnect-intervals` removes this target and its key.
 

@@ -3,7 +3,7 @@ record per local date, the newest weigh-in of a date wins, and failures go
 through the same retry queue as Garmin."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -261,12 +261,26 @@ def test_queued_entry_is_dropped_once_a_newer_weigh_in_reaches_its_date(tmp_path
     state = SyncState(tmp_path / "s.db")
     user = _user()
     earlier, later = _m(80.0, 2), _m(80.5, 2, 60)
-    state.record_upload_failure("default", "intervals", earlier.measurement_id,
-                                earlier.timestamp.isoformat(), 80.0, NOON.isoformat())
-    state.record_sync("default", later.measurement_id, later.timestamp.isoformat(), 80.5,
-                      NOON.isoformat(), target="intervals")
+    _run(user, state, [earlier], fail_weights={80.0})
+    assert ("intervals", earlier.measurement_id) in _rows(state)
 
     counts, errors, intervals, _ = _run(user, state, [earlier, later])
+
+    assert errors == {} and counts == {"intervals": 1}
+    assert _sent(intervals) == [(_day(later), 80.5, 20.0)]
+    assert _rows(state) == {}
+    state.close()
+
+
+def test_triage_drops_a_queued_weigh_in_its_date_has_moved_past(tmp_path: Path):
+    state = SyncState(tmp_path / "s.db")
+    user = _user()
+    earlier, later = _m(80.0, 2), _m(80.5, 2, 60)
+    _run(user, state, [later])
+    state.record_upload_failure("default", "intervals", earlier.measurement_id,
+                                earlier.timestamp.isoformat(), 80.0, NOON.isoformat())
+
+    counts, errors, intervals, _ = _run(user, state, [])
 
     assert errors == {} and counts == {"intervals": 0}
     intervals.update_wellness.assert_not_called()
@@ -278,8 +292,7 @@ def test_cursor_reaches_back_for_a_queued_failure(tmp_path: Path):
     state = SyncState(tmp_path / "s.db")
     user = _user()
     old, newer = _m(80.0, 10), _m(81.0, 1)
-    state.record_sync("default", newer.measurement_id, newer.timestamp.isoformat(), 81.0,
-                      NOON.isoformat(), target="intervals")
+    _run(user, state, [newer])
     state.record_upload_failure("default", "intervals", old.measurement_id,
                                 old.timestamp.isoformat(), 80.0, NOON.isoformat())
     fetches: list = []
@@ -289,6 +302,7 @@ def test_cursor_reaches_back_for_a_queued_failure(tmp_path: Path):
     assert fetches[0] <= old.timestamp.timestamp()
     assert errors == {} and counts == {"intervals": 1}
     assert _sent(intervals) == [(_day(old), 80.0, 20.0)]
+    assert _rows(state) == {}
     state.close()
 
 
@@ -373,4 +387,123 @@ def test_authentication_failure_leaves_garmin_running(tmp_path: Path):
 
     assert counts == {"garmin": 1}
     assert "--setup-intervals" in errors["intervals"]
+    state.close()
+
+
+# --- order independence (the per-date desired state) ---------------------------
+
+
+def test_raw_arriving_after_its_processed_record_changes_nothing(tmp_path: Path):
+    """Codex finding 1: a fetch that returns only the raw twin of a processed
+    record already sent must not overwrite it with the raw weight."""
+    state = SyncState(tmp_path / "s.db")
+    user = _user()
+    processed = _m(80.0, 2, 0, body_fat=19.5)
+    raw = EufyMeasurement("raw-id", "cust", "dev", processed.timestamp + timedelta(seconds=30), 80.08,
+                          weight_only=True)
+    _run(user, state, [processed])
+
+    counts, errors, intervals, _ = _run(user, state, [raw])
+    assert errors == {} and counts == {"intervals": 0}
+    intervals.update_wellness.assert_not_called()
+    # Nothing is left waiting for a processed record that already landed.
+    assert state.get_oldest_weight_only_timestamp("default", "intervals") is None
+
+    counts, _, intervals, _ = _run(user, state, [processed, raw])
+    assert counts == {"intervals": 0}
+    intervals.update_wellness.assert_not_called()
+    state.close()
+
+
+def test_same_id_upgrade_across_midnight_lands_on_the_raw_readings_date(tmp_path: Path):
+    """Codex finding 2. Policy: a weigh-in belongs to the date of its
+    earliest reading."""
+    state = SyncState(tmp_path / "s.db")
+    user = _user()
+    midnight = datetime.combine((NOON - timedelta(days=1)).date(), time()).astimezone()
+    raw = EufyMeasurement("cust_x", "cust", "dev", midnight - timedelta(seconds=15), 80.0, weight_only=True)
+    full = EufyMeasurement("cust_x", "cust", "dev", midnight + timedelta(seconds=15), 80.0, body_fat_pct=19.5)
+    raw_day = _day(raw)
+    assert raw_day != _day(full)
+    _run(user, state, [raw])
+
+    counts, errors, intervals, _ = _run(user, state, [full])
+    assert errors == {} and counts == {"intervals": 1}
+    assert _sent(intervals) == [(raw_day, 80.0, 19.5)]
+
+    counts, _, intervals, _ = _run(user, state, [raw, full])
+    assert counts == {"intervals": 0}
+    intervals.update_wellness.assert_not_called()
+    state.close()
+
+
+def test_repair_after_an_upgrade_resends_the_processed_values(tmp_path: Path):
+    """Codex finding 3: the replaced raw reading, later than the processed
+    one, must not block the processed values on repair."""
+    state = SyncState(tmp_path / "s.db")
+    user = _user()
+    processed = _m(80.0, 2, 0, body_fat=19.5)
+    raw = EufyMeasurement("raw-id", "cust", "dev", processed.timestamp + timedelta(seconds=30), 80.05,
+                          weight_only=True)
+    _run(user, state, [raw])
+    counts, _, intervals, _ = _run(user, state, [raw, processed])
+    assert counts == {"intervals": 1}
+    assert _sent(intervals) == [(_day(processed), 80.0, 19.5)]
+
+    counts, _, intervals, _ = _run(user, state, [raw, processed])
+    assert counts == {"intervals": 0}
+
+    counts, _, intervals, _ = _run(user, state, [raw, processed], repair_days=7)
+    assert counts == {"intervals": 1}
+    assert _sent(intervals) == [(_day(processed), 80.0, 19.5)]
+    state.close()
+
+
+@pytest.mark.parametrize("first_run, second_run", [
+    (["later"], ["earlier"]),
+    (["earlier"], ["later"]),
+    (["earlier", "later"], []),
+    (["later", "earlier"], []),
+])
+def test_the_later_weigh_in_wins_whatever_the_fetch_order(tmp_path: Path, first_run, second_run):
+    state = SyncState(tmp_path / "s.db")
+    user = _user()
+    by_name = {"earlier": _m(81.0, 2, 0, body_fat=21.0), "later": _m(80.0, 2, 180, body_fat=20.0)}
+    sent = []
+    for batch in (first_run, second_run):
+        if batch:
+            _, _, intervals, _ = _run(user, state, [by_name[n] for n in batch])
+            sent.extend(_sent(intervals))
+
+    # The last value sent to the date is what Intervals.icu holds.
+    assert sent[-1] == (_day(by_name["later"]), 80.0, 20.0)
+    state.close()
+
+
+def test_no_put_when_a_new_weigh_in_has_the_same_values(tmp_path: Path):
+    state = SyncState(tmp_path / "s.db")
+    user = _user()
+    first, second = _m(80.0, 2, 0), _m(80.0, 2, 240)
+    _run(user, state, [first])
+
+    counts, errors, intervals, _ = _run(user, state, [first, second])
+
+    assert errors == {} and counts == {"intervals": 0}
+    intervals.update_wellness.assert_not_called()
+    # The date's record now names the newer weigh-in.
+    day = second.timestamp.astimezone().date()
+    readings = state.get_intervals_days("default", [day])[day]["readings"]
+    assert [r["id"] for r in readings] == [second.measurement_id]
+    state.close()
+
+
+def test_new_table_is_created_on_an_existing_database(tmp_path: Path):
+    import sqlite3
+
+    path = tmp_path / "s.db"
+    SyncState(path).close()
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE intervals_days")
+    state = SyncState(path)
+    assert state.get_intervals_days("default", [NOON.date()]) == {}
     state.close()
