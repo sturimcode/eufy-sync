@@ -24,7 +24,9 @@ always the fallback, so callers can call get/store/delete unconditionally.
 A keychain that exists but cannot be read (locked, access denied) does
 raise, so a failed read can never be saved back over the real vault, and
 --use-file-store aborts rather than write an empty marker file that would
-orphan the unread keychain secrets.
+orphan the unread keychain secrets. A vault that is present but damaged
+(unparseable JSON, a missing chunk) raises VaultCorruptError, a RuntimeError,
+for the same reason: reading it as empty would let the next save wipe it.
 
 A lazy, one-time migration promotes secrets from the old per-item keychain
 layout (one keyring account per password/token) into the vault the first
@@ -32,6 +34,7 @@ time each one is looked up.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -44,9 +47,14 @@ VAULT_ACCOUNT = "vault"
 
 # Windows Credential Manager caps one entry at ~2,560 bytes stored as UTF-16,
 # roughly 1,280 characters. A vault larger than CHUNK_LIMIT characters is split
-# across numbered "vault:i" entries so set_password never fails on Windows.
-# MAX_CHUNKS bounds how far a save probes for stale leftover chunks to delete,
-# so a corrupt store can never make that scan run away.
+# across "vault:<gen>:<i>" entries so set_password never fails on Windows; the
+# "vault" entry then holds a small header naming the generation, the chunk
+# count and a checksum. Each save writes a fresh generation and switches the
+# header last, so an interrupted save never splices two vaults together.
+# Released versions wrote chunks as "vault:<i>"; those are still read and are
+# replaced on the next save. MAX_CHUNKS bounds the chunk count a header may
+# claim and how far a save probes for leftovers to delete, so a corrupt store
+# can never make either run away.
 CHUNK_LIMIT = 1200
 MAX_CHUNKS = 40
 
@@ -128,96 +136,272 @@ def _normalize_vault(vault: dict | None) -> dict:
     return normalized
 
 
-def _load_vault_from_keychain() -> dict:
+_KEYCHAIN_UNREADABLE = (
+    "The system keychain could not be read (it may be locked or "
+    "access was denied). Unlock it and retry, or run: "
+    "eufy-sync --use-file-store"
+)
+
+
+class VaultCorruptError(RuntimeError):
+    """The stored vault exists but cannot be parsed or reassembled.
+
+    Raised instead of returning an empty vault: an empty result would be
+    saved back by the next store_*() call, wiping every stored secret. It is
+    a RuntimeError, so callers that already handle an unreadable keychain
+    handle this the same way."""
+
+
+def _keychain_corrupt(detail: str) -> VaultCorruptError:
+    return VaultCorruptError(
+        f"The credential vault in the system keychain is damaged ({detail}). "
+        "It was left untouched so nothing is saved over it. To start over, "
+        f'delete the "{VAULT_ACCOUNT}" item for "{SERVICE_NAME}" in your '
+        "keychain app, then run eufy-sync to sign in again."
+    )
+
+
+def _keychain_get(account: str) -> str | None:
     import keyring
     try:
-        raw = keyring.get_password(SERVICE_NAME, VAULT_ACCOUNT)
+        return keyring.get_password(SERVICE_NAME, account)
     except Exception as e:
         # Returning an empty vault here would let the next read-modify-write
         # save a near-empty vault over the real one. Raising keeps every
         # caller safe; sync/doctor/startup already report exceptions cleanly.
-        raise RuntimeError(
-            "The system keychain could not be read (it may be locked or "
-            "access was denied). Unlock it and retry, or run: "
-            "eufy-sync --use-file-store"
-        ) from e
+        raise RuntimeError(_KEYCHAIN_UNREADABLE) from e
+
+
+def _valid_count(value) -> bool:
+    # bool is an int subclass; a header saying {"__chunks__": true} is junk.
+    return type(value) is int and 1 <= value <= MAX_CHUNKS
+
+
+def _parse_header(raw: str) -> tuple:
+    """Classify the "vault" entry. Returns one of:
+
+    ("single", vault)            the whole vault in one entry
+    ("legacy", count)            released-version chunks "vault:1".."vault:<count>"
+    ("gen", gen, count, sha256)  chunks "vault:<gen>:1".."vault:<gen>:<count>"
+
+    Raises VaultCorruptError for anything else."""
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        raise _keychain_corrupt("the vault entry is not valid JSON") from None
+    if not isinstance(parsed, dict):
+        raise _keychain_corrupt("the vault entry is not a JSON object")
+    if "__vault__" in parsed:
+        meta = parsed["__vault__"]
+        if (
+            isinstance(meta, dict)
+            and type(meta.get("gen")) is int
+            and meta["gen"] >= 1
+            and _valid_count(meta.get("chunks"))
+            and isinstance(meta.get("sha256"), str)
+        ):
+            return ("gen", meta["gen"], meta["chunks"], meta["sha256"])
+        raise _keychain_corrupt("the chunk header is malformed")
+    if "__chunks__" in parsed:
+        if _valid_count(parsed["__chunks__"]):
+            return ("legacy", parsed["__chunks__"])
+        raise _keychain_corrupt("the chunk header is malformed")
+    return ("single", parsed)
+
+
+def _chunk_account(gen: int | None, i: int) -> str:
+    # gen None is the layout released versions wrote ("vault:1", "vault:2").
+    if gen is None:
+        return f"{VAULT_ACCOUNT}:{i}"
+    return f"{VAULT_ACCOUNT}:{gen}:{i}"
+
+
+def _assemble(layout: tuple) -> dict:
+    """Turn a parsed header into a vault dict, reading chunks as needed."""
+    if layout[0] == "single":
+        return _normalize_vault(layout[1])
+    if layout[0] == "legacy":
+        gen, count, digest = None, layout[1], None
+    else:
+        _, gen, count, digest = layout
+    pieces = []
+    for i in range(1, count + 1):
+        # A keyring failure here (locked, access denied) raises the
+        # unreadable-keychain RuntimeError, same as the header read. A chunk
+        # that comes back None is genuinely missing: the vault is damaged.
+        piece = _keychain_get(_chunk_account(gen, i))
+        if piece is None:
+            raise _keychain_corrupt(f"chunk {i} of {count} is missing")
+        pieces.append(piece)
+    payload = "".join(pieces)
+    if digest is not None and hashlib.sha256(payload.encode()).hexdigest() != digest:
+        raise _keychain_corrupt("the chunks do not match their header")
+    try:
+        parsed = json.loads(payload)
+    except (ValueError, TypeError):
+        raise _keychain_corrupt("the reassembled vault is not valid JSON") from None
+    if not isinstance(parsed, dict):
+        raise _keychain_corrupt("the reassembled vault is not a JSON object")
+    return _normalize_vault(parsed)
+
+
+def _load_vault_from_keychain() -> dict:
+    raw = _keychain_get(VAULT_ACCOUNT)
     if raw is None:
         return _empty_vault()
     try:
-        parsed = json.loads(raw)
-        # An oversized vault is stored as a header pointing at numbered chunks;
-        # reassemble the payload before normalizing. A missing chunk means the
-        # header outlived its payload, which is as unusable as malformed JSON.
-        if isinstance(parsed, dict) and "__chunks__" in parsed:
-            count = parsed["__chunks__"]
-            pieces = []
-            for i in range(1, count + 1):
-                try:
-                    piece = keyring.get_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:{i}")
-                except Exception as e:
-                    # A keyring failure mid-reassembly (locked, access denied) is
-                    # the same unreadable-keychain condition as the initial read,
-                    # not a missing chunk. Translate it so a partial read can
-                    # never be saved back over the real vault. A chunk that
-                    # returns None (below) is a genuinely missing chunk and keeps
-                    # its malformed-vault handling.
-                    raise RuntimeError(
-                        "The system keychain could not be read (it may be locked or "
-                        "access was denied). Unlock it and retry, or run: "
-                        "eufy-sync --use-file-store"
-                    ) from e
-                if piece is None:
-                    raise ValueError("missing vault chunk")
-                pieces.append(piece)
-            parsed = json.loads("".join(pieces))
-        return _normalize_vault(parsed)
-    except (ValueError, TypeError):
-        logger.warning("Keychain vault contained malformed JSON; treating as empty")
-        return _empty_vault()
+        return _assemble(_parse_header(raw))
+    except VaultCorruptError:
+        # A concurrent save may have switched the header and deleted the
+        # chunks this read was partway through. If the header moved on, read
+        # the new vault once; if it did not, the vault really is damaged.
+        fresh = _keychain_get(VAULT_ACCOUNT)
+        if fresh is None or fresh == raw:
+            raise
+        return _assemble(_parse_header(fresh))
 
 
-def _delete_stale_chunks(start: int) -> None:
-    # A previous save may have used more chunks than this one. Delete numbered
-    # entries from `start` upward until the first gap, so a later read can never
-    # reassemble a stale tail. Bounded by MAX_CHUNKS.
+def _delete_chunk_run(gen: int | None, start: int) -> None:
+    # Delete one generation's chunk entries from `start` up to the first gap.
+    # Chunks are always written 1..N in order, so leftovers from an
+    # interrupted save form an unbroken run. Deleting from the top down keeps
+    # it unbroken if this sweep is itself cut short, so the next sweep still
+    # finds the rest. Bounded by MAX_CHUNKS.
     import keyring
+    run = []
     for i in range(start, MAX_CHUNKS + 1):
-        account = f"{VAULT_ACCOUNT}:{i}"
+        account = _chunk_account(gen, i)
         if keyring.get_password(SERVICE_NAME, account) is None:
             break
+        run.append(account)
+    for account in reversed(run):
         try:
             keyring.delete_password(SERVICE_NAME, account)
         except Exception:
             pass
 
 
+def _sweep_chunks(prev_gen: int, keep_gen: int | None = None, keep_count: int = 0) -> None:
+    """Best-effort removal of chunk entries that no header points at.
+
+    prev_gen is the generation the header named before this change (0 when
+    it named none). Its neighbours are swept too: prev_gen - 1 catches a
+    cleanup a crash cut short, and prev_gen + 1 catches chunks a crashed save
+    wrote before it could switch the header. keep_gen/keep_count protect the
+    chunks the header now references. The released-version "vault:i" names
+    are probed until a save after generation 1 (the first one written after
+    them) has swept them."""
+    try:
+        if prev_gen <= 1:
+            _delete_chunk_run(None, 1)
+        for gen in (prev_gen - 1, prev_gen, prev_gen + 1):
+            if gen < 1:
+                continue
+            _delete_chunk_run(gen, keep_count + 1 if gen == keep_gen else 1)
+    except Exception:
+        # The new vault is already in place; leftovers cost tidiness, not
+        # data, so a failed cleanup must not fail the save.
+        pass
+
+
+def _current_gen() -> int:
+    """The generation the stored header names, or 0 for none. A header this
+    module cannot parse counts as 0: saves only ever follow a successful
+    load, so the next sweep still covers whatever it can identify."""
+    raw = _keychain_get(VAULT_ACCOUNT)
+    if raw is None:
+        return 0
+    try:
+        layout = _parse_header(raw)
+    except VaultCorruptError:
+        return 0
+    if layout[0] == "gen":
+        return layout[1]
+    if layout[0] == "single":
+        gen = layout[1].get("__gen__")
+        return gen if type(gen) is int and gen >= 1 else 0
+    return 0
+
+
 def _save_vault_to_keychain(vault: dict) -> None:
     import keyring
+    prev_gen = _current_gen()
+    # json.dumps escapes non-ASCII by default, so each character is one
+    # UTF-16 unit and a CHUNK_LIMIT-character entry stays under the Windows cap.
     payload = json.dumps(vault)
-    if len(payload) <= CHUNK_LIMIT:
-        keyring.set_password(SERVICE_NAME, VAULT_ACCOUNT, payload)
-        _delete_stale_chunks(1)
+    # A vault that shrinks back into one entry keeps the last chunk generation
+    # as "__gen__" (dropped on load), so a sweep that a crash cuts short can
+    # still find that generation's leftovers on the next save.
+    single = json.dumps({**vault, "__gen__": prev_gen}) if prev_gen else payload
+    if len(single) <= CHUNK_LIMIT:
+        keyring.set_password(SERVICE_NAME, VAULT_ACCOUNT, single)
+        _sweep_chunks(prev_gen)
         return
+    # The new chunks go under a generation no header references yet, and the
+    # single-entry header write is the commit point. A save killed before it
+    # leaves the old vault readable; one killed after it leaves the new vault
+    # readable plus leftovers that the next save sweeps.
+    gen = prev_gen + 1
     chunks = [payload[i:i + CHUNK_LIMIT] for i in range(0, len(payload), CHUNK_LIMIT)]
-    # Chunks first, header last: a reader that races the write sees either the
-    # old vault or a complete new one, never a header pointing at a chunk that
-    # has not been written yet.
     for i, chunk in enumerate(chunks, start=1):
-        keyring.set_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:{i}", chunk)
-    keyring.set_password(
-        SERVICE_NAME, VAULT_ACCOUNT, json.dumps({"__chunks__": len(chunks)})
-    )
-    _delete_stale_chunks(len(chunks) + 1)
+        keyring.set_password(SERVICE_NAME, _chunk_account(gen, i), chunk)
+    header = {
+        "__vault__": {
+            "gen": gen,
+            "chunks": len(chunks),
+            "sha256": hashlib.sha256(payload.encode()).hexdigest(),
+        }
+    }
+    keyring.set_password(SERVICE_NAME, VAULT_ACCOUNT, json.dumps(header))
+    _sweep_chunks(prev_gen, keep_gen=gen, keep_count=len(chunks))
+
+
+def _delete_keychain_vault() -> None:
+    """Best-effort removal of the vault header and every chunk entry."""
+    import keyring
+    try:
+        prev_gen = _current_gen()
+    except Exception:
+        prev_gen = 0
+    try:
+        keyring.delete_password(SERVICE_NAME, VAULT_ACCOUNT)
+    except Exception:
+        pass
+    _sweep_chunks(prev_gen)
+    if prev_gen:
+        # Released-version chunks an earlier install left behind.
+        try:
+            _delete_chunk_run(None, 1)
+        except Exception:
+            pass
 
 
 def _load_vault_from_file() -> dict:
-    if not CRED_FILE.exists():
-        return _empty_vault()
     try:
-        return _normalize_vault(json.loads(CRED_FILE.read_text()))
-    except (ValueError, TypeError, OSError):
-        logger.warning("Credentials file contained malformed JSON; treating as empty")
+        text = CRED_FILE.read_text()
+    except FileNotFoundError:
         return _empty_vault()
+    except ValueError:
+        parsed = None  # non-UTF-8 bytes
+    except OSError as e:
+        raise RuntimeError(
+            f"The credentials file {CRED_FILE} could not be read "
+            f"({e.strerror or e}). Check its permissions and retry."
+        ) from e
+    else:
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = None
+    if not isinstance(parsed, dict):
+        # Treating this as empty would let the next save replace the file
+        # with an empty vault, destroying whatever is still recoverable in it.
+        raise VaultCorruptError(
+            f"The credentials file {CRED_FILE} is damaged (not a JSON object). "
+            "It was left untouched so nothing is saved over it. Repair it or "
+            "move it aside, then run eufy-sync to sign in again."
+        )
+    return _normalize_vault(parsed)
 
 
 def _save_vault_to_file(vault: dict) -> None:
@@ -388,6 +572,9 @@ def use_file_store() -> None:
     if _keyring_available():
         try:
             keychain_vault = _load_vault_from_keychain()
+        except VaultCorruptError:
+            # Already says what is damaged and that nothing was changed.
+            raise
         except Exception as e:
             raise RuntimeError(
                 "The system keychain could not be read (it may be locked or "
@@ -414,20 +601,12 @@ def use_file_store() -> None:
     _save_vault_to_file(merged)
 
     if _keyring_available():
-        try:
-            import keyring
-            keyring.delete_password(SERVICE_NAME, VAULT_ACCOUNT)
-        except Exception:
-            pass
-        # An oversized vault also left numbered "vault:i" entries behind, each
-        # holding a slice of the same plaintext secrets. Deleting only the
-        # header hides them from every reader but leaves full copies in the
-        # keychain the user just opted out of. Best-effort: the file already
+        # An oversized vault also has chunk entries, each holding a slice of
+        # the same plaintext secrets. Deleting only the header hides them from
+        # every reader but leaves full copies in the keychain the user just
+        # opted out of, so the chunks go too. Best-effort: the file already
         # holds the merged vault, so a failure here must not fail the switch.
-        try:
-            _delete_stale_chunks(1)
-        except Exception:
-            pass
+        _delete_keychain_vault()
 
 
 def use_keychain_store() -> None:
