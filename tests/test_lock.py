@@ -484,7 +484,6 @@ def test_lock_on_an_unlinked_file_is_retried_on_the_new_file(tmp_path):
 
     path = tmp_path / "x.lock"
     stale = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
-    stale_inode = os.fstat(stale).st_ino
     path.unlink()
     real_open = file_lock._open
     opened = []
@@ -499,7 +498,9 @@ def test_lock_on_an_unlinked_file_is_retried_on_the_new_file(tmp_path):
 
     with patch("eufy_sync.file_lock._open", first_open_is_stale):
         fd = file_lock.acquire(path)
+    # acquire noticed the orphan and opened the path a second time. Compare
+    # against the file now at the path, not the stale inode number: once the
+    # orphan is closed, filesystems such as ext4 may hand that number out again.
     assert fd is not None and len(opened) == 2
-    # (The fd number itself may be reused once the stale handle is closed.)
-    assert os.fstat(fd).st_ino == os.stat(path).st_ino != stale_inode
+    assert os.fstat(fd).st_ino == os.stat(path).st_ino
     file_lock.release(fd)
