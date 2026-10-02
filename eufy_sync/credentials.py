@@ -38,7 +38,8 @@ vault.lock, from the moment it reads the vault until its cleanup is done.
 Two processes therefore never interleave a read-modify-write: the second one
 waits (up to VAULT_LOCK_TIMEOUT seconds) and then works on the first one's
 result. A lock that cannot be created or acquired raises VaultLockError and
-nothing is written. Reads do not take the lock.
+nothing is written. Reads do not take the lock; a read that lands on a store
+switch in progress retries once on the new backend (see _load_vault).
 """
 from __future__ import annotations
 
@@ -687,10 +688,37 @@ def _save_vault_to_file(vault: dict) -> None:
         raise
 
 
-def _load_vault() -> dict:
-    if _active_backend() == "file":
+def _load_from(backend: str) -> dict:
+    if backend == "file":
         return _load_vault_from_file()
     return _load_vault_from_keychain()
+
+
+def _load_vault() -> dict:
+    """Load the vault from the active backend.
+
+    Reads do not take the vault lock, so a store switch in another process
+    can land between choosing the backend and reading it: use_keychain_store
+    unlinks the file this read picked, or use_file_store deletes the keychain
+    vault this read picked. Both switches write the new store before clearing
+    the old one, so in either case the old store reads as empty (or, for a
+    keychain half-deleted mid-read, damaged) while the new one already holds
+    everything. When the result is empty or damaged and the backend has
+    changed since it was chosen, the read is redone once on the new backend.
+    A populated read needs no recheck: it saw a complete vault."""
+    backend = _active_backend()
+    try:
+        vault = _load_from(backend)
+    except VaultCorruptError:
+        current = _active_backend()
+        if current == backend:
+            raise
+        return _load_from(current)
+    if not vault["passwords"] and not vault["tokens"]:
+        current = _active_backend()
+        if current != backend:
+            return _load_from(current)
+    return vault
 
 
 @_locked
@@ -702,6 +730,24 @@ def _save_vault(vault: dict) -> None:
 
 
 # --- Public API: passwords ---------------------------------------------------
+
+
+def _legacy_get(account: str) -> str | None:
+    """A legacy per-item keychain value, or None when it is absent or the
+    keychain cannot be read."""
+    try:
+        import keyring
+        return keyring.get_password(SERVICE_NAME, account)
+    except Exception:
+        return None
+
+
+def _delete_legacy(account: str) -> None:
+    try:
+        import keyring
+        keyring.delete_password(SERVICE_NAME, account)
+    except Exception:
+        pass
 
 
 def get_password(account: str, migrate: bool = True) -> str | None:
@@ -724,17 +770,21 @@ def get_password(account: str, migrate: bool = True) -> str | None:
             if not migrate:
                 return legacy
             with vault_lock():
-                # Re-read under the lock: another process may have migrated
-                # (or changed) this password since the read above.
+                # Re-read both under the lock: another process may have
+                # migrated, changed, or deleted this password since the reads
+                # above. Saving the cached legacy value after a delete_password
+                # finished would bring the deleted secret back.
                 vault = _load_vault()
-                if account not in vault["passwords"]:
-                    vault["passwords"][account] = legacy
-                    _save_vault(vault)
-                try:
-                    keyring.delete_password(SERVICE_NAME, account)
-                except Exception:
-                    pass
-                return vault["passwords"][account]
+                if account in vault["passwords"]:
+                    _delete_legacy(account)
+                    return vault["passwords"][account]
+                legacy = _legacy_get(account)
+                if legacy is None:
+                    return None
+                vault["passwords"][account] = legacy
+                _save_vault(vault)
+                _delete_legacy(account)
+                return legacy
 
     return None
 
@@ -787,16 +837,23 @@ def get_token(name: str) -> dict | None:
             except (json.JSONDecodeError, TypeError):
                 return None
             with vault_lock():
-                # Re-read under the lock, as in get_password.
+                # Re-read both under the lock, as in get_password.
+                account = f"token:{name}"
                 vault = _load_vault()
-                if name not in vault["tokens"]:
-                    vault["tokens"][name] = legacy
-                    _save_vault(vault)
+                if name in vault["tokens"]:
+                    _delete_legacy(account)
+                    return vault["tokens"][name]
+                legacy_raw = _legacy_get(account)
+                if legacy_raw is None:
+                    return None
                 try:
-                    keyring.delete_password(SERVICE_NAME, f"token:{name}")
-                except Exception:
-                    pass
-                return vault["tokens"][name]
+                    legacy = json.loads(legacy_raw)
+                except (json.JSONDecodeError, TypeError):
+                    return None
+                vault["tokens"][name] = legacy
+                _save_vault(vault)
+                _delete_legacy(account)
+                return legacy
 
     return None
 

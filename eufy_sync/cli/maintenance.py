@@ -336,17 +336,14 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
 
         # Remove data directory. A kept DB at a custom --db path lives outside
         # data_dir, so only the default location needs the selective sweep.
-        # The sync lock file is skipped: --uninstall holds it open, and the
-        # caller deletes it (see _remove_lock_files). The vault lock file is
-        # held too; on POSIX the sweep deletes it while it is still held, so no
-        # other process can lock it between release and delete. Windows refuses
-        # to delete an open file, so there it is skipped and deleted after
-        # release instead.
+        # Both lock files are skipped: --uninstall holds them, and a lock file
+        # deleted mid-sweep lets another process create and lock a fresh one
+        # while credentials are still being removed. The vault lock file goes
+        # below, after everything else; the caller handles the sync lock file
+        # (see lock.unlink_while_held and _remove_lock_files).
         preserve_default_db = keep_db and db_path == default_db_path and db_path.exists()
         if data_dir.exists():
-            keep = {LOCK_NAME}
-            if sys.platform == "win32":
-                keep.add(VAULT_LOCK_NAME)
+            keep = {LOCK_NAME, VAULT_LOCK_NAME}
             if preserve_default_db:
                 keep.add("state.db")
             for item in data_dir.iterdir():
@@ -356,14 +353,21 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
                     shutil.rmtree(item)
                 else:
                     item.unlink()
-            _remove_dir_if_empty(data_dir)
 
-    # A custom --config/--db path lives outside data_dir, so it survives the
-    # sweep above and must be removed explicitly.
-    if config_path != default_config_path and config_path.exists():
-        config_path.unlink()
-    if db_path != default_db_path and not keep_db and db_path.exists():
-        db_path.unlink()
+        # A custom --config/--db path lives outside data_dir, so it survives the
+        # sweep above and must be removed explicitly.
+        if config_path != default_config_path and config_path.exists():
+            config_path.unlink()
+        if db_path != default_db_path and not keep_db and db_path.exists():
+            db_path.unlink()
+
+        # Last step under the vault lock. On POSIX the lock file is deleted
+        # while still held, so no other process can lock it between release
+        # and delete. Windows refuses to delete an open file, so there
+        # _remove_lock_files deletes it after release.
+        if sys.platform != "win32":
+            (data_dir / VAULT_LOCK_NAME).unlink(missing_ok=True)
+        _remove_dir_if_empty(data_dir)
 
     print("")
     if keep_db:

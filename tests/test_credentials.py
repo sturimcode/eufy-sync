@@ -1582,6 +1582,109 @@ def test_migration_runs_under_the_lock(fake_keyring, cred_file):
     assert fake_keyring.get_password(SERVICE_NAME, "default:eufy") is None
 
 
+def _before_first_lock(monkeypatch, action):
+    """Run action once, just before the first vault_lock() entry: the window
+    after an unlocked read where another process can finish a write."""
+    import contextlib
+
+    from eufy_sync import credentials as creds
+
+    real = creds.vault_lock
+    pending = [action]
+
+    @contextlib.contextmanager
+    def hooked():
+        if pending:
+            pending.pop()()
+        with real():
+            yield
+
+    monkeypatch.setattr(creds, "vault_lock", hooked)
+
+
+def test_password_migration_does_not_undo_a_concurrent_delete(fake_keyring, cred_file, monkeypatch):
+    """get_password reads the legacy item before locking. If a delete_password
+    finishes in that window, the migration must not save the cached value."""
+    from eufy_sync.credentials import get_password
+
+    fake_keyring.set_password(SERVICE_NAME, "default:eufy", "legacy-pw")
+    _before_first_lock(monkeypatch, lambda: fake_keyring.delete_password(SERVICE_NAME, "default:eufy"))
+
+    assert get_password("default:eufy") is None
+    assert credentials._load_vault()["passwords"] == {}
+    assert fake_keyring.get_password(SERVICE_NAME, "default:eufy") is None
+
+
+def test_token_migration_does_not_undo_a_concurrent_delete(fake_keyring, cred_file, monkeypatch):
+    fake_keyring.set_password(SERVICE_NAME, "token:strava", json.dumps({"t": 1}))
+    _before_first_lock(monkeypatch, lambda: fake_keyring.delete_password(SERVICE_NAME, "token:strava"))
+
+    assert get_token("strava") is None
+    assert credentials._load_vault()["tokens"] == {}
+    assert fake_keyring.get_password(SERVICE_NAME, "token:strava") is None
+
+
+def test_migration_saves_the_legacy_value_read_under_the_lock(fake_keyring, cred_file, monkeypatch):
+    """A legacy item rewritten in the window is migrated with its new value."""
+    from eufy_sync.credentials import get_password
+
+    fake_keyring.set_password(SERVICE_NAME, "default:eufy", "old")
+    _before_first_lock(monkeypatch, lambda: fake_keyring.set_password(SERVICE_NAME, "default:eufy", "new"))
+
+    assert get_password("default:eufy") == "new"
+    assert credentials._load_vault()["passwords"] == {"default:eufy": "new"}
+    assert fake_keyring.get_password(SERVICE_NAME, "default:eufy") is None
+
+
+def _switch_during_first_read(monkeypatch, backend, switch):
+    """Run switch (a store change "in another process") after the read has
+    chosen backend but before it loads it."""
+    from eufy_sync import credentials as creds
+
+    real = creds._load_from
+    pending = [switch]
+
+    def hooked(chosen):
+        if pending and chosen == backend:
+            pending.pop()()
+        return real(chosen)
+
+    monkeypatch.setattr(creds, "_load_from", hooked)
+
+
+def test_read_that_chose_the_file_survives_a_switch_to_the_keychain(fake_keyring, cred_file, monkeypatch):
+    """use_keychain_store unlinks the file the read picked; the credentials
+    are in the keychain by then and must not read as missing."""
+    from eufy_sync.credentials import get_password, use_keychain_store
+
+    cred_file.parent.mkdir(parents=True, exist_ok=True)
+    cred_file.write_text(json.dumps({"explicit": True, "passwords": {"default:eufy": "pw"}, "tokens": {}}))
+    _switch_during_first_read(monkeypatch, "file", use_keychain_store)
+
+    assert get_password("default:eufy", migrate=False) == "pw"
+    assert not cred_file.exists()
+
+
+def test_read_that_chose_the_keychain_survives_a_switch_to_the_file(fake_keyring, cred_file, monkeypatch):
+    from eufy_sync.credentials import store_token, use_file_store
+
+    store_token("garmin", {"t": 1})
+    _switch_during_first_read(monkeypatch, "keychain", use_file_store)
+
+    assert get_token("garmin") == {"t": 1}
+    assert _vault_accounts(fake_keyring) == set()
+
+
+def test_empty_vault_with_no_switch_reads_the_backend_once(fake_keyring, cred_file, monkeypatch):
+    from eufy_sync import credentials as creds
+
+    calls = []
+    real = creds._load_from
+    monkeypatch.setattr(creds, "_load_from", lambda b: calls.append(b) or real(b))
+    assert creds._load_vault() == {"passwords": {}, "tokens": {}}
+    assert calls == ["keychain"]
+
+
 # --- Chunk cap -----------------------------------------------------------------
 
 

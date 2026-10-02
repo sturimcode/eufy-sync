@@ -358,6 +358,89 @@ def test_uninstall_deletes_each_lock_file_before_releasing_it(_input, mock_stdin
     assert not shared.DATA_DIR.exists()
 
 
+@patch("eufy_sync.credentials._keyring_available", return_value=True)
+@patch("eufy_sync.platform_support.agent_installed", return_value=False)
+@patch("eufy_sync.cli.maintenance.sys.stdin")
+@patch("builtins.input", side_effect=["y", "n"])
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX unlink ordering")
+def test_uninstall_removes_the_vault_lock_last_and_holds_it_throughout(
+    _input, mock_stdin, _agent, _keyring, tmp_path
+):
+    """A vault lock file deleted mid-sweep lets another process create and
+    lock a fresh one while uninstall is still removing credentials. Even when
+    the directory listing yields vault.lock first, every other removal (data
+    dir and keychain) must happen while it is still on disk and held, and it
+    must be the last thing deleted under the vault lock."""
+    import shutil
+
+    from eufy_sync import credentials
+    from eufy_sync.cli.app import main
+    from eufy_sync.credentials import store_password, store_token, vault_lock_path
+
+    mock_stdin.isatty.return_value = True
+    config_path = _write_synced_config(shared.DATA_DIR)
+    store_password("default:eufy", "pw")
+    store_token("garmin", {"t": 1})
+    (shared.DATA_DIR / "credentials.json").write_text('{"passwords": {}, "tokens": {}}')
+    (shared.DATA_DIR / "state.db").write_text("")
+    (shared.DATA_DIR / "cache").mkdir()
+    (shared.DATA_DIR / "cache" / "x").write_text("")
+    vault_lock_path().touch()
+
+    events = []
+
+    def record(what):
+        events.append((what, vault_lock_path().exists(), credentials._lock_depth > 0))
+
+    real_unlink = Path.unlink
+    real_rmtree = shutil.rmtree
+    real_iterdir = Path.iterdir
+    real_delete_password = credentials.delete_password
+    real_delete_token = credentials.delete_token
+
+    def unlink(self, *args, **kwargs):
+        if self.parent == shared.DATA_DIR:
+            record(self.name)
+        return real_unlink(self, *args, **kwargs)
+
+    def rmtree(path, *args, **kwargs):
+        record(Path(path).name)
+        return real_rmtree(path, *args, **kwargs)
+
+    def iterdir(self):
+        items = list(real_iterdir(self))
+        # Worst case for the old loop: the vault lock comes first.
+        return iter(sorted(items, key=lambda p: p.name != "vault.lock"))
+
+    def delete_password(account):
+        record(f"password:{account}")
+        real_delete_password(account)
+
+    def delete_token(name):
+        record(f"token:{name}")
+        real_delete_token(name)
+
+    with patch.object(Path, "unlink", unlink), \
+         patch.object(Path, "iterdir", iterdir), \
+         patch("eufy_sync.cli.maintenance.shutil.rmtree", rmtree), \
+         patch("eufy_sync.credentials.delete_password", delete_password), \
+         patch("eufy_sync.credentials.delete_token", delete_token), \
+         patch("sys.argv", ["eufy-sync", "--uninstall", "--config", str(config_path)]):
+        main()
+
+    names = [name for name, _, _ in events]
+    assert "vault.lock" in names
+    vault_index = names.index("vault.lock")
+    # Only the sync lock (handled by the caller) may go after the vault lock.
+    assert names[vault_index + 1:] == ["sync.lock"]
+    for name in ("credentials.json", "config.yaml", "state.db", "cache",
+                 "password:default:eufy", "token:garmin"):
+        assert name in names[:vault_index]
+    for name, lock_on_disk, held in events[:vault_index + 1]:
+        assert lock_on_disk and held, name
+    assert not shared.DATA_DIR.exists()
+
+
 def test_windows_uninstall_deletes_lock_files_only_after_release(tmp_path, monkeypatch):
     """Windows cannot delete an open file, so the lock files are skipped
     while held and deleted by _remove_lock_files afterwards."""
