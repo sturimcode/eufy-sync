@@ -38,6 +38,9 @@ import hashlib
 import json
 import logging
 import os
+import re
+import secrets
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -47,16 +50,28 @@ VAULT_ACCOUNT = "vault"
 
 # Windows Credential Manager caps one entry at ~2,560 bytes stored as UTF-16,
 # roughly 1,280 characters. A vault larger than CHUNK_LIMIT characters is split
-# across "vault:<gen>:<i>" entries so set_password never fails on Windows; the
-# "vault" entry then holds a small header naming the generation, the chunk
-# count and a checksum. Each save writes a fresh generation and switches the
-# header last, so an interrupted save never splices two vaults together.
-# Released versions wrote chunks as "vault:<i>"; those are still read and are
-# replaced on the next save. MAX_CHUNKS bounds the chunk count a header may
-# claim and how far a save probes for leftovers to delete, so a corrupt store
-# can never make either run away.
+# across "vault:<tag>:<i>" entries so set_password never fails on Windows; the
+# "vault" entry then holds a small header naming the tag, the chunk count and a
+# checksum. Each save writes its chunks under a fresh tag (the generation
+# number plus a random suffix, so two processes saving at once never share
+# chunk names), checks that the header is still the one it started from, and
+# switches the header last. An interrupted or overtaken save never splices two
+# vaults together.
+#
+# The keychain cannot list entries, so the "vault:journal" entry records every
+# tag a save may have left chunks under. Each completed save deletes the
+# chunks of the tag it replaced at once, and the chunks of any other journal
+# tag once it is older than JOURNAL_GRACE seconds (a younger one may belong to
+# a save still in progress in another process). Released versions wrote chunks
+# as "vault:<i>"; those are still read and are deleted by the next save.
+# MAX_CHUNKS bounds the chunk count a header may claim and how far a sweep
+# probes one tag, so a corrupt store can never make either run away.
 CHUNK_LIMIT = 1200
 MAX_CHUNKS = 40
+JOURNAL_ACCOUNT = "vault:journal"
+JOURNAL_GRACE = 600
+# Each entry is ~30 characters, so this stays well under CHUNK_LIMIT.
+MAX_JOURNAL = 24
 
 CRED_FILE = Path.home() / ".garmin-sync" / "credentials.json"
 
@@ -177,12 +192,22 @@ def _valid_count(value) -> bool:
     return type(value) is int and 1 <= value <= MAX_CHUNKS
 
 
+# "<gen>" (written by pre-release builds of the generation layout) or
+# "<gen>.<8 hex>". Anything else is never used to build an account name, so a
+# damaged header or journal cannot point a sweep at unrelated entries.
+_TAG_RE = re.compile(r"[0-9]{1,9}(\.[0-9a-f]{8})?")
+
+
+def _valid_tag(value) -> bool:
+    return isinstance(value, str) and _TAG_RE.fullmatch(value) is not None
+
+
 def _parse_header(raw: str) -> tuple:
     """Classify the "vault" entry. Returns one of:
 
-    ("single", vault)            the whole vault in one entry
-    ("legacy", count)            released-version chunks "vault:1".."vault:<count>"
-    ("gen", gen, count, sha256)  chunks "vault:<gen>:1".."vault:<gen>:<count>"
+    ("single", vault)                 the whole vault in one entry
+    ("legacy", count)                 released-version chunks "vault:1".."vault:<count>"
+    ("gen", tag, count, sha256, gen)  chunks "vault:<tag>:1".."vault:<tag>:<count>"
 
     Raises VaultCorruptError for anything else."""
     try:
@@ -200,7 +225,11 @@ def _parse_header(raw: str) -> tuple:
             and _valid_count(meta.get("chunks"))
             and isinstance(meta.get("sha256"), str)
         ):
-            return ("gen", meta["gen"], meta["chunks"], meta["sha256"])
+            # Headers written before chunk names carried a random suffix
+            # have no "tag"; their chunks are named by the generation alone.
+            tag = meta.get("tag", str(meta["gen"]))
+            if _valid_tag(tag):
+                return ("gen", tag, meta["chunks"], meta["sha256"], meta["gen"])
         raise _keychain_corrupt("the chunk header is malformed")
     if "__chunks__" in parsed:
         if _valid_count(parsed["__chunks__"]):
@@ -209,11 +238,11 @@ def _parse_header(raw: str) -> tuple:
     return ("single", parsed)
 
 
-def _chunk_account(gen: int | None, i: int) -> str:
-    # gen None is the layout released versions wrote ("vault:1", "vault:2").
-    if gen is None:
+def _chunk_account(tag: str | None, i: int) -> str:
+    # tag None is the layout released versions wrote ("vault:1", "vault:2").
+    if tag is None:
         return f"{VAULT_ACCOUNT}:{i}"
-    return f"{VAULT_ACCOUNT}:{gen}:{i}"
+    return f"{VAULT_ACCOUNT}:{tag}:{i}"
 
 
 def _assemble(layout: tuple) -> dict:
@@ -221,15 +250,15 @@ def _assemble(layout: tuple) -> dict:
     if layout[0] == "single":
         return _normalize_vault(layout[1])
     if layout[0] == "legacy":
-        gen, count, digest = None, layout[1], None
+        tag, count, digest = None, layout[1], None
     else:
-        _, gen, count, digest = layout
+        _, tag, count, digest, _ = layout
     pieces = []
     for i in range(1, count + 1):
         # A keyring failure here (locked, access denied) raises the
         # unreadable-keychain RuntimeError, same as the header read. A chunk
         # that comes back None is genuinely missing: the vault is damaged.
-        piece = _keychain_get(_chunk_account(gen, i))
+        piece = _keychain_get(_chunk_account(tag, i))
         if piece is None:
             raise _keychain_corrupt(f"chunk {i} of {count} is missing")
         pieces.append(piece)
@@ -261,8 +290,8 @@ def _load_vault_from_keychain() -> dict:
         return _assemble(_parse_header(fresh))
 
 
-def _delete_chunk_run(gen: int | None, start: int) -> None:
-    # Delete one generation's chunk entries from `start` up to the first gap.
+def _delete_chunk_run(tag: str | None, start: int = 1) -> None:
+    # Delete one tag's chunk entries from `start` up to the first gap.
     # Chunks are always written 1..N in order, so leftovers from an
     # interrupted save form an unbroken run. Deleting from the top down keeps
     # it unbroken if this sweep is itself cut short, so the next sweep still
@@ -270,7 +299,7 @@ def _delete_chunk_run(gen: int | None, start: int) -> None:
     import keyring
     run = []
     for i in range(start, MAX_CHUNKS + 1):
-        account = _chunk_account(gen, i)
+        account = _chunk_account(tag, i)
         if keyring.get_password(SERVICE_NAME, account) is None:
             break
         run.append(account)
@@ -281,99 +310,240 @@ def _delete_chunk_run(gen: int | None, start: int) -> None:
             pass
 
 
-def _sweep_chunks(prev_gen: int, keep_gen: int | None = None, keep_count: int = 0) -> None:
+def _read_header() -> tuple[str | None, tuple | None]:
+    """The raw "vault" entry and its parsed layout. The layout is None when
+    the entry is absent or this module cannot parse it."""
+    raw = _keychain_get(VAULT_ACCOUNT)
+    if raw is None:
+        return None, None
+    try:
+        return raw, _parse_header(raw)
+    except VaultCorruptError:
+        return raw, None
+
+
+def _layout_tag(layout: tuple | None) -> str | None:
+    """The chunk tag a parsed header points at, if any. A single-entry vault
+    written by a pre-release build may carry "__gen__", the generation whose
+    chunks it had just replaced; those may still need sweeping."""
+    if layout is None:
+        return None
+    if layout[0] == "gen":
+        return layout[1]
+    if layout[0] == "single":
+        gen = layout[1].get("__gen__")
+        if type(gen) is int and gen >= 1:
+            return str(gen)
+    return None
+
+
+def _layout_gen(layout: tuple | None) -> int:
+    if layout is not None and layout[0] == "gen":
+        return layout[4]
+    return 0
+
+
+def _read_journal() -> dict[str, float]:
+    """Tags that may still have chunk entries, with when each was recorded.
+    Best-effort: an unreadable or malformed journal reads as empty."""
+    import keyring
+    try:
+        raw = keyring.get_password(SERVICE_NAME, JOURNAL_ACCOUNT)
+        parsed = json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {
+        tag: float(t) for tag, t in parsed.items()
+        if _valid_tag(tag) and isinstance(t, (int, float)) and not isinstance(t, bool)
+    }
+
+
+def _write_journal(journal: dict[str, float]) -> None:
+    import keyring
+    if not journal:
+        try:
+            keyring.delete_password(SERVICE_NAME, JOURNAL_ACCOUNT)
+        except Exception:
+            pass
+        return
+    newest = sorted(journal.items(), key=lambda item: item[1], reverse=True)[:MAX_JOURNAL]
+    keyring.set_password(SERVICE_NAME, JOURNAL_ACCOUNT, json.dumps(dict(newest)))
+
+
+def _journal_add(entries: dict[str, float]) -> None:
+    journal = _read_journal()
+    added = {tag: t for tag, t in entries.items() if tag not in journal}
+    if added:
+        journal.update(added)
+        _write_journal(journal)
+
+
+def _journal_remove(tags: set[str]) -> None:
+    # Re-read right before writing so entries another process added since
+    # this one last looked are kept.
+    journal = _read_journal()
+    if tags & journal.keys():
+        _write_journal({tag: t for tag, t in journal.items() if tag not in tags})
+
+
+def _sweep_chunks(prev_tag: str | None, force: bool = False) -> None:
     """Best-effort removal of chunk entries that no header points at.
 
-    prev_gen is the generation the header named before this change (0 when
-    it named none). Its neighbours are swept too: prev_gen - 1 catches a
-    cleanup a crash cut short, and prev_gen + 1 catches chunks a crashed save
-    wrote before it could switch the header. keep_gen/keep_count protect the
-    chunks the header now references. The released-version "vault:i" names
-    are probed until a save after generation 1 (the first one written after
-    them) has swept them."""
+    Runs after a save has switched the header. Deletes the released-version
+    "vault:i" chunks, the chunks of prev_tag (the tag the header named before
+    this save), and the chunks of every journal tag that is older than
+    JOURNAL_GRACE, or every journal tag at all when force is set. The tag the
+    header names right now is always kept, even if another process switched
+    it after this save did."""
     try:
-        if prev_gen <= 1:
-            _delete_chunk_run(None, 1)
-        for gen in (prev_gen - 1, prev_gen, prev_gen + 1):
-            if gen < 1:
+        _, layout = _read_header()
+        if layout is None and _keychain_get(VAULT_ACCOUNT) is not None:
+            # A header this module cannot parse might still point somewhere;
+            # deleting nothing is the safe answer.
+            return
+        current = layout[1] if layout is not None and layout[0] == "gen" else None
+        if layout is None or layout[0] != "legacy":
+            _delete_chunk_run(None)
+        if prev_tag is not None and prev_tag != current:
+            _delete_chunk_run(prev_tag)
+        now = time.time()
+        swept = set()
+        for tag, recorded in _read_journal().items():
+            if tag == current:
                 continue
-            _delete_chunk_run(gen, keep_count + 1 if gen == keep_gen else 1)
+            if force or tag == prev_tag or now - recorded >= JOURNAL_GRACE:
+                if tag != prev_tag:
+                    _delete_chunk_run(tag)
+                swept.add(tag)
+        if prev_tag is not None:
+            swept.add(prev_tag)
+        _journal_remove(swept)
+        if set(_read_journal()) <= {current}:
+            # Only the live tag left: nothing to track.
+            _write_journal({})
     except Exception:
         # The new vault is already in place; leftovers cost tidiness, not
         # data, so a failed cleanup must not fail the save.
         pass
 
 
-def _current_gen() -> int:
-    """The generation the stored header names, or 0 for none. A header this
-    module cannot parse counts as 0: saves only ever follow a successful
-    load, so the next sweep still covers whatever it can identify."""
-    raw = _keychain_get(VAULT_ACCOUNT)
-    if raw is None:
-        return 0
-    try:
-        layout = _parse_header(raw)
-    except VaultCorruptError:
-        return 0
-    if layout[0] == "gen":
-        return layout[1]
-    if layout[0] == "single":
-        gen = layout[1].get("__gen__")
-        return gen if type(gen) is int and gen >= 1 else 0
-    return 0
+class VaultWriteConflict(RuntimeError):
+    """Another process saved the keychain vault while this save was running.
+
+    This save was abandoned before it switched the header, so the vault holds
+    the other process's complete write. Retrying the command reads that write
+    and applies this change on top of it."""
+
+
+_WRITE_CONFLICT = (
+    "Another eufy-sync process changed the stored credentials while this one "
+    "was saving, so this change was not saved. The stored credentials are "
+    "intact. Run the command again."
+)
 
 
 def _save_vault_to_keychain(vault: dict) -> None:
     import keyring
-    prev_gen = _current_gen()
+    start_raw, start_layout = _read_header()
+    prev_tag = _layout_tag(start_layout)
+    pending = {}
+    if prev_tag is not None:
+        # Recorded before the switch, so a sweep a crash cuts short is
+        # finished by a later save.
+        pending[prev_tag] = 0.0
+        if "." not in prev_tag:
+            # Pre-release generation layout: a crashed save there left its
+            # chunks at the neighbouring generation numbers.
+            gen = int(prev_tag)
+            for neighbour in (gen - 1, gen + 1):
+                if neighbour >= 1:
+                    pending[str(neighbour)] = 0.0
     # json.dumps escapes non-ASCII by default, so each character is one
     # UTF-16 unit and a CHUNK_LIMIT-character entry stays under the Windows cap.
     payload = json.dumps(vault)
-    # A vault that shrinks back into one entry keeps the last chunk generation
-    # as "__gen__" (dropped on load), so a sweep that a crash cuts short can
-    # still find that generation's leftovers on the next save.
-    single = json.dumps({**vault, "__gen__": prev_gen}) if prev_gen else payload
-    if len(single) <= CHUNK_LIMIT:
-        keyring.set_password(SERVICE_NAME, VAULT_ACCOUNT, single)
-        _sweep_chunks(prev_gen)
+
+    if len(payload) <= CHUNK_LIMIT:
+        if pending:
+            _journal_add(pending)
+        if _keychain_get(VAULT_ACCOUNT) != start_raw:
+            raise VaultWriteConflict(_WRITE_CONFLICT)
+        keyring.set_password(SERVICE_NAME, VAULT_ACCOUNT, payload)
+        _sweep_chunks(prev_tag)
         return
-    # The new chunks go under a generation no header references yet, and the
-    # single-entry header write is the commit point. A save killed before it
-    # leaves the old vault readable; one killed after it leaves the new vault
-    # readable plus leftovers that the next save sweeps.
-    gen = prev_gen + 1
+
+    # The new chunks go under a tag no header references and no other writer
+    # can pick, and the header write is the commit point. A save killed
+    # before it leaves the old vault readable; one killed after it leaves the
+    # new vault readable. Either way the journal names the leftovers.
+    tag = f"{_layout_gen(start_layout) + 1}.{secrets.token_hex(4)}"
+    pending[tag] = time.time()
+    _journal_add(pending)
     chunks = [payload[i:i + CHUNK_LIMIT] for i in range(0, len(payload), CHUNK_LIMIT)]
-    for i, chunk in enumerate(chunks, start=1):
-        keyring.set_password(SERVICE_NAME, _chunk_account(gen, i), chunk)
+    try:
+        for i, chunk in enumerate(chunks, start=1):
+            keyring.set_password(SERVICE_NAME, _chunk_account(tag, i), chunk)
+        # Commit only on top of the header this save's vault was read under.
+        # Another writer that switched it in the meantime holds the newer
+        # vault; overwriting its header would also orphan its chunks.
+        if _keychain_get(VAULT_ACCOUNT) != start_raw:
+            raise VaultWriteConflict(_WRITE_CONFLICT)
+    except Exception:
+        try:
+            _delete_chunk_run(tag)
+            _journal_remove({tag})
+        except Exception:
+            pass
+        raise
     header = {
         "__vault__": {
-            "gen": gen,
+            "gen": _layout_gen(start_layout) + 1,
+            "tag": tag,
             "chunks": len(chunks),
             "sha256": hashlib.sha256(payload.encode()).hexdigest(),
         }
     }
     keyring.set_password(SERVICE_NAME, VAULT_ACCOUNT, json.dumps(header))
-    _sweep_chunks(prev_gen, keep_gen=gen, keep_count=len(chunks))
+    _sweep_chunks(prev_tag)
 
 
 def _delete_keychain_vault() -> None:
-    """Best-effort removal of the vault header and every chunk entry."""
+    """Best-effort removal of the vault header, every chunk entry this
+    module can find, and the journal."""
     import keyring
     try:
-        prev_gen = _current_gen()
+        _, layout = _read_header()
     except Exception:
-        prev_gen = 0
+        layout = None
     try:
         keyring.delete_password(SERVICE_NAME, VAULT_ACCOUNT)
     except Exception:
         pass
-    _sweep_chunks(prev_gen)
-    if prev_gen:
-        # Released-version chunks an earlier install left behind.
+    tags = set()
+    tag = _layout_tag(layout)
+    if tag is not None:
+        tags.add(tag)
+        if "." not in tag:
+            tags.update(str(g) for g in (int(tag) - 1, int(tag) + 1) if g >= 1)
+    try:
+        tags.update(_read_journal())
+    except Exception:
+        pass
+    for tag in tags:
         try:
-            _delete_chunk_run(None, 1)
+            _delete_chunk_run(tag)
         except Exception:
             pass
+    try:
+        # Released-version chunks an earlier install left behind.
+        _delete_chunk_run(None)
+    except Exception:
+        pass
+    try:
+        keyring.delete_password(SERVICE_NAME, JOURNAL_ACCOUNT)
+    except Exception:
+        pass
 
 
 def _load_vault_from_file() -> dict:
