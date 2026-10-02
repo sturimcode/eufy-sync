@@ -200,6 +200,21 @@ def test_matching_weight_is_verified_noop_without_put():
     client.close()
 
 
+@pytest.mark.parametrize("weight", [25.0, 301.0, float("nan")])
+def test_out_of_range_weight_is_skipped_without_any_request(weight):
+    from eufy_sync.sync import UnsupportedMeasurementError, _is_permanent
+
+    def handler(request):
+        raise AssertionError("no request for a weight Zwift cannot take")
+
+    client = _authenticated_client(handler)
+    with pytest.raises(UnsupportedMeasurementError) as exc:
+        client.update_weight(weight)
+    # Permanent, so _retry gives up at once instead of sleeping through retries.
+    assert _is_permanent(exc.value)
+    client.close()
+
+
 def test_204_and_wrong_readback_never_count_as_success():
     def handler(request):
         if request.method == "PUT":

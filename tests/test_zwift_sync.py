@@ -253,3 +253,31 @@ def test_invalid_target_fails_before_any_client_is_constructed(tmp_path: Path, t
 
     eufy_class.assert_not_called()
     state.close()
+
+
+def test_zwift_out_of_range_weight_is_skipped_without_retry_or_error(tmp_path: Path):
+    from eufy_sync.sync import UnsupportedMeasurementError
+
+    state = SyncState(tmp_path / "state.db")
+    user = _user(garmin=True)
+    # Valid for Garmin (22.7 kg floor) but under Zwift's 30 kg floor.
+    light = _measurement(25.0, datetime(2026, 5, 10, tzinfo=timezone.utc))
+    garmin = MagicMock()
+    garmin.has_weight_on_date.return_value = False
+    garmin.upload_body_composition.return_value = {"ok": True}
+    zwift = MagicMock()
+    zwift.update_weight.side_effect = UnsupportedMeasurementError("Zwift only accepts 30 to 300 kg, got 25.0 kg")
+
+    with patch("eufy_sync.sync.EufyClient", return_value=_source([light])), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=garmin), \
+         patch("eufy_sync.zwift_client.ZwiftClient", return_value=zwift), \
+         patch("eufy_sync.sync.time.sleep") as sleep:
+        counts, errors = sync_user(user, state, backfill_days=7)
+
+    assert errors == {}
+    assert counts == {"garmin": 1, "zwift": 0}
+    zwift.update_weight.assert_called_once_with(25.0)
+    assert not state.is_synced(user.name, light.measurement_id, "zwift")
+    # Only the inter-upload pause after Garmin; no retry backoff.
+    assert all(call.args[0] <= 1 for call in sleep.call_args_list)
+    state.close()
