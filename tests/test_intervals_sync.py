@@ -535,6 +535,7 @@ def local_tz(monkeypatch):
     time_module.tzset()
 
 
+@pytest.mark.skipif(not hasattr(__import__("time"), "tzset"), reason="time.tzset is POSIX-only")
 def test_a_timezone_change_does_not_move_a_sent_weigh_in(tmp_path: Path, local_tz):
     """UTC, then UTC+2: A (23:30 UTC) stays on the date it was sent to, and
     an older B fetched later cannot replace it there."""
