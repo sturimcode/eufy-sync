@@ -10,7 +10,7 @@ It checks configuration, credentials, target authorization, the local database, 
 
 ## Credential storage
 
-Credentials travel over HTTPS to their respective services: Eufy, Garmin, Strava, and Zwift. They are never logged or sent elsewhere. The only other outbound request is a weekly version check to `pypi.org`, without credentials.
+Credentials travel over HTTPS to their respective services: Eufy, Garmin, Strava, Zwift, and Intervals.icu. They are never logged or sent elsewhere. The only other outbound request is a weekly version check to `pypi.org`, without credentials.
 
 Passwords and OAuth tokens are stored in one place:
 
@@ -20,7 +20,7 @@ Passwords and OAuth tokens are stored in one place:
 
 The keychain is used whenever it works. Systems without one fall back to the file automatically. `eufy-sync --use-file-store` moves existing credentials to the file and keeps using it; `eufy-sync --use-keychain` moves them back. A credentials file that was not adopted with `--use-file-store` does not override a working keychain. On Windows, file fallback relies on the user profile's permissions because Windows does not honor POSIX file modes.
 
-`~/.garmin-sync/config.yaml` contains email addresses, the selected Eufy profile ID, and the public Strava client ID. It is written with `600` permissions on systems that support POSIX modes. Passwords and the Strava client secret remain in the credential store.
+`~/.garmin-sync/config.yaml` contains email addresses, the selected Eufy profile ID, the public Strava client ID, and the Intervals.icu athlete ID. It is written with `600` permissions on systems that support POSIX modes. Passwords, the Strava client secret, and the Intervals.icu API key remain in the credential store.
 
 ## Garmin login recovery
 
@@ -81,9 +81,9 @@ The complete timer setup is in [Headless Linux](headless-linux.md).
 Eufy Cloud  ->  eufy_client.py  ->  transform   ->  garmin_client.py  ->  Garmin (body comp)
 (pull)          (auth)              (filter,    ->  strava_client.py  ->  Strava (weight)
                                     dedup,      ->  zwift_client.py   ->  Zwift (weight)
-                                    state.db)
+                                    state.db)   ->  intervals_client.py  ->  Intervals.icu (weight, body fat per day)
 ```
 
-Each run pulls Eufy history and checks the local SQLite database for what each target has already received. Garmin gets new full body-composition records through python-garminconnect's upload API. Dates Garmin already holds are skipped, which helps avoid duplicates when two machines sync the same account. Strava and Zwift receive the latest eligible current weight. Successful deliveries are recorded in the database; Zwift is recorded only after eufy-sync reads the profile again and verifies the saved weight.
+Each run pulls Eufy history and checks the local SQLite database for what each target has already received. Garmin gets new full body-composition records through python-garminconnect's upload API. Dates Garmin already holds are skipped, which helps avoid duplicates when two machines sync the same account. Strava and Zwift receive the latest eligible current weight. Intervals.icu gets each day's newest weigh-in written to that day's wellness record, which replaces anything eufy-sync sent for the same day earlier. Successful deliveries are recorded in the database; Zwift is recorded only after eufy-sync reads the profile again and verifies the saved weight.
 
-Garmin, Eufy, and Zwift use unofficial APIs in this project. Strava uses its official API. Changes to any service can require an eufy-sync update.
+Garmin, Eufy, and Zwift use unofficial APIs in this project. Strava and Intervals.icu use their official APIs. Changes to any service can require an eufy-sync update.

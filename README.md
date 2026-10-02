@@ -6,7 +6,7 @@
 ![Python](https://img.shields.io/pypi/pyversions/eufy-sync)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Syncs body composition from a Eufy smart scale to Garmin Connect, plus current weight to Strava and Zwift.
+Syncs body composition from a Eufy smart scale to Garmin Connect, daily weight and body fat to Intervals.icu, and current weight to Strava and Zwift.
 
 > macOS, Windows, and headless Linux. Needs Python 3.12+ and a terminal.
 
@@ -17,10 +17,11 @@ Syncs body composition from a Eufy smart scale to Garmin Connect, plus current w
 | Garmin Connect | Full body composition: weight, body fat, muscle mass, bone mass, hydration, BMR, visceral fat, metabolic age |
 | Strava | Current weight |
 | Zwift (experimental, opt-in) | Current weight, verified after saving |
+| Intervals.icu | Weight and body fat on each day's wellness record |
 
 ## Install
 
-You need a Eufy scale with cloud sync and an account with at least one target: Garmin Connect, Strava, or Zwift.
+You need a Eufy scale with cloud sync and an account with at least one target: Garmin Connect, Strava, Zwift, or Intervals.icu.
 
 Each installer block below can be pasted in whole; its lines run one after another.
 
@@ -66,9 +67,9 @@ Open a new terminal window so it picks up the newly installed command, then run:
 eufy-sync
 ```
 
-Setup asks for your Eufy login, then lets you choose Garmin Connect, Strava, and/or Zwift. Pick any combination, including Zwift alone. It asks for the credentials each selected service needs, lets you choose your profile on a shared Eufy account, and runs the first sync. Zwift is opt-in and marked experimental.
+Setup asks for your Eufy login, then lets you choose Garmin Connect, Strava, Zwift, and/or Intervals.icu. Pick any combination, including a single target. It asks for the credentials each selected service needs, lets you choose your profile on a shared Eufy account, and runs the first sync. Zwift is opt-in and marked experimental.
 
-If you want to add another target later, follow [Adding Strava](#adding-strava) or [Adding Zwift](#adding-zwift-experimental).
+If you want to add another target later, follow [Adding Strava](#adding-strava), [Adding Intervals.icu](#adding-intervalsicu), or [Adding Zwift](#adding-zwift-experimental).
 
 > **Cloned the repo?** Run install commands from outside the repo directory to avoid path conflicts, e.g. `cd /tmp && pipx install eufy-sync`.
 
@@ -106,13 +107,24 @@ Strava requires an active subscription to create a new API application. This is 
 3. Run `eufy-sync --setup-strava` and enter the Client ID and Secret.
 4. Authorize eufy-sync in the browser when it opens.
 
+## Adding Intervals.icu
+
+1. Open <https://intervals.icu/settings> and find **Developer Settings** near the bottom. Generate an API key there if you don't have one.
+2. Run `eufy-sync --setup-intervals` and paste the key.
+
+Setup reads your athlete profile with the key before saving anything, so a mistyped key changes nothing. It looks up your athlete ID on its own. The key goes into the credential store; `config.yaml` holds only the athlete ID.
+
+Intervals.icu keeps one wellness record per day. Each sync sets that day's weight, plus body fat when the scale measured it. If you weigh in twice in one day, the later weigh-in wins. The day is your computer's local date, the same date Garmin gets. Sleep, HRV, and the other wellness fields are left alone. Intervals.icu has no fields for muscle mass, bone mass, or the rest of Garmin's body composition, so those stay in Garmin.
+
+The first sync looks back seven days. To fill in older days, run `eufy-sync --target intervals --backfill-days 30`. If Intervals.icu stops accepting the key, a notification asks you to run `eufy-sync --setup-intervals` again. `eufy-sync --disconnect-intervals` removes this target and its key.
+
 ## Adding Zwift (experimental)
 
 To add Zwift to an existing installation, run `eufy-sync --setup-zwift` and enter your Zwift email and password. Setup checks that it can read your Zwift profile before enabling sync, then saves the login in the existing credential store. Later runs reuse the saved login and renew the session automatically.
 
 Run `eufy-sync` to sync, or enable [automatic sync](#automatic-sync). Zwift receives only the newest valid weight for your selected Eufy profile, not body composition or weight history. Each update reads your current profile, changes its weight, then reads it again to verify the save. If the weight already matches, the tool records a verified match without sending another update.
 
-This uses an unofficial Zwift route and is experimental. It has been verified on a real account, but that does not establish reliability across every account or future Zwift changes. Zwift failures are reported separately so Garmin and Strava can continue.
+This uses an unofficial Zwift route and is experimental. It has been verified on a real account, but that does not establish reliability across every account or future Zwift changes. Zwift failures are reported separately so the other targets can continue.
 
 Use `eufy-sync --target zwift --dry-run` to preview a run. The first sync looks back seven days; if your latest weigh-in is older, use `eufy-sync --target zwift --backfill-days 30`. Older backfill cannot replace a newer weight already recorded as synced. `eufy-sync --disconnect-zwift` removes this target and its saved login from the installation.
 
@@ -122,7 +134,7 @@ There is no telemetry. Credentials go over HTTPS only to the service they belong
 
 Eufy can send a raw Wi-Fi weight to its cloud before the phone app processes the full body composition. If only weight syncs, open the Eufy app, wait for it to process the weigh-in, then run `eufy-sync` again.
 
-Garmin, Eufy, and Zwift use unofficial APIs here; the Strava integration uses its official API. Any of these services can change. Headless login renewal is designed to recover automatically, but cannot be guaranteed to keep working after a service changes its login flow.
+Garmin, Eufy, and Zwift use unofficial APIs here; Strava and Intervals.icu use their official APIs. Any of these services can change. Headless login renewal is designed to recover automatically, but cannot be guaranteed to keep working after a service changes its login flow.
 
 ## Tests
 

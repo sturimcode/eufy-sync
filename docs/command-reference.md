@@ -20,14 +20,16 @@ eufy-sync --version            # show the installed version
 eufy-sync --setup-strava       # add or reconnect Strava
 eufy-sync --setup-zwift        # add experimental Zwift weight sync
 eufy-sync --disconnect-zwift   # remove Zwift and its saved login
-eufy-sync --target garmin      # sync one target (garmin, strava, or zwift)
+eufy-sync --setup-intervals    # add Intervals.icu, or replace its API key
+eufy-sync --disconnect-intervals  # remove Intervals.icu and its API key
+eufy-sync --target garmin      # sync one target (garmin, strava, zwift, or intervals)
 eufy-sync --select-profile     # choose a profile on a shared Eufy account
 eufy-sync --reauth             # log back into every configured target
 eufy-sync --reauth garmin      # log back into one target (garmin, strava, or zwift)
 eufy-sync --update-password    # change stored Eufy, Garmin, or Zwift passwords
 ```
 
-On a fresh installation, run `eufy-sync` and choose any combination of Garmin, Strava, and experimental Zwift. The separate `--setup-zwift` command also supports a fresh Zwift-only installation, but does not offer automatic scheduling; run `eufy-sync --install-agent` afterward on macOS or Windows if needed.
+On a fresh installation, run `eufy-sync` and choose any combination of Garmin, Strava, experimental Zwift, and Intervals.icu. `--setup-intervals` checks the key with a read before saving it; to change the key later, run it again. Intervals.icu has no `--reauth` or `--update-password` step: an API key has no login session to renew. The separate `--setup-zwift` command also supports a fresh Zwift-only installation, but does not offer automatic scheduling; run `eufy-sync --install-agent` afterward on macOS or Windows if needed.
 
 ## Automation and storage
 
@@ -52,7 +54,7 @@ eufy-sync --repair-days 30     # resend Garmin history even when recorded as del
 
 `--repair-days` is for Garmin history that was deleted from Garmin Connect or filed under the wrong date by eufy-sync versions before 1.9.0. It resends Garmin measurements in the window even when the local database says they were delivered. It still leaves alone dates eufy-sync never uploaded when Garmin already holds data from another source.
 
-Delete wrong-dated entries in Garmin Connect before repair. eufy-sync cannot delete them, so otherwise they remain beside the corrected entries. Strava and Zwift store current weight rather than history; in repair mode they receive only the newest eligible current weight.
+Delete wrong-dated entries in Garmin Connect before repair. eufy-sync cannot delete them, so otherwise they remain beside the corrected entries. Strava and Zwift store current weight rather than history; in repair mode they receive only the newest eligible current weight. Intervals.icu keeps one record per day, so repair resends each day's newest weigh-in.
 
 `--repair-days` and `--backfill-days` cannot be used together. Both can be limited to one target with `--target` and previewed with `--dry-run`.
 

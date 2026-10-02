@@ -12,7 +12,7 @@ source $HOME/.local/bin/env
 uv tool install eufy-sync
 ```
 
-Run `eufy-sync` once in an interactive SSH session. Setup lets you choose Garmin, Strava, and/or experimental Zwift. Garmin login and any two-factor code work in the terminal.
+Run `eufy-sync` once in an interactive SSH session. Setup lets you choose Garmin, Strava, experimental Zwift, and/or Intervals.icu. Garmin login and any two-factor code work in the terminal.
 
 For Strava, forward the authorization callback port when connecting from your computer. Replace `user@server` with your SSH login:
 
