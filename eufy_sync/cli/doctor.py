@@ -153,7 +153,9 @@ def _check_keychain(report) -> None:
             return
         report("PASS", "keychain", active_store_label())
     except Exception as e:
-        report("PASS", "keychain", f"file store (no keychain prompts) ({e})")
+        # A damaged or unreadable credentials file now raises here instead
+        # of quietly falling back to the keychain.
+        report("FAIL", "keychain", str(e))
 
 
 def _check_eufy_token(report, user):

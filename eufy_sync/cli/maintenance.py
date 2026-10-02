@@ -299,47 +299,64 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
         except Exception:
             pass
 
-    # Clear the keychain vault. On a file-backend machine this gate skips the
-    # deletes, which is safe only because credentials.json lives inside data_dir
-    # and is erased by the rmtree below; keep them together if CRED_FILE ever
-    # moves outside ~/.garmin-sync.
-    from eufy_sync.credentials import _keyring_available, delete_password, delete_token
-    if _keyring_available():
-        # Best-effort: a locked keychain makes the vault read raise, and a
-        # half-finished uninstall that leaves the data dir behind (the rmtree
-        # is below) plus a raw traceback is worse than skipping this. The
-        # rmtree still erases a file-backed vault under data_dir.
-        try:
-            for name in user_names:
-                # "strava" here is the API app's client secret, not an account
-                # password; it moved into the vault alongside the other two.
-                for suffix in ["eufy", "garmin", "strava", "zwift"]:
-                    delete_password(f"{name}:{suffix}")
-            delete_token("eufy")
-            delete_token("garmin")
-            delete_token("strava")
-            delete_token("zwift")
-            delete_token("zwift_probe")
-        except Exception:
-            print("Note: could not clear keychain entries (the keychain may be locked).")
+    from eufy_sync.cli.lock import LOCK_NAME
+    from eufy_sync.credentials import (
+        VAULT_LOCK_NAME,
+        _keyring_available,
+        delete_password,
+        delete_token,
+        vault_lock,
+    )
 
-    # Remove data directory. A kept DB at a custom --db path lives outside
-    # data_dir, so only the default location needs the selective sweep.
-    # The sync lock file is skipped: --uninstall holds it open, and Windows
-    # refuses to delete an open file. _remove_lock_file clears it once the
-    # lock is released.
-    preserve_default_db = keep_db and db_path == default_db_path and db_path.exists()
-    if data_dir.exists():
-        from eufy_sync.cli.lock import LOCK_NAME
-        keep = {LOCK_NAME, "state.db"} if preserve_default_db else {LOCK_NAME}
-        for item in data_dir.iterdir():
-            if item.name in keep:
-                continue
-            if item.is_dir():
-                shutil.rmtree(item)
-            else:
-                item.unlink()
-        _remove_dir_if_empty(data_dir)
+    # One vault lock across clearing the vault and deleting credentials.json,
+    # so no credential write can land in between.
+    with vault_lock():
+        # Clear the keychain vault. On a file-backend machine this gate skips the
+        # deletes, which is safe only because credentials.json lives inside data_dir
+        # and is erased by the rmtree below; keep them together if CRED_FILE ever
+        # moves outside ~/.garmin-sync.
+        if _keyring_available():
+            # Best-effort: a locked keychain makes the vault read raise, and a
+            # half-finished uninstall that leaves the data dir behind (the rmtree
+            # is below) plus a raw traceback is worse than skipping this. The
+            # rmtree still erases a file-backed vault under data_dir.
+            try:
+                for name in user_names:
+                    # "strava" here is the API app's client secret, not an account
+                    # password; it moved into the vault alongside the other two.
+                    for suffix in ["eufy", "garmin", "strava", "zwift"]:
+                        delete_password(f"{name}:{suffix}")
+                delete_token("eufy")
+                delete_token("garmin")
+                delete_token("strava")
+                delete_token("zwift")
+                delete_token("zwift_probe")
+            except Exception:
+                print("Note: could not clear keychain entries (the keychain may be locked).")
+
+        # Remove data directory. A kept DB at a custom --db path lives outside
+        # data_dir, so only the default location needs the selective sweep.
+        # The sync lock file is skipped: --uninstall holds it open, and the
+        # caller deletes it (see _remove_lock_files). The vault lock file is
+        # held too; on POSIX the sweep deletes it while it is still held, so no
+        # other process can lock it between release and delete. Windows refuses
+        # to delete an open file, so there it is skipped and deleted after
+        # release instead.
+        preserve_default_db = keep_db and db_path == default_db_path and db_path.exists()
+        if data_dir.exists():
+            keep = {LOCK_NAME}
+            if sys.platform == "win32":
+                keep.add(VAULT_LOCK_NAME)
+            if preserve_default_db:
+                keep.add("state.db")
+            for item in data_dir.iterdir():
+                if item.name in keep:
+                    continue
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+            _remove_dir_if_empty(data_dir)
 
     # A custom --config/--db path lives outside data_dir, so it survives the
     # sweep above and must be removed explicitly.
@@ -365,12 +382,20 @@ def _remove_dir_if_empty(path: Path) -> None:
         pass
 
 
-def _remove_lock_file(data_dir: Path) -> None:
-    """Delete the sync lock file left by --uninstall, after it is released,
-    and the data dir with it when nothing else remains there."""
+def _remove_lock_files(data_dir: Path) -> None:
+    """Finish --uninstall once its locks are released.
+
+    On Windows the lock files could not be deleted while open, so they go
+    now; another process that has one open blocks the delete, which keeps it
+    safe. On POSIX they were already deleted while still held, and deleting
+    now could remove a lock file another process has just created and
+    locked. Either way the data dir goes too when nothing else is left."""
     from eufy_sync.cli.lock import LOCK_NAME
-    try:
-        (data_dir / LOCK_NAME).unlink(missing_ok=True)
-    except OSError:
-        return
+    from eufy_sync.credentials import VAULT_LOCK_NAME
+    if sys.platform == "win32":
+        for name in (LOCK_NAME, VAULT_LOCK_NAME):
+            try:
+                (data_dir / name).unlink(missing_ok=True)
+            except OSError:
+                pass
     _remove_dir_if_empty(data_dir)

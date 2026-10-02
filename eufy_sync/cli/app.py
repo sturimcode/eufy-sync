@@ -207,11 +207,14 @@ def _main() -> None:
 
     # Handle full uninstall
     if args.uninstall:
+        from eufy_sync.cli import lock
         with _credential_lock("--uninstall"):
             removed = maintenance._uninstall(shared.DATA_DIR, config_path=config_path, db_path=db_path)
+            if removed:
+                # POSIX: delete the sync lock file before releasing it.
+                lock.unlink_while_held()
         if removed:
-            # The lock file outlives the sweep because it was held open.
-            maintenance._remove_lock_file(shared.DATA_DIR)
+            maintenance._remove_lock_files(shared.DATA_DIR)
         return
 
     # Handle credential store mode switches

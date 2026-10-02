@@ -31,17 +31,31 @@ for the same reason: reading it as empty would let the next save wipe it.
 A lazy, one-time migration promotes secrets from the old per-item keychain
 layout (one keyring account per password/token) into the vault the first
 time each one is looked up.
+
+Every change to stored credentials (store, delete, migration, switching
+stores) holds the vault lock, an exclusive OS lock on ~/.garmin-sync/
+vault.lock, from the moment it reads the vault until its cleanup is done.
+Two processes therefore never interleave a read-modify-write: the second one
+waits (up to VAULT_LOCK_TIMEOUT seconds) and then works on the first one's
+result. A lock that cannot be created or acquired raises VaultLockError and
+nothing is written. Reads do not take the lock.
 """
 from __future__ import annotations
 
+import contextlib
+import functools
 import hashlib
 import json
 import logging
 import os
 import re
 import secrets
+import threading
 import time
 from pathlib import Path
+from typing import Callable, Iterator
+
+from eufy_sync import file_lock
 
 logger = logging.getLogger(__name__)
 
@@ -53,27 +67,102 @@ VAULT_ACCOUNT = "vault"
 # across "vault:<tag>:<i>" entries so set_password never fails on Windows; the
 # "vault" entry then holds a small header naming the tag, the chunk count and a
 # checksum. Each save writes its chunks under a fresh tag (the generation
-# number plus a random suffix, so two processes saving at once never share
-# chunk names), checks that the header is still the one it started from, and
-# switches the header last. An interrupted or overtaken save never splices two
-# vaults together.
+# number plus a random suffix) and switches the header last, so a save killed
+# at any step leaves either the old vault or the new one readable, never a
+# splice of the two.
 #
 # The keychain cannot list entries, so the "vault:journal" entry records every
-# tag a save may have left chunks under. Each completed save deletes the
-# chunks of the tag it replaced at once, and the chunks of any other journal
-# tag once it is older than JOURNAL_GRACE seconds (a younger one may belong to
-# a save still in progress in another process). Released versions wrote chunks
-# as "vault:<i>"; those are still read and are deleted by the next save.
-# MAX_CHUNKS bounds the chunk count a header may claim and how far a sweep
-# probes one tag, so a corrupt store can never make either run away.
+# tag a save may have left chunks under. Saves only run under the vault lock,
+# so no other save can be in progress: every journal tag the live header does
+# not name is a leftover of a finished or crashed save, and each save deletes
+# them all once its header is in place. Released versions wrote chunks as
+# "vault:<i>"; those are still read and are deleted by the next save.
+#
+# MAX_CHUNKS caps how many chunks a save writes (a larger vault is refused
+# before anything is written) and so how many a header of this layout may
+# claim. Released versions had no cap, so a "vault:<i>" header of any size is
+# still read; its chunks end at the first missing one either way.
 CHUNK_LIMIT = 1200
 MAX_CHUNKS = 40
 JOURNAL_ACCOUNT = "vault:journal"
-JOURNAL_GRACE = 600
-# Each entry is ~30 characters, so this stays well under CHUNK_LIMIT.
+# Each entry is ~20 characters, so this stays well under CHUNK_LIMIT.
 MAX_JOURNAL = 24
 
 CRED_FILE = Path.home() / ".garmin-sync" / "credentials.json"
+
+VAULT_LOCK_NAME = "vault.lock"
+VAULT_LOCK_TIMEOUT = 30.0
+
+
+class VaultLockError(RuntimeError):
+    """The vault lock could not be created or was not released in time.
+    Nothing was written."""
+
+
+def vault_lock_path() -> Path:
+    # Next to CRED_FILE, read at call time: tests redirect CRED_FILE. The
+    # file is never deleted in normal use; only --uninstall removes it.
+    return CRED_FILE.parent / VAULT_LOCK_NAME
+
+
+# One holder per process: the thread lock serializes threads (and makes the
+# lock reentrant for nested calls such as a migration inside a store), and
+# the first entry takes the OS lock that serializes processes.
+_thread_lock = threading.RLock()
+_lock_depth = 0
+_lock_fd: int | None = None
+
+
+@contextlib.contextmanager
+def vault_lock() -> Iterator[None]:
+    """Hold the exclusive vault lock for the block. Reentrant within a
+    process. Raises VaultLockError, writing nothing, when the lock file
+    cannot be opened or another process keeps the lock past
+    VAULT_LOCK_TIMEOUT seconds."""
+    global _lock_depth, _lock_fd
+    deadline = time.monotonic() + VAULT_LOCK_TIMEOUT
+    if not _thread_lock.acquire(timeout=VAULT_LOCK_TIMEOUT):
+        raise VaultLockError(_VAULT_BUSY)
+    try:
+        if _lock_depth == 0:
+            path = vault_lock_path()
+            try:
+                fd = file_lock.acquire(path, max(0.0, deadline - time.monotonic()))
+            except OSError as e:
+                raise VaultLockError(
+                    f"The credential lock file {path} could not be created "
+                    f"({e.strerror or e}), so nothing was saved. Check that "
+                    f"{path.parent} is writable and retry."
+                ) from e
+            if fd is None:
+                raise VaultLockError(_VAULT_BUSY)
+            _lock_fd = fd
+        _lock_depth += 1
+        try:
+            yield
+        finally:
+            _lock_depth -= 1
+            if _lock_depth == 0:
+                fd, _lock_fd = _lock_fd, None
+                file_lock.release(fd)
+    finally:
+        _thread_lock.release()
+
+
+_VAULT_BUSY = (
+    "Another eufy-sync process kept the stored credentials locked for "
+    f"{int(VAULT_LOCK_TIMEOUT)} seconds, so nothing was saved. Retry when it "
+    "finishes."
+)
+
+
+def _locked(fn: Callable) -> Callable:
+    """Run fn under the vault lock."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with vault_lock():
+            return fn(*args, **kwargs)
+    return wrapper
 
 
 def _keyring_available() -> bool:
@@ -94,15 +183,50 @@ def _keyring_available() -> bool:
         return False
 
 
+def _file_corrupt(detail: str) -> VaultCorruptError:
+    return VaultCorruptError(
+        f"The credentials file {CRED_FILE} is damaged ({detail}). "
+        "It was left untouched so nothing is saved over it. Repair it or "
+        "move it aside, then run eufy-sync to sign in again."
+    )
+
+
+def _read_cred_file() -> dict | None:
+    """The parsed CRED_FILE object, or None when there is no file.
+
+    Raises RuntimeError when the file exists but cannot be read, and
+    VaultCorruptError when it is not a JSON object. Treating either as
+    empty would let the next save replace the file with an empty vault,
+    and treating it as unmarked would silently switch to the keychain and
+    hide every secret in the file."""
+    try:
+        text = CRED_FILE.read_text()
+    except FileNotFoundError:
+        return None
+    except ValueError:
+        # UnicodeDecodeError: non-UTF-8 bytes.
+        raise _file_corrupt("not a JSON object") from None
+    except OSError as e:
+        raise RuntimeError(
+            f"The credentials file {CRED_FILE} could not be read "
+            f"({e.strerror or e}). Check its permissions and retry."
+        ) from e
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        raise _file_corrupt("not a JSON object") from None
+    if not isinstance(parsed, dict):
+        raise _file_corrupt("not a JSON object")
+    return parsed
+
+
 def _file_store_is_explicit() -> bool:
     """True when CRED_FILE carries the opt-in marker that only
-    use_file_store() writes. Malformed content counts as no marker.
-    ValueError covers both bad JSON and non-UTF-8 bytes in the file."""
-    try:
-        data = json.loads(CRED_FILE.read_text())
-    except (ValueError, TypeError, OSError):
-        return False
-    return isinstance(data, dict) and bool(data.get("explicit"))
+    use_file_store() writes. Only a file that parses and has no marker
+    counts as unmarked; an existing file that cannot be read or parsed
+    raises (see _read_cred_file)."""
+    data = _read_cred_file()
+    return data is not None and bool(data.get("explicit"))
 
 
 def _active_backend() -> str:
@@ -133,16 +257,21 @@ def _empty_vault() -> dict:
     return {"passwords": {}, "tokens": {}}
 
 
-def _normalize_vault(vault: dict | None) -> dict:
-    """Tolerate a partially-shaped or missing vault dict."""
+def _normalize_vault(vault: dict | None, corrupt: Callable[[str], Exception] | None = None) -> dict:
+    """Fill in absent sections of a vault dict.
+
+    A section that is present but not an object raises (via `corrupt`, the
+    store's own VaultCorruptError factory): reading it as empty would let the
+    next save overwrite whatever is still recoverable in it."""
     if not isinstance(vault, dict):
         return _empty_vault()
-    passwords = vault.get("passwords")
-    tokens = vault.get("tokens")
-    normalized = {
-        "passwords": passwords if isinstance(passwords, dict) else {},
-        "tokens": tokens if isinstance(tokens, dict) else {},
-    }
+    corrupt = corrupt or _keychain_corrupt
+    normalized = {}
+    for section in ("passwords", "tokens"):
+        value = vault.get(section, {})
+        if not isinstance(value, dict):
+            raise corrupt(f'its "{section}" section is not a JSON object')
+        normalized[section] = value
     # The opt-in marker must survive every load/save round trip of the file
     # backend, or the first store after --use-file-store would drop it and
     # silently flip the backend back to the keychain.
@@ -187,9 +316,9 @@ def _keychain_get(account: str) -> str | None:
         raise RuntimeError(_KEYCHAIN_UNREADABLE) from e
 
 
-def _valid_count(value) -> bool:
+def _valid_count(value, limit: int | None = MAX_CHUNKS) -> bool:
     # bool is an int subclass; a header saying {"__chunks__": true} is junk.
-    return type(value) is int and 1 <= value <= MAX_CHUNKS
+    return type(value) is int and value >= 1 and (limit is None or value <= limit)
 
 
 # "<gen>" (written by pre-release builds of the generation layout) or
@@ -232,7 +361,9 @@ def _parse_header(raw: str) -> tuple:
                 return ("gen", tag, meta["chunks"], meta["sha256"], meta["gen"])
         raise _keychain_corrupt("the chunk header is malformed")
     if "__chunks__" in parsed:
-        if _valid_count(parsed["__chunks__"]):
+        # Released versions wrote any number of chunks; reading stops at the
+        # first missing one, so no cap is needed to keep this bounded.
+        if _valid_count(parsed["__chunks__"], limit=None):
             return ("legacy", parsed["__chunks__"])
         raise _keychain_corrupt("the chunk header is malformed")
     return ("single", parsed)
@@ -281,33 +412,35 @@ def _load_vault_from_keychain() -> dict:
     try:
         return _assemble(_parse_header(raw))
     except VaultCorruptError:
-        # A concurrent save may have switched the header and deleted the
-        # chunks this read was partway through. If the header moved on, read
-        # the new vault once; if it did not, the vault really is damaged.
+        # Reads do not take the vault lock, so a save in another process may
+        # have switched the header and deleted the chunks this read was
+        # partway through. If the header moved on, read the new vault once;
+        # if it did not, the vault really is damaged.
         fresh = _keychain_get(VAULT_ACCOUNT)
         if fresh is None or fresh == raw:
             raise
         return _assemble(_parse_header(fresh))
 
 
-def _delete_chunk_run(tag: str | None, start: int = 1) -> None:
-    # Delete one tag's chunk entries from `start` up to the first gap.
-    # Chunks are always written 1..N in order, so leftovers from an
-    # interrupted save form an unbroken run. Deleting from the top down keeps
-    # it unbroken if this sweep is itself cut short, so the next sweep still
-    # finds the rest. Bounded by MAX_CHUNKS.
+def _delete_chunk_run(tag: str | None) -> None:
+    # Delete one tag's chunk entries from 1 up to the first gap. Chunks are
+    # always written 1..N in order, so leftovers form an unbroken run.
+    # Deleting from the top down, and stopping at the first failed delete,
+    # keeps what is left unbroken, so a later sweep still finds all of it.
+    # Raises on that failure so the caller keeps the tag in the journal.
+    # Tagged runs are bounded by MAX_CHUNKS; released-version runs had no
+    # cap and end at their first gap.
     import keyring
     run = []
-    for i in range(start, MAX_CHUNKS + 1):
+    i = 1
+    while tag is None or i <= MAX_CHUNKS:
         account = _chunk_account(tag, i)
         if keyring.get_password(SERVICE_NAME, account) is None:
             break
         run.append(account)
+        i += 1
     for account in reversed(run):
-        try:
-            keyring.delete_password(SERVICE_NAME, account)
-        except Exception:
-            pass
+        keyring.delete_password(SERVICE_NAME, account)
 
 
 def _read_header() -> tuple[str | None, tuple | None]:
@@ -343,171 +476,147 @@ def _layout_gen(layout: tuple | None) -> int:
     return 0
 
 
-def _read_journal() -> dict[str, float]:
-    """Tags that may still have chunk entries, with when each was recorded.
-    Best-effort: an unreadable or malformed journal reads as empty."""
+def _read_journal() -> list[str]:
+    """Tags that may still have chunk entries, oldest first. Best-effort: an
+    unreadable or malformed journal reads as empty. Pre-release builds
+    stored {tag: timestamp}; its keys are read the same way."""
     import keyring
     try:
         raw = keyring.get_password(SERVICE_NAME, JOURNAL_ACCOUNT)
-        parsed = json.loads(raw) if raw else {}
+        parsed = json.loads(raw) if raw else []
     except Exception:
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    return {
-        tag: float(t) for tag, t in parsed.items()
-        if _valid_tag(tag) and isinstance(t, (int, float)) and not isinstance(t, bool)
-    }
+        return []
+    if isinstance(parsed, dict):
+        parsed = list(parsed)
+    if not isinstance(parsed, list):
+        return []
+    return list(dict.fromkeys(tag for tag in parsed if _valid_tag(tag)))
 
 
-def _write_journal(journal: dict[str, float]) -> None:
+def _write_journal(tags: list[str]) -> None:
     import keyring
-    if not journal:
+    if not tags:
         try:
             keyring.delete_password(SERVICE_NAME, JOURNAL_ACCOUNT)
         except Exception:
             pass
         return
-    newest = sorted(journal.items(), key=lambda item: item[1], reverse=True)[:MAX_JOURNAL]
-    keyring.set_password(SERVICE_NAME, JOURNAL_ACCOUNT, json.dumps(dict(newest)))
+    keyring.set_password(SERVICE_NAME, JOURNAL_ACCOUNT, json.dumps(tags[-MAX_JOURNAL:]))
 
 
-def _journal_add(entries: dict[str, float]) -> None:
+def _journal_add(tags: list[str]) -> None:
     journal = _read_journal()
-    added = {tag: t for tag, t in entries.items() if tag not in journal}
+    added = [tag for tag in tags if tag not in journal]
     if added:
-        journal.update(added)
-        _write_journal(journal)
+        _write_journal(journal + added)
 
 
-def _journal_remove(tags: set[str]) -> None:
-    # Re-read right before writing so entries another process added since
-    # this one last looked are kept.
-    journal = _read_journal()
-    if tags & journal.keys():
-        _write_journal({tag: t for tag, t in journal.items() if tag not in tags})
-
-
-def _sweep_chunks(prev_tag: str | None, force: bool = False) -> None:
+def _sweep_chunks() -> None:
     """Best-effort removal of chunk entries that no header points at.
 
-    Runs after a save has switched the header. Deletes the released-version
-    "vault:i" chunks, the chunks of prev_tag (the tag the header named before
-    this save), and the chunks of every journal tag that is older than
-    JOURNAL_GRACE, or every journal tag at all when force is set. The tag the
-    header names right now is always kept, even if another process switched
-    it after this save did."""
+    Runs under the vault lock after a save has switched the header. No other
+    save can be running, so every journal tag except the one the header
+    names is a leftover and its chunks are deleted, along with the
+    released-version "vault:i" chunks unless the header still uses them. A
+    tag whose chunks could not all be deleted stays in the journal for the
+    next save."""
     try:
-        _, layout = _read_header()
-        if layout is None and _keychain_get(VAULT_ACCOUNT) is not None:
+        raw, layout = _read_header()
+        if layout is None and raw is not None:
             # A header this module cannot parse might still point somewhere;
             # deleting nothing is the safe answer.
             return
         current = layout[1] if layout is not None and layout[0] == "gen" else None
         if layout is None or layout[0] != "legacy":
             _delete_chunk_run(None)
-        if prev_tag is not None and prev_tag != current:
-            _delete_chunk_run(prev_tag)
-        now = time.time()
-        swept = set()
-        for tag, recorded in _read_journal().items():
+        remaining = []
+        for tag in _read_journal():
             if tag == current:
                 continue
-            if force or tag == prev_tag or now - recorded >= JOURNAL_GRACE:
-                if tag != prev_tag:
-                    _delete_chunk_run(tag)
-                swept.add(tag)
-        if prev_tag is not None:
-            swept.add(prev_tag)
-        _journal_remove(swept)
-        if set(_read_journal()) <= {current}:
-            # Only the live tag left: nothing to track.
-            _write_journal({})
+            try:
+                _delete_chunk_run(tag)
+            except Exception:
+                remaining.append(tag)
+        _write_journal(remaining)
     except Exception:
         # The new vault is already in place; leftovers cost tidiness, not
         # data, so a failed cleanup must not fail the save.
         pass
 
 
-class VaultWriteConflict(RuntimeError):
-    """Another process saved the keychain vault while this save was running.
-
-    This save was abandoned before it switched the header, so the vault holds
-    the other process's complete write. Retrying the command reads that write
-    and applies this change on top of it."""
+class VaultTooLargeError(RuntimeError):
+    """The vault is too large to store in the keychain. Nothing was written."""
 
 
-_WRITE_CONFLICT = (
-    "Another eufy-sync process changed the stored credentials while this one "
-    "was saving, so this change was not saved. The stored credentials are "
-    "intact. Run the command again."
-)
-
-
+@_locked
 def _save_vault_to_keychain(vault: dict) -> None:
     import keyring
-    start_raw, start_layout = _read_header()
+    # json.dumps escapes non-ASCII by default, so each character is one
+    # UTF-16 unit and a CHUNK_LIMIT-character entry stays under the Windows cap.
+    payload = json.dumps(vault)
+    chunks = []
+    if len(payload) > CHUNK_LIMIT:
+        chunks = [payload[i:i + CHUNK_LIMIT] for i in range(0, len(payload), CHUNK_LIMIT)]
+    if len(chunks) > MAX_CHUNKS:
+        # Checked before any write: a header claiming more chunks than the
+        # reader accepts would commit a vault nobody can read.
+        raise VaultTooLargeError(
+            f"The stored credentials are too large for the system keychain "
+            f"({len(payload)} characters; the limit is "
+            f"{MAX_CHUNKS * CHUNK_LIMIT}). Nothing was changed. Run "
+            "eufy-sync --use-file-store to keep them in a file instead."
+        )
+
+    _, start_layout = _read_header()
+    pending = []
     prev_tag = _layout_tag(start_layout)
-    pending = {}
     if prev_tag is not None:
         # Recorded before the switch, so a sweep a crash cuts short is
         # finished by a later save.
-        pending[prev_tag] = 0.0
+        pending.append(prev_tag)
         if "." not in prev_tag:
             # Pre-release generation layout: a crashed save there left its
             # chunks at the neighbouring generation numbers.
             gen = int(prev_tag)
-            for neighbour in (gen - 1, gen + 1):
-                if neighbour >= 1:
-                    pending[str(neighbour)] = 0.0
-    # json.dumps escapes non-ASCII by default, so each character is one
-    # UTF-16 unit and a CHUNK_LIMIT-character entry stays under the Windows cap.
-    payload = json.dumps(vault)
+            pending.extend(str(n) for n in (gen - 1, gen + 1) if n >= 1)
 
-    if len(payload) <= CHUNK_LIMIT:
+    if not chunks:
         if pending:
             _journal_add(pending)
-        if _keychain_get(VAULT_ACCOUNT) != start_raw:
-            raise VaultWriteConflict(_WRITE_CONFLICT)
         keyring.set_password(SERVICE_NAME, VAULT_ACCOUNT, payload)
-        _sweep_chunks(prev_tag)
+        _sweep_chunks()
         return
 
-    # The new chunks go under a tag no header references and no other writer
-    # can pick, and the header write is the commit point. A save killed
-    # before it leaves the old vault readable; one killed after it leaves the
-    # new vault readable. Either way the journal names the leftovers.
-    tag = f"{_layout_gen(start_layout) + 1}.{secrets.token_hex(4)}"
-    pending[tag] = time.time()
-    _journal_add(pending)
-    chunks = [payload[i:i + CHUNK_LIMIT] for i in range(0, len(payload), CHUNK_LIMIT)]
+    # The new chunks go under a tag no header references, and the header
+    # write is the commit point. A save killed before it leaves the old vault
+    # readable; one killed after it leaves the new vault readable. Either way
+    # the journal names the leftovers for the next save to delete.
+    gen = _layout_gen(start_layout) + 1
+    tag = f"{gen}.{secrets.token_hex(4)}"
+    _journal_add(pending + [tag])
     try:
         for i, chunk in enumerate(chunks, start=1):
             keyring.set_password(SERVICE_NAME, _chunk_account(tag, i), chunk)
-        # Commit only on top of the header this save's vault was read under.
-        # Another writer that switched it in the meantime holds the newer
-        # vault; overwriting its header would also orphan its chunks.
-        if _keychain_get(VAULT_ACCOUNT) != start_raw:
-            raise VaultWriteConflict(_WRITE_CONFLICT)
     except Exception:
         try:
             _delete_chunk_run(tag)
-            _journal_remove({tag})
+            _write_journal([t for t in _read_journal() if t != tag])
         except Exception:
             pass
         raise
     header = {
         "__vault__": {
-            "gen": _layout_gen(start_layout) + 1,
+            "gen": gen,
             "tag": tag,
             "chunks": len(chunks),
             "sha256": hashlib.sha256(payload.encode()).hexdigest(),
         }
     }
     keyring.set_password(SERVICE_NAME, VAULT_ACCOUNT, json.dumps(header))
-    _sweep_chunks(prev_tag)
+    _sweep_chunks()
 
 
+@_locked
 def _delete_keychain_vault() -> None:
     """Best-effort removal of the vault header, every chunk entry this
     module can find, and the journal."""
@@ -547,41 +656,20 @@ def _delete_keychain_vault() -> None:
 
 
 def _load_vault_from_file() -> dict:
-    try:
-        text = CRED_FILE.read_text()
-    except FileNotFoundError:
+    parsed = _read_cred_file()
+    if parsed is None:
         return _empty_vault()
-    except ValueError:
-        parsed = None  # non-UTF-8 bytes
-    except OSError as e:
-        raise RuntimeError(
-            f"The credentials file {CRED_FILE} could not be read "
-            f"({e.strerror or e}). Check its permissions and retry."
-        ) from e
-    else:
-        try:
-            parsed = json.loads(text)
-        except ValueError:
-            parsed = None
-    if not isinstance(parsed, dict):
-        # Treating this as empty would let the next save replace the file
-        # with an empty vault, destroying whatever is still recoverable in it.
-        raise VaultCorruptError(
-            f"The credentials file {CRED_FILE} is damaged (not a JSON object). "
-            "It was left untouched so nothing is saved over it. Repair it or "
-            "move it aside, then run eufy-sync to sign in again."
-        )
-    return _normalize_vault(parsed)
+    return _normalize_vault(parsed, _file_corrupt)
 
 
+@_locked
 def _save_vault_to_file(vault: dict) -> None:
     CRED_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Temp file + atomic rename: an interrupted in-place write would truncate
     # the vault, destroying the secrets and the opt-in marker (which would
     # silently flip the backend to an empty keychain on the next run). The
-    # temp name carries the pid so two concurrent writers (e.g. the 4-hourly
-    # Launch Agent and an interactive command) never share one temp inode and
-    # truncate each other's partial write before the rename.
+    # pid in the temp name is a second guard behind the vault lock, which
+    # already keeps two writers from running at once.
     tmp = CRED_FILE.with_name(f"{CRED_FILE.name}.{os.getpid()}.tmp")
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -605,6 +693,7 @@ def _load_vault() -> dict:
     return _load_vault_from_keychain()
 
 
+@_locked
 def _save_vault(vault: dict) -> None:
     if _active_backend() == "file":
         _save_vault_to_file(vault)
@@ -634,17 +723,23 @@ def get_password(account: str, migrate: bool = True) -> str | None:
         if legacy is not None:
             if not migrate:
                 return legacy
-            vault["passwords"][account] = legacy
-            _save_vault(vault)
-            try:
-                keyring.delete_password(SERVICE_NAME, account)
-            except Exception:
-                pass
-            return legacy
+            with vault_lock():
+                # Re-read under the lock: another process may have migrated
+                # (or changed) this password since the read above.
+                vault = _load_vault()
+                if account not in vault["passwords"]:
+                    vault["passwords"][account] = legacy
+                    _save_vault(vault)
+                try:
+                    keyring.delete_password(SERVICE_NAME, account)
+                except Exception:
+                    pass
+                return vault["passwords"][account]
 
     return None
 
 
+@_locked
 def store_password(account: str, password: str) -> None:
     """Store a password in the vault (keychain or file, whichever is active)."""
     vault = _load_vault()
@@ -652,6 +747,7 @@ def store_password(account: str, password: str) -> None:
     _save_vault(vault)
 
 
+@_locked
 def delete_password(account: str) -> None:
     """Remove a password from the vault, and best-effort from the legacy
     keychain item if one is still lingering."""
@@ -690,17 +786,22 @@ def get_token(name: str) -> dict | None:
                 legacy = json.loads(legacy_raw)
             except (json.JSONDecodeError, TypeError):
                 return None
-            vault["tokens"][name] = legacy
-            _save_vault(vault)
-            try:
-                keyring.delete_password(SERVICE_NAME, f"token:{name}")
-            except Exception:
-                pass
-            return legacy
+            with vault_lock():
+                # Re-read under the lock, as in get_password.
+                vault = _load_vault()
+                if name not in vault["tokens"]:
+                    vault["tokens"][name] = legacy
+                    _save_vault(vault)
+                try:
+                    keyring.delete_password(SERVICE_NAME, f"token:{name}")
+                except Exception:
+                    pass
+                return vault["tokens"][name]
 
     return None
 
 
+@_locked
 def store_token(name: str, data: dict) -> None:
     """Store a token dict in the vault (keychain or file, whichever is active)."""
     vault = _load_vault()
@@ -708,6 +809,7 @@ def store_token(name: str, data: dict) -> None:
     _save_vault(vault)
 
 
+@_locked
 def delete_token(name: str) -> None:
     """Remove a token from the vault, and best-effort from the legacy
     keychain item if one is still lingering."""
@@ -727,6 +829,7 @@ def delete_token(name: str) -> None:
 # --- Mode switching -----------------------------------------------------------
 
 
+@_locked
 def use_file_store() -> None:
     """Adopt the 0o600 file as the permanent credential store.
 
@@ -784,6 +887,7 @@ def use_file_store() -> None:
         _delete_keychain_vault()
 
 
+@_locked
 def use_keychain_store() -> None:
     """Move the vault into the system keychain and stop using the file.
 

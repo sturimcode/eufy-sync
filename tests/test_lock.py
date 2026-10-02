@@ -1,6 +1,7 @@
 """The single-instance lock that keeps a manual sync off the scheduled one."""
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -55,7 +56,7 @@ def test_lock_is_released_when_the_block_raises():
 def test_unusable_lock_file_runs_unlocked():
     """The lock is a courtesy. A data dir we cannot write to must not become a
     new way for the sync to refuse to start."""
-    with patch("eufy_sync.cli.lock.os.open", side_effect=OSError("read-only")):
+    with patch("eufy_sync.file_lock.os.open", side_effect=OSError("read-only")):
         with lock.single_instance() as acquired:
             assert acquired is True
             # Nothing is holding anything, so a second run is not blocked.
@@ -64,7 +65,7 @@ def test_unusable_lock_file_runs_unlocked():
 
 
 def test_strict_lock_refuses_to_run_when_lock_file_cannot_open():
-    with patch("eufy_sync.cli.lock.os.open", side_effect=OSError("read-only")):
+    with patch("eufy_sync.file_lock.os.open", side_effect=OSError("read-only")):
         with lock.single_instance(require_lock=True) as acquired:
             assert acquired is False
 
@@ -292,7 +293,7 @@ def test_credential_command_runs_while_holding_the_lock(tmp_path, extra, target,
 def test_credential_command_refuses_when_the_lock_file_cannot_open(tmp_path, capsys, extra, target, flag):
     from eufy_sync.cli.app import main
 
-    with patch("eufy_sync.cli.lock.os.open", side_effect=OSError("read-only")), \
+    with patch("eufy_sync.file_lock.os.open", side_effect=OSError("read-only")), \
          patch(target) as command, \
          patch("sys.argv", _command_argv(tmp_path, extra)), \
          pytest.raises(SystemExit) as exc:
@@ -322,3 +323,100 @@ def test_uninstall_under_the_lock_still_removes_the_whole_data_dir(
     assert not config_path.exists()
     assert not lock.lock_path().exists()
     assert not shared.DATA_DIR.exists()
+
+
+@patch("eufy_sync.credentials._keyring_available", return_value=False)
+@patch("eufy_sync.platform_support.agent_installed", return_value=False)
+@patch("eufy_sync.cli.maintenance.sys.stdin")
+@patch("builtins.input", return_value="y")
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX unlink ordering")
+def test_uninstall_deletes_each_lock_file_before_releasing_it(_input, mock_stdin, _agent, _keyring, tmp_path):
+    """Deleting a lock file after release lets another process lock the old
+    file while a third creates and locks a new one at the same path. On
+    POSIX every lock --uninstall releases must already be unlinked."""
+    import os
+
+    from eufy_sync import file_lock
+    from eufy_sync.cli.app import main
+
+    mock_stdin.isatty.return_value = True
+    config_path = _write_synced_config(shared.DATA_DIR)
+    real_release = file_lock.release
+    links_at_release = []
+
+    def spy(fd):
+        links_at_release.append(os.fstat(fd).st_nlink)
+        real_release(fd)
+
+    with patch("eufy_sync.file_lock.release", spy), \
+         patch("sys.argv", ["eufy-sync", "--uninstall", "--config", str(config_path)]):
+        main()
+
+    # The vault lock (released when the sweep ends) and the sync lock.
+    assert len(links_at_release) == 2
+    assert links_at_release == [0, 0]
+    assert not shared.DATA_DIR.exists()
+
+
+def test_windows_uninstall_deletes_lock_files_only_after_release(tmp_path, monkeypatch):
+    """Windows cannot delete an open file, so the lock files are skipped
+    while held and deleted by _remove_lock_files afterwards."""
+    from types import SimpleNamespace
+
+    from eufy_sync.cli import maintenance
+
+    fake_sys = SimpleNamespace(platform="win32")
+    monkeypatch.setattr(lock, "sys", fake_sys)
+    monkeypatch.setattr(maintenance, "sys", fake_sys)
+    shared.DATA_DIR.mkdir(parents=True)
+    for name in ("sync.lock", "vault.lock"):
+        (shared.DATA_DIR / name).write_text("")
+
+    lock.unlink_while_held()
+    assert lock.lock_path().exists()
+    maintenance._remove_lock_files(shared.DATA_DIR)
+    assert not shared.DATA_DIR.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX only")
+def test_posix_remove_lock_files_never_deletes_a_lock_file_after_release(tmp_path):
+    """On POSIX a lock file present after release may be a new one another
+    process just created and locked; it must be left alone."""
+    from eufy_sync.cli import maintenance
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "sync.lock").write_text("")
+    maintenance._remove_lock_files(data_dir)
+    assert (data_dir / "sync.lock").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX only")
+def test_lock_on_an_unlinked_file_is_retried_on_the_new_file(tmp_path):
+    """A process that opened the lock file before a holder unlinked it must
+    not treat a lock on that orphan as the lock for the path."""
+    import os
+
+    from eufy_sync import file_lock
+
+    path = tmp_path / "x.lock"
+    stale = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+    stale_inode = os.fstat(stale).st_ino
+    path.unlink()
+    real_open = file_lock._open
+    opened = []
+
+    def first_open_is_stale(p):
+        if not opened:
+            opened.append(stale)
+            return stale
+        fd = real_open(p)
+        opened.append(fd)
+        return fd
+
+    with patch("eufy_sync.file_lock._open", first_open_is_stale):
+        fd = file_lock.acquire(path)
+    assert fd is not None and len(opened) == 2
+    # (The fd number itself may be reused once the stale handle is closed.)
+    assert os.fstat(fd).st_ino == os.stat(path).st_ino != stale_inode
+    file_lock.release(fd)

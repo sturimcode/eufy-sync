@@ -11,7 +11,9 @@ commands require the lock instead of continuing if the lock file cannot open.
 The lock is a courtesy, not a guarantee. If the file cannot be created the run
 proceeds unlocked rather than failing: an overlap is a rare annoyance, while a
 sync that refuses to start is a real one (same trade-off failure_notify makes
-with its counter file).
+with its counter file). The credential vault does not depend on this: every
+vault write separately takes the vault lock in eufy_sync.credentials, which
+refuses to write rather than run unlocked.
 
 There is no PID or staleness handling on purpose. The OS drops the lock when
 the handle closes or the process dies, so a killed run leaves nothing behind.
@@ -19,60 +21,19 @@ the handle closes or the process dies, so a killed run leaves nothing behind.
 from __future__ import annotations
 
 import contextlib
-import os
 import sys
 from pathlib import Path
 from typing import Iterator
 
+from eufy_sync import file_lock
 from eufy_sync.cli import shared
 
 LOCK_NAME = "sync.lock"
-
-if sys.platform == "win32":
-    import msvcrt
-else:
-    import fcntl
 
 
 def lock_path() -> Path:
     # Read at call time: the data dir is redirected in tests.
     return shared.DATA_DIR / LOCK_NAME
-
-
-def _open() -> int | None:
-    """Open (creating if needed) the lock file. None if it cannot be made."""
-    try:
-        shared.DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-        return os.open(str(lock_path()), os.O_RDWR | os.O_CREAT, 0o600)
-    except OSError:
-        return None
-
-
-def _try_acquire(fd: int) -> bool:
-    """Take the exclusive lock without blocking. False when someone holds it."""
-    try:
-        if sys.platform == "win32":
-            # msvcrt locks a byte range from the current position; one byte
-            # past EOF is fine and keeps the file empty.
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return False
-    return True
-
-
-def _release(fd: int) -> None:
-    try:
-        if sys.platform == "win32":
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    except OSError:
-        # Closing the handle below releases it anyway.
-        pass
 
 
 @contextlib.contextmanager
@@ -84,17 +45,30 @@ def single_instance(require_lock: bool = False) -> Iterator[bool]:
     require_lock=True, that failure yields False so credential and token
     mutations cannot proceed without serialization.
     """
-    fd = _open()
-    if fd is None:
+    try:
+        fd = file_lock.acquire(lock_path())
+    except OSError:
         yield not require_lock
         return
+    if fd is None:
+        yield False
+        return
     try:
-        if not _try_acquire(fd):
-            yield False
-            return
-        try:
-            yield True
-        finally:
-            _release(fd)
+        yield True
     finally:
-        os.close(fd)
+        file_lock.release(fd)
+
+
+def unlink_while_held() -> None:
+    """Delete the lock file while this process still holds it (call inside
+    single_instance). Deleting it after release would let another process
+    lock the old file while a third creates and locks a new one at the same
+    path. POSIX only: Windows refuses to delete an open file, so there the
+    caller deletes it after release, and a process that has it open blocks
+    that delete."""
+    if sys.platform == "win32":
+        return
+    try:
+        lock_path().unlink(missing_ok=True)
+    except OSError:
+        pass

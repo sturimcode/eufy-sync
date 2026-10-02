@@ -516,24 +516,82 @@ def test_marked_file_with_keyring_stays_file(fake_keyring, cred_file):
     assert get_password("default:eufy") == "file-pw"
 
 
-def test_malformed_file_counts_as_unmarked(fake_keyring, cred_file):
+@pytest.mark.parametrize("content", [b"{not valid json::", b"\x80\x81\xfe\xff", b"[1, 2]"])
+def test_damaged_file_raises_instead_of_counting_as_unmarked(fake_keyring, cred_file, content):
+    """A damaged file may be an explicit file store whose marker can no
+    longer be read. Picking the keychain would hide every secret in it, so
+    backend selection raises the corruption error instead. (Non-UTF-8 bytes
+    make read_text() raise UnicodeDecodeError, a ValueError.)"""
+    from eufy_sync.credentials import VaultCorruptError, _active_backend, get_token
+
+    cred_file.parent.mkdir(parents=True, exist_ok=True)
+    cred_file.write_bytes(content)
+
+    with pytest.raises(VaultCorruptError, match="damaged"):
+        _active_backend()
+    with pytest.raises(VaultCorruptError):
+        get_token("garmin")
+    with pytest.raises(VaultCorruptError):
+        store_token("garmin", {"a": 1})
+    assert cred_file.read_bytes() == content
+
+
+def test_unreadable_file_raises_instead_of_counting_as_unmarked(fake_keyring, cred_file, monkeypatch):
     from eufy_sync.credentials import _active_backend
 
     cred_file.parent.mkdir(parents=True, exist_ok=True)
-    cred_file.write_text("{not valid json::")
+    cred_file.write_text(json.dumps({"explicit": True, "passwords": {}, "tokens": {}}))
 
-    assert _active_backend() == "keychain"
+    def denied(self, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(type(cred_file), "read_text", denied)
+    with pytest.raises(RuntimeError, match="could not be read"):
+        _active_backend()
 
 
-def test_non_utf8_file_counts_as_unmarked(fake_keyring, cred_file):
-    """read_text() raises UnicodeDecodeError (a ValueError) on non-UTF-8
-    bytes; that must count as no marker, not crash every backend lookup."""
+def test_parsed_unmarked_file_is_still_ignored(fake_keyring, cred_file):
     from eufy_sync.credentials import _active_backend
 
     cred_file.parent.mkdir(parents=True, exist_ok=True)
-    cred_file.write_bytes(b"\x80\x81\xfe\xff")
-
+    cred_file.write_text(json.dumps({"passwords": {"a": "b"}, "tokens": {}}))
     assert _active_backend() == "keychain"
+
+
+@pytest.mark.parametrize("section", ["passwords", "tokens"])
+@pytest.mark.parametrize("bad", [[], "x", None, 3])
+def test_wrong_type_section_in_file_raises_and_is_not_overwritten(no_keyring, cred_file, section, bad):
+    from eufy_sync.credentials import VaultCorruptError, store_password
+
+    cred_file.parent.mkdir(parents=True, exist_ok=True)
+    original = json.dumps({"explicit": True, "passwords": {}, "tokens": {}, section: bad})
+    cred_file.write_text(original)
+
+    with pytest.raises(VaultCorruptError, match=section):
+        store_password("default:eufy", "pw")
+    assert cred_file.read_text() == original
+
+
+@pytest.mark.parametrize("section", ["passwords", "tokens"])
+def test_wrong_type_section_in_keychain_raises_and_is_not_overwritten(fake_keyring, section):
+    from eufy_sync.credentials import VaultCorruptError, store_password
+
+    original = json.dumps({"passwords": {}, "tokens": {}, section: ["recoverable"]})
+    fake_keyring.set_password(SERVICE_NAME, VAULT_ACCOUNT, original)
+
+    with pytest.raises(VaultCorruptError, match=section):
+        store_password("default:eufy", "pw")
+    assert fake_keyring.get_password(SERVICE_NAME, VAULT_ACCOUNT) == original
+
+
+def test_absent_sections_still_read_as_empty(fake_keyring):
+    from eufy_sync.credentials import get_password, store_password
+
+    fake_keyring.set_password(SERVICE_NAME, VAULT_ACCOUNT, json.dumps({"tokens": {"a": {"b": 1}}}))
+    assert get_password("default:eufy") is None
+    store_password("default:eufy", "pw")
+    assert get_password("default:eufy") == "pw"
+    assert get_token("a") == {"b": 1}
 
 
 # --- 11. explicit opt-in: use_file_store merge + marker ----------------------
@@ -1020,13 +1078,10 @@ def test_kill_at_every_step_of_a_save_leaves_a_readable_vault(
         assert vault["passwords"] == _OLD_PW, f"killed after {steps} of {total}"
         assert vault["tokens"]["garmin"] in (old, new), f"killed after {steps} of {total}"
 
-        # The next completed save after the journal grace period leaves only
-        # the entries its header uses. (Inside the grace period the killed
-        # save's chunks are indistinguishable from a save still running in
-        # another process, so they are kept until then.)
-        later = time.time() + credentials.JOURNAL_GRACE + 1
-        with patch("eufy_sync.credentials.time.time", return_value=later):
-            store_token("strava", {"access_token": "t"})
+        # The next completed save leaves only the entries its header uses.
+        # Saves are serialized by the vault lock, so the killed save's
+        # chunks cannot belong to a save still running and go at once.
+        store_token("strava", {"access_token": "t"})
         vault = _load_vault()
         assert vault["passwords"] == _OLD_PW
         assert vault["tokens"]["strava"] == {"access_token": "t"}
@@ -1164,9 +1219,9 @@ def _kill_on_header_write(monkeypatch, store: _FakeKeyringStore) -> None:
 
 def test_consecutive_interrupted_saves_leave_no_orphaned_chunks(fake_keyring, monkeypatch):
     """Each killed save leaves a full set of chunks (plaintext slices of the
-    vault) under a tag no header names. However many pile up, the first
-    completed save after the grace period deletes all of them, along with
-    released-version "vault:i" chunks."""
+    vault) under a tag no header names. However many pile up, the next
+    completed save deletes all of them, along with released-version
+    "vault:i" chunks."""
     credentials.store_password("default:eufy", "pw")
     store_token("garmin", _big_token(3 * CHUNK_LIMIT))
     for i in (1, 2):
@@ -1181,9 +1236,7 @@ def test_consecutive_interrupted_saves_leave_no_orphaned_chunks(fake_keyring, mo
     orphans = _vault_accounts(fake_keyring) - {VAULT_ACCOUNT, credentials.JOURNAL_ACCOUNT}
     assert len(orphans) > 4 * 3
 
-    later = time.time() + credentials.JOURNAL_GRACE + 1
-    with patch("eufy_sync.credentials.time.time", return_value=later):
-        store_token("strava", {"access_token": "t"})
+    store_token("strava", {"access_token": "t"})
 
     header = _header(fake_keyring)
     assert _vault_accounts(fake_keyring) == (
@@ -1192,9 +1245,9 @@ def test_consecutive_interrupted_saves_leave_no_orphaned_chunks(fake_keyring, mo
     assert get_token("garmin") == _big_token(3 * CHUNK_LIMIT)
 
 
-def test_fresh_journal_tags_survive_a_save_inside_the_grace_period(fake_keyring, monkeypatch):
-    """A tag recorded moments ago may be a save still running in another
-    process. A sweep inside the grace period must not delete its chunks."""
+def test_crash_leftovers_are_deleted_by_the_very_next_save(fake_keyring, monkeypatch):
+    """Under the vault lock no other save can be running, so a journal tag
+    the header does not name is a crash leftover with nothing to wait for."""
     store_token("garmin", _big_token(3 * CHUNK_LIMIT))
     _kill_on_header_write(monkeypatch, fake_keyring)
     with pytest.raises(_Killed):
@@ -1203,10 +1256,29 @@ def test_fresh_journal_tags_survive_a_save_inside_the_grace_period(fake_keyring,
     pending = set(json.loads(fake_keyring.get_password(SERVICE_NAME, credentials.JOURNAL_ACCOUNT)))
     live = _header(fake_keyring)["tag"]
     other = (pending - {live}).pop()
+    assert fake_keyring.get_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:{other}:1") is not None
 
     store_token("strava", {"access_token": "t"})
 
-    assert fake_keyring.get_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:{other}:1") is not None
+    assert fake_keyring.get_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:{other}:1") is None
+    assert fake_keyring.get_password(SERVICE_NAME, credentials.JOURNAL_ACCOUNT) is None
+
+
+def test_prerelease_timestamped_journal_is_still_swept(fake_keyring):
+    """Pre-release builds stored the journal as {tag: timestamp}."""
+    store_token("garmin", _big_token(3 * CHUNK_LIMIT))
+    for i in (1, 2):
+        fake_keyring.set_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:9.0000abcd:{i}", "junk")
+    fake_keyring.set_password(
+        SERVICE_NAME, credentials.JOURNAL_ACCOUNT, json.dumps({"9.0000abcd": time.time()})
+    )
+
+    store_token("strava", {"access_token": "t"})
+
+    header = _header(fake_keyring)
+    assert _vault_accounts(fake_keyring) == (
+        {VAULT_ACCOUNT} | _chunk_accounts(header["tag"], header["chunks"])
+    )
 
 
 def test_switching_to_the_file_store_deletes_every_known_chunk(fake_keyring, cred_file, monkeypatch):
@@ -1230,68 +1302,74 @@ def test_switching_to_the_file_store_deletes_every_known_chunk(fake_keyring, cre
     assert _load_vault()["tokens"]["garmin"] == _big_token(3 * CHUNK_LIMIT)
 
 
-def test_save_aborts_when_another_writer_switches_the_header_first(fake_keyring):
-    """Two writers start from the same header. The second to finish must not
-    commit over the first: it raises a retryable error, deletes its own
-    chunks, and leaves the first writer's vault readable."""
-    from eufy_sync.credentials import VaultWriteConflict, _save_vault_to_keychain
+def test_a_save_inside_another_save_waits_for_the_lock(fake_keyring, monkeypatch):
+    """The review's race, replayed: writer B has loaded the vault, and writer
+    A tries to save completely before B's header write lands. With the vault
+    lock A cannot start until B finishes, so A works on B's result and both
+    updates survive. A runs in a thread, standing in for another process."""
+    import threading
 
-    store_token("garmin", _big_token(3 * CHUNK_LIMIT))
+    from eufy_sync.credentials import _load_vault_from_keychain, store_password
+
+    store_token("garmin", {"blob": "o" * 3000})
+    store_token("garmin", {"blob": "o" * 3000})
     real_set = fake_keyring.set_password
-    state = {"raced": False}
+    started = threading.Event()
+    other = {}
+
+    def writer_a():
+        started.set()
+        store_token("garmin", {"blob": "a" * 2000})
 
     def racing_set(service, account, password):
+        if account == VAULT_ACCOUNT and "thread" not in other:
+            other["thread"] = threading.Thread(target=writer_a)
+            other["thread"].start()
+            started.wait()
+            # Give A every chance to run if it were not blocked.
+            other["thread"].join(timeout=0.3)
+            assert other["thread"].is_alive(), "writer A ran while B held the vault lock"
         real_set(service, account, password)
-        if account.endswith(":1") and account != f"{VAULT_ACCOUNT}:1" and not state["raced"]:
-            state["raced"] = True
-            # The other writer runs to completion between our chunk writes.
-            _save_vault_to_keychain(
-                {"passwords": {}, "tokens": {"garmin": _big_token(4 * CHUNK_LIMIT)}}
-            )
 
-    with patch("keyring.set_password", racing_set):
-        with pytest.raises(VaultWriteConflict, match="Run the command again"):
-            _save_vault_to_keychain(
-                {"passwords": {}, "tokens": {"garmin": _big_token(5 * CHUNK_LIMIT)}}
-            )
+    monkeypatch.setattr("keyring.set_password", racing_set)
+    store_password("u:garmin", "x")
+    other["thread"].join(timeout=10)
+    assert not other["thread"].is_alive()
 
-    assert get_token("garmin") == _big_token(4 * CHUNK_LIMIT)
+    after = _load_vault_from_keychain()
+    assert after["passwords"]["u:garmin"] == "x"
+    assert after["tokens"]["garmin"] == {"blob": "a" * 2000}
     header = _header(fake_keyring)
-    assert _vault_accounts(fake_keyring) - {credentials.JOURNAL_ACCOUNT} == (
+    assert _vault_accounts(fake_keyring) == (
         {VAULT_ACCOUNT} | _chunk_accounts(header["tag"], header["chunks"])
     )
 
 
-def test_writer_overtaken_at_its_header_write_leaves_a_readable_vault(fake_keyring):
-    """The review's race: writer B passes its header check, then writer A
-    saves completely before B's header write lands. Both used distinct chunk
-    names, and A's sweep keeps B's fresh chunks, so the vault B commits is
-    whole. (A's update is lost; the vault is never damaged.)"""
-    from eufy_sync.credentials import _load_vault_from_keychain, _save_vault_to_keychain
+def test_concurrent_threads_storing_different_tokens_all_persist(fake_keyring):
+    import threading
 
-    def big(tag, n):
-        return {"passwords": {"u:eufy": "pw"}, "tokens": {"garmin": {"blob": tag * n}}}
+    names = [f"service{i}" for i in range(8)]
+    errors = []
 
-    _save_vault_to_keychain(big("o", 3000))
-    _save_vault_to_keychain(big("o", 3000))
-    writer_b = _load_vault_from_keychain()
-    writer_b["passwords"]["u:garmin"] = "x"
+    def store(name):
+        try:
+            for round_ in range(5):
+                store_token(name, {"blob": name * 400, "round": round_})
+        except Exception as e:  # pragma: no cover - reported below
+            errors.append(e)
 
-    real_set = fake_keyring.set_password
-    hook = {"fn": lambda: _save_vault_to_keychain(big("a", 2000))}
-
-    def racing_set(service, account, password):
-        if account == VAULT_ACCOUNT and hook["fn"]:
-            fn, hook["fn"] = hook["fn"], None
-            fn()
-        real_set(service, account, password)
-
-    with patch("keyring.set_password", racing_set):
-        _save_vault_to_keychain(writer_b)
-
-    after = _load_vault_from_keychain()
-    assert after["tokens"]["garmin"]["blob"][:1] in ("o", "a")
-    assert after["passwords"]["u:eufy"] == "pw"
+    threads = [threading.Thread(target=store, args=(name,)) for name in names]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not errors
+    for name in names:
+        assert get_token(name) == {"blob": name * 400, "round": 4}
+    header = _header(fake_keyring)
+    assert _vault_accounts(fake_keyring) == (
+        {VAULT_ACCOUNT} | _chunk_accounts(header["tag"], header["chunks"])
+    )
 
 
 def test_shared_service_name_and_legacy_token_item_are_untouched(fake_keyring, cred_file):
@@ -1392,3 +1470,172 @@ def test_vault_exactly_at_chunk_limit_stays_single_entry(fake_keyring):
     assert "__chunks__" not in data
     assert fake_keyring.get_password(SERVICE_NAME, f"{VAULT_ACCOUNT}:1") is None
     assert get_token("garmin") == {"access_token": "x" * n}
+
+
+def test_doctor_fails_the_keychain_line_for_a_damaged_credentials_file(fake_keyring, cred_file):
+    from eufy_sync.cli import doctor
+
+    cred_file.parent.mkdir(parents=True, exist_ok=True)
+    cred_file.write_text("{not json")
+    lines: list[tuple] = []
+    doctor._check_keychain(lambda status, label, detail, fix=None: lines.append((status, detail)))
+    assert lines[0][0] == "FAIL"
+    assert "damaged" in lines[0][1]
+
+
+# --- Vault lock ----------------------------------------------------------------
+
+_FAKE_KEYRING_PRELUDE = """
+import sys, types
+# No real keychain in the child: a stub module that is never used.
+sys.modules["keyring"] = types.ModuleType("keyring")
+from pathlib import Path
+from eufy_sync import credentials
+credentials.CRED_FILE = Path(sys.argv[1])
+credentials._keyring_available = lambda: False
+"""
+
+
+def _run_child(script: str, *args: str, timeout: float = 60):
+    import subprocess
+    import sys
+    return subprocess.Popen(
+        [sys.executable, "-c", _FAKE_KEYRING_PRELUDE + script, *args],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+
+def test_concurrent_processes_storing_different_tokens_all_persist(no_keyring, cred_file):
+    """Separate processes share only the OS lock. Without it, two
+    read-modify-writes of the same file interleave and one token is lost."""
+    script = """
+name = sys.argv[2]
+for round_ in range(15):
+    credentials.store_token(name, {"blob": name * 200, "round": round_})
+"""
+    names = [f"proc{i}" for i in range(4)]
+    children = [_run_child(script, str(cred_file), name) for name in names]
+    for child in children:
+        _, err = child.communicate(timeout=60)
+        assert child.returncode == 0, err
+    for name in names:
+        assert get_token(name) == {"blob": name * 200, "round": 14}
+
+
+def test_another_process_cannot_write_while_the_lock_is_held(no_keyring, cred_file):
+    from eufy_sync.credentials import vault_lock
+
+    script = """
+credentials.VAULT_LOCK_TIMEOUT = 0.3
+try:
+    credentials.store_token("other", {"a": 1})
+except credentials.VaultLockError as e:
+    print("refused:", e)
+"""
+    with vault_lock():
+        child = _run_child(script, str(cred_file))
+        out, err = child.communicate(timeout=60)
+    assert child.returncode == 0, err
+    assert "refused:" in out and "Retry" in out
+    assert not cred_file.exists()
+
+
+def test_vault_lock_is_reentrant_and_released(no_keyring, cred_file):
+    from eufy_sync import file_lock
+    from eufy_sync.credentials import store_password, vault_lock, vault_lock_path
+
+    with vault_lock():
+        with vault_lock():
+            store_password("default:eufy", "pw")
+        # Still held by this process after the inner block.
+        fd = file_lock.acquire(vault_lock_path())
+        assert fd is None
+    fd = file_lock.acquire(vault_lock_path())
+    assert fd is not None
+    file_lock.release(fd)
+    assert vault_lock_path().exists()
+
+
+def test_store_refuses_when_the_lock_file_cannot_open(fake_keyring, cred_file):
+    from eufy_sync.credentials import VaultLockError, store_password
+
+    with patch("eufy_sync.file_lock.os.open", side_effect=OSError(30, "Read-only file system")):
+        with pytest.raises(VaultLockError, match="could not be created"):
+            store_password("default:eufy", "pw")
+    assert _vault_accounts(fake_keyring) == set()
+
+
+def test_migration_runs_under_the_lock(fake_keyring, cred_file):
+    from eufy_sync import credentials as creds
+
+    fake_keyring.set_password(SERVICE_NAME, "default:eufy", "legacy-pw")
+    seen = []
+    real_save = creds._save_vault_to_keychain.__wrapped__
+
+    def spy(vault):
+        seen.append(creds._lock_depth)
+        real_save(vault)
+
+    with patch.object(creds, "_save_vault_to_keychain", spy):
+        assert creds.get_password("default:eufy") == "legacy-pw"
+    assert seen and all(depth >= 1 for depth in seen)
+    assert fake_keyring.get_password(SERVICE_NAME, "default:eufy") is None
+
+
+# --- Chunk cap -----------------------------------------------------------------
+
+
+def test_oversized_vault_is_refused_before_any_write(fake_keyring):
+    from eufy_sync.credentials import MAX_CHUNKS, VaultTooLargeError
+
+    store_token("garmin", _big_token(3 * CHUNK_LIMIT))
+    before = dict(fake_keyring.data)
+    with pytest.raises(VaultTooLargeError, match="--use-file-store"):
+        store_token("huge", _big_token(MAX_CHUNKS * CHUNK_LIMIT))
+    assert fake_keyring.data == before
+    assert get_token("garmin") == _big_token(3 * CHUNK_LIMIT)
+
+
+def test_largest_allowed_vault_round_trips(fake_keyring):
+    from eufy_sync.credentials import MAX_CHUNKS
+
+    overhead = len(json.dumps({"passwords": {}, "tokens": {"garmin": _big_token(0)}}))
+    token = _big_token(MAX_CHUNKS * CHUNK_LIMIT - overhead)
+    store_token("garmin", token)
+    assert _header(fake_keyring)["chunks"] == MAX_CHUNKS
+    assert get_token("garmin") == token
+
+
+def test_use_keychain_store_keeps_the_file_when_the_vault_is_too_large(fake_keyring, cred_file):
+    from eufy_sync.credentials import MAX_CHUNKS, VaultTooLargeError, use_keychain_store
+
+    cred_file.parent.mkdir(parents=True, exist_ok=True)
+    original = json.dumps({
+        "explicit": True, "passwords": {"default:eufy": "pw"},
+        "tokens": {"huge": _big_token(MAX_CHUNKS * CHUNK_LIMIT)},
+    })
+    cred_file.write_text(original)
+
+    with pytest.raises(VaultTooLargeError):
+        use_keychain_store()
+    assert cred_file.read_text() == original
+    assert _vault_accounts(fake_keyring) == set()
+
+
+def test_legacy_vault_with_more_chunks_than_the_cap_still_reads_and_migrates(fake_keyring, cred_file):
+    """Released versions wrote any number of "vault:i" chunks."""
+    from eufy_sync.credentials import MAX_CHUNKS
+
+    legacy = {"passwords": {"default:eufy": "pw"}, "tokens": {"garmin": _big_token((MAX_CHUNKS + 5) * CHUNK_LIMIT)}}
+    n = _write_legacy_chunked(fake_keyring, legacy)
+    assert n > MAX_CHUNKS
+
+    assert get_token("garmin") == legacy["tokens"]["garmin"]
+    # Too big for the new layout, so the save is refused and the legacy
+    # vault is left as it was rather than half-migrated.
+    with pytest.raises(credentials.VaultTooLargeError):
+        store_token("strava", {"a": 1})
+    assert get_token("garmin") == legacy["tokens"]["garmin"]
+    # Shrinking it migrates, and every legacy chunk is deleted.
+    store_token("garmin", {"a": 1})
+    assert _vault_accounts(fake_keyring) == {VAULT_ACCOUNT}
