@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,6 +15,20 @@ from eufy_sync.config import EufyConfig
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.eufylife.com/v1"
+LOGIN_URL = f"{BASE_URL}/user/v2/email/login"
+# EufyLife 3.3.12 for Android logs in here instead. Scale data still comes
+# from BASE_URL. Request shape follows m4ary/eufylife-api-hacs (MIT).
+FALLBACK_LOGIN_URL = "https://home-api.eufylife.com/v1/user/v2/email/login/"
+FALLBACK_APP_VERSION = "3.3.12"
+DEFAULT_COUNTRY = "US"
+
+CLIENT_ID = "eufy-app"
+CLIENT_SECRET = "8FHf22gaTKu7MZXqz5zytw"  # Public app identifier from EufyLife APK, not a per-user secret
+DEFAULT_TOKEN_TTL = 2592000  # 30 days
+
+# Error messages that mean the login endpoint itself is retired, as opposed to
+# the credentials being wrong.
+_ENDPOINT_RETIRED = re.compile(r"deprecat|upgrade|no longer supported|obsolete", re.I)
 
 COMMON_HEADERS = {
     "Accept": "*/*",
@@ -87,28 +102,110 @@ class EufyClient:
         self._fresh_login()
 
     def _fresh_login(self) -> None:
-        resp = self._client.post(f"{BASE_URL}/user/v2/email/login", json={
-            "client_id": "eufy-app",
-            "client_secret": "8FHf22gaTKu7MZXqz5zytw",  # Public app identifier from EufyLife APK, not a per-user secret
-            "email": self.config.email,
-            "password": self.config.password,
-        })
+        data, moved_reason = self._primary_login()
+        host = "api.eufylife.com"
+        if moved_reason is not None:
+            logger.info("Eufy login endpoint unavailable (%s); trying home-api.eufylife.com", moved_reason)
+            data = self._fallback_login()
+            host = "home-api.eufylife.com"
+
+        self._apply_login(data)
+        logger.info("Authenticated to Eufy as user %s via %s", self.user_id, host)
+
+    def _primary_login(self) -> tuple[dict | None, str | None]:
+        """Log in at the original host.
+
+        Returns (data, None) on success, or (None, reason) when the endpoint
+        looks moved or gone and the newer host is worth one try. Rejected
+        credentials and rate limits raise instead, so a bad password is never
+        sent twice.
+        """
+        try:
+            resp = self._client.post(LOGIN_URL, json={
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+                "email": self.config.email,
+                "password": self.config.password,
+            })
+        except httpx.ConnectError as e:  # DNS failure or connection refused
+            return None, type(e).__name__
+
+        if resp.status_code in (404, 410):
+            return None, f"HTTP {resp.status_code}"
         resp.raise_for_status()
-        data = resp.json()
+
+        try:
+            data = resp.json()
+        except ValueError:
+            return None, "non-JSON response"
+        if not isinstance(data, dict):
+            return None, "non-JSON response"
 
         if data.get("res_code") != 1:
-            from eufy_sync.sync import PermanentSyncError
-            msg = data.get("message", "unknown error")
-            raise PermanentSyncError(
-                f"Eufy login failed: {msg}. "
-                "If you changed your Eufy password, run: eufy-sync --update-password"
-            )
+            msg = str(data.get("message") or "")
+            if _ENDPOINT_RETIRED.search(msg):
+                return None, f"res_code {data.get('res_code')}"
+            self._raise_login_rejected(data)
+        return data, None
 
-        self.access_token = data["access_token"]
-        self.user_id = data["user_id"]
-        expires_in = data.get("expires_in", 2592000)  # default 30 days
+    def _fallback_login(self) -> dict:
+        """Log in at home-api.eufylife.com the way EufyLife 3.3.12 for Android does."""
+        country = DEFAULT_COUNTRY
+        resp = self._client.post(
+            FALLBACK_LOGIN_URL,
+            headers={
+                "User-Agent": f"EufyLife-Android-{FALLBACK_APP_VERSION}",
+                "Category": "Health",
+                "Country": country.upper(),
+            },
+            json={
+                "client_id": CLIENT_ID,
+                "client_Secret": CLIENT_SECRET,  # the app capitalizes this key on this host
+                "email": self.config.email,
+                "password": self.config.password,
+                "ab": country.lower(),
+                "un_subscribe_flag": True,
+            },
+        )
+        resp.raise_for_status()
+        try:
+            data = resp.json()
+        except ValueError:
+            raise RuntimeError("Eufy login failed: home-api.eufylife.com returned a non-JSON response") from None
+        if not isinstance(data, dict):
+            raise RuntimeError("Eufy login failed: home-api.eufylife.com returned an unexpected response")
+        if data.get("res_code") != 1:
+            self._raise_login_rejected(data)
+        return data
+
+    @staticmethod
+    def _raise_login_rejected(data: dict) -> None:
+        from eufy_sync.sync import PermanentSyncError
+        msg = data.get("message", "unknown error")
+        raise PermanentSyncError(
+            f"Eufy login failed: {msg}. "
+            "If you changed your Eufy password, run: eufy-sync --update-password"
+        )
+
+    def _apply_login(self, data: dict) -> None:
+        """Store the token and user id from either host's login response.
+
+        Both hosts put access_token and user_id at the top level; a nested
+        `data` object is accepted too in case Eufy wraps it later.
+        """
+        nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+        token = data.get("access_token") or nested.get("access_token")
+        user_id = data.get("user_id") or nested.get("user_id")
+        if not token or not user_id:
+            raise RuntimeError("Eufy login response is missing the access token or user id")
+
+        expires_in = data.get("expires_in", nested.get("expires_in"))
+        if not isinstance(expires_in, int) or expires_in <= 0:
+            expires_in = DEFAULT_TOKEN_TTL
+
+        self.access_token = str(token)
+        self.user_id = str(user_id)
         self._save_token(expires_in)
-        logger.info("Authenticated to Eufy as user %s", self.user_id)
 
     def token_status(self) -> dict:
         """Return token health without authenticating."""
