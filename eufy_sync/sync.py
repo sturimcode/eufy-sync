@@ -24,10 +24,19 @@ RETRY_BASE_DELAY = 5  # seconds
 # only a unique match close in both time and weight is safe to replace.
 UPGRADE_MAX_SECONDS = 120
 UPGRADE_MAX_WEIGHT_KG = 0.1
+# How far back a run reaches for weight-only Garmin entries that still lack
+# their full record. One that has not matched within two weeks never will,
+# and an unbounded reach-back would refetch everything since it on every run.
+UPGRADE_LOOKBACK_DAYS = 14
 
 
 class PermanentSyncError(RuntimeError):
     """Raised for failures that retries can't fix (bad password, revoked token)."""
+
+
+class UnsupportedMeasurementError(PermanentSyncError):
+    """A target cannot accept this one measurement (e.g. outside its weight
+    range). The measurement is skipped; the target itself stays healthy."""
 
 
 def _is_permanent(exc: BaseException) -> bool:
@@ -145,7 +154,9 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 if ts is None:
                     logger.info("No prior syncs to %s for %s, backfilling 7 days", name, user.name)
                 if name == "garmin":
-                    pending_ts = state.get_oldest_weight_only_timestamp(user.name, name)
+                    pending_ts = state.get_oldest_weight_only_timestamp(
+                        user.name, name, since=int(time.time()) - UPGRADE_LOOKBACK_DAYS * 86400,
+                    )
                     if pending_ts is not None:
                         # Processed data can arrive after newer weigh-ins have
                         # advanced the cursor. Include small timestamp shifts.
@@ -366,6 +377,9 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                         logger.info("Upgraded weight-only entry to full body comp for %s", m.timestamp.astimezone().date())
                     if target_name == "garmin" and (upgrade_row is not None or m.measurement_id in pending):
                         state.clear_pending_upgrade(user.name, m.measurement_id)
+                except UnsupportedMeasurementError as e:
+                    logger.warning("Skipping %s for %s: %s", target_name.capitalize(), user.name, e)
+                    continue
                 except Exception as e:
                     logger.error("Upload to %s failed for %s: %s", target_name, user.name, e)
                     # str(e) carries the actionable text the CLI keys its

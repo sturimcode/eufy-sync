@@ -302,8 +302,12 @@ class GarminAuth:
         return garmin
 
     def force_reauth(self) -> Garmin:
-        """Clear the stored token and do a fresh interactive login."""
-        self._clear_token()
+        """Do a fresh interactive login and store its token.
+
+        The login runs on a new client and the stored token is replaced only
+        once it succeeds. A failed attempt (a cancelled MFA prompt, a wrong
+        password, a passing Garmin or Cloudflare error) leaves the old token
+        where it was, since that session may still be good."""
         garmin = Garmin(self.email, self.password, prompt_mfa=_mfa_prompt)
         self._fresh_login(garmin)
         self._save_token(garmin)
@@ -311,12 +315,13 @@ class GarminAuth:
         return garmin
 
     def silent_reauth(self) -> Garmin:
-        """Clear the stored token and log in again with nobody watching.
+        """Log in again with nobody watching and store the new token.
 
         The scheduled counterpart to force_reauth: same recovery from a session
         Garmin has stopped honoring, but it never prompts and never opens a
-        browser."""
-        self._clear_token()
+        browser. The old token stays stored unless this login succeeds: a 403
+        that only looked like a dead session would otherwise cost an MFA user
+        a working session and force an interactive --reauth."""
         garmin = Garmin(self.email, self.password, prompt_mfa=_headless_mfa_prompt)
         self._silent_login(garmin)
         self._save_token(garmin)
@@ -451,11 +456,5 @@ class GarminAuth:
         blob = json.loads(garmin.client.dumps())
         from eufy_sync.credentials import store_token
         store_token("garmin", blob)
-        if self.session_path.exists():
-            self.session_path.unlink()
-
-    def _clear_token(self) -> None:
-        from eufy_sync.credentials import delete_token
-        delete_token("garmin")
         if self.session_path.exists():
             self.session_path.unlink()

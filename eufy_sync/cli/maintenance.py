@@ -14,7 +14,7 @@ from eufy_sync.prompt import PROMPT_TIMEOUT_SECONDS, input_with_timeout
 
 
 def _update_password(config_path: Path) -> None:
-    """Update stored passwords."""
+    """Update stored passwords, each one only after it logs in."""
     if not config_path.exists():
         print("No config found. Run eufy-sync first to set up.")
         sys.exit(1)
@@ -36,46 +36,77 @@ def _update_password(config_path: Path) -> None:
         print("No changes made.")
         return
 
-    from eufy_sync.credentials import delete_token, store_password
+    from eufy_sync.credentials import store_password
 
-    if eufy_pw:
-        store_password(f"{user_name}:eufy", eufy_pw)
+    # Each new password logs in before it is stored. The login saves its own
+    # token on success; a failure (a typo, a cancelled MFA prompt, no network)
+    # leaves that service's stored password and token as they were, so a
+    # mistake here cannot end a session that was still working.
+    changes = [
+        (label, password, verify)
+        for label, password, verify in (
+            ("Eufy", eufy_pw, _verify_eufy_password),
+            ("Garmin", garmin_pw, _verify_garmin_password),
+            ("Zwift", zwift_pw, _verify_zwift_password),
+        )
+        if password
+    ]
+    updated = []
+    for label, password, verify in changes:
+        print(f"Checking the new {label} password...")
+        try:
+            verify(user, password)
+        except Exception as e:
+            print(f"{label} login with the new password failed: {e}")
+            print(f"The stored {label} password and login were left unchanged.")
+            if updated:
+                print(f"Already updated: {' and '.join(updated)}.")
+            print("Retry with: eufy-sync --update-password")
+            sys.exit(1)
+        store_password(f"{user_name}:{label.lower()}", password)
+        updated.append(label)
 
-    if garmin_pw:
-        store_password(f"{user_name}:garmin", garmin_pw)
-    if zwift_pw:
-        store_password(f"{user_name}:zwift", zwift_pw)
+    print(f"{' and '.join(updated)} password{'s' if len(updated) > 1 else ''} updated.")
 
-    # Clear cached tokens for changed services
-    if eufy_pw:
-        delete_token("eufy")
-        eufy_token = shared.DATA_DIR / "eufy_token.json"
-        if eufy_token.exists():
-            eufy_token.unlink()
 
-    if garmin_pw:
-        delete_token("garmin")
-        garmin_session = shared.DATA_DIR / "session.json"
-        if garmin_session.exists():
-            garmin_session.unlink()
-    if zwift_pw:
-        delete_token("zwift")
+def _verify_eufy_password(user: dict, password: str) -> None:
+    """Log in to Eufy with password; the token is replaced only on success."""
+    from eufy_sync.config import EufyConfig
+    from eufy_sync.eufy_client import EufyClient
 
-    changed = []
-    if eufy_pw:
-        changed.append("Eufy")
-    if garmin_pw:
-        changed.append("Garmin")
-    if zwift_pw:
-        changed.append("Zwift")
-    print(f"{' and '.join(changed)} password{'s' if len(changed) > 1 else ''} updated.")
+    client = EufyClient(
+        EufyConfig(email=user["eufy"]["email"], password=password),
+        token_path=shared.DATA_DIR / "eufy_token.json",
+    )
+    try:
+        # Skip the cached token on purpose: it says nothing about the password.
+        client._fresh_login()
+    finally:
+        client.close()
 
-    if garmin_pw:
-        print("Garmin password changed - re-authenticating...")
-        _reauth(config_path, config, target="garmin")
-    if zwift_pw:
-        print("Zwift password changed - re-authenticating...")
-        _reauth(config_path, config, target="zwift")
+
+def _verify_garmin_password(user: dict, password: str) -> None:
+    """Log in to Garmin with password, prompting for MFA if Garmin asks.
+    force_reauth replaces the stored token only after the login succeeds."""
+    from eufy_sync.garmin_auth import GarminAuth
+
+    auth = GarminAuth(user["garmin"]["email"], password, session_path=shared.DATA_DIR / "session.json")
+    auth.force_reauth()
+    print("Done - Garmin tokens saved.")
+
+
+def _verify_zwift_password(user: dict, password: str) -> None:
+    """Log in to Zwift with password. A forced login reads the profile before
+    it saves anything, so the cached token is replaced only on success."""
+    from eufy_sync.config import ZwiftConfig
+    from eufy_sync.zwift_client import ZwiftClient
+
+    client = ZwiftClient(ZwiftConfig(email=user["zwift"]["email"], password=password))
+    try:
+        client.authenticate(force=True)
+    finally:
+        client.close()
+    print("Done - Zwift token saved.")
 
 
 def _reauth(config_path: Path, config: dict | None = None, force: bool = False, target: str | None = None) -> None:
@@ -214,12 +245,14 @@ def _uninstall_launch_agent() -> None:
     platform_support.uninstall_agent()
 
 
-def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | None = None) -> None:
+def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | None = None) -> bool:
     """Remove all eufy-sync data: Launch Agent, config, tokens, state DB.
 
     config_path/db_path default to the standard files under data_dir, but a
     custom --config/--db location (outside data_dir) is also deleted so
     --uninstall does not leave those files behind.
+
+    Returns True when the data was removed, False when the user cancelled.
     """
     if not sys.stdin.isatty():
         print("Error: --uninstall requires an interactive terminal.")
@@ -236,7 +269,7 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
     answer = input("Are you sure? [y/N] ").strip()
     if not answer.lower().startswith("y"):
         print("Cancelled.")
-        return
+        return False
 
     default_config_path = data_dir / "config.yaml"
     default_db_path = data_dir / "state.db"
@@ -266,51 +299,75 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
         except Exception:
             pass
 
-    # Clear the keychain vault. On a file-backend machine this gate skips the
-    # deletes, which is safe only because credentials.json lives inside data_dir
-    # and is erased by the rmtree below; keep them together if CRED_FILE ever
-    # moves outside ~/.garmin-sync.
-    from eufy_sync.credentials import _keyring_available, delete_password, delete_token
-    if _keyring_available():
-        # Best-effort: a locked keychain makes the vault read raise, and a
-        # half-finished uninstall that leaves the data dir behind (the rmtree
-        # is below) plus a raw traceback is worse than skipping this. The
-        # rmtree still erases a file-backed vault under data_dir.
-        try:
-            for name in user_names:
-                # "strava" here is the API app's client secret, not an account
-                # password; it moved into the vault alongside the other two.
-                for suffix in ["eufy", "garmin", "strava", "zwift"]:
-                    delete_password(f"{name}:{suffix}")
-            delete_token("eufy")
-            delete_token("garmin")
-            delete_token("strava")
-            delete_token("zwift")
-            delete_token("zwift_probe")
-        except Exception:
-            print("Note: could not clear keychain entries (the keychain may be locked).")
+    from eufy_sync.cli.lock import LOCK_NAME
+    from eufy_sync.credentials import (
+        VAULT_LOCK_NAME,
+        _keyring_available,
+        delete_password,
+        delete_token,
+        vault_lock,
+    )
 
-    # Remove data directory. A kept DB at a custom --db path lives outside
-    # data_dir, so only the default location needs the selective sweep.
-    preserve_default_db = keep_db and db_path == default_db_path and db_path.exists()
-    if data_dir.exists():
-        if not preserve_default_db:
-            shutil.rmtree(data_dir)
-        else:
+    # One vault lock across clearing the vault and deleting credentials.json,
+    # so no credential write can land in between.
+    with vault_lock():
+        # Clear the keychain vault. On a file-backend machine this gate skips the
+        # deletes, which is safe only because credentials.json lives inside data_dir
+        # and is erased by the rmtree below; keep them together if CRED_FILE ever
+        # moves outside ~/.garmin-sync.
+        if _keyring_available():
+            # Best-effort: a locked keychain makes the vault read raise, and a
+            # half-finished uninstall that leaves the data dir behind (the rmtree
+            # is below) plus a raw traceback is worse than skipping this. The
+            # rmtree still erases a file-backed vault under data_dir.
+            try:
+                for name in user_names:
+                    # "strava" here is the API app's client secret, not an account
+                    # password; it moved into the vault alongside the other two.
+                    for suffix in ["eufy", "garmin", "strava", "zwift"]:
+                        delete_password(f"{name}:{suffix}")
+                delete_token("eufy")
+                delete_token("garmin")
+                delete_token("strava")
+                delete_token("zwift")
+                delete_token("zwift_probe")
+            except Exception:
+                print("Note: could not clear keychain entries (the keychain may be locked).")
+
+        # Remove data directory. A kept DB at a custom --db path lives outside
+        # data_dir, so only the default location needs the selective sweep.
+        # Both lock files are skipped: --uninstall holds them, and a lock file
+        # deleted mid-sweep lets another process create and lock a fresh one
+        # while credentials are still being removed. The vault lock file goes
+        # below, after everything else; the caller handles the sync lock file
+        # (see lock.unlink_while_held and _remove_lock_files).
+        preserve_default_db = keep_db and db_path == default_db_path and db_path.exists()
+        if data_dir.exists():
+            keep = {LOCK_NAME, VAULT_LOCK_NAME}
+            if preserve_default_db:
+                keep.add("state.db")
             for item in data_dir.iterdir():
-                if item.name == "state.db":
+                if item.name in keep:
                     continue
                 if item.is_dir():
                     shutil.rmtree(item)
                 else:
                     item.unlink()
 
-    # A custom --config/--db path lives outside data_dir, so it survives the
-    # rmtree above and must be removed explicitly.
-    if config_path != default_config_path and config_path.exists():
-        config_path.unlink()
-    if db_path != default_db_path and not keep_db and db_path.exists():
-        db_path.unlink()
+        # A custom --config/--db path lives outside data_dir, so it survives the
+        # sweep above and must be removed explicitly.
+        if config_path != default_config_path and config_path.exists():
+            config_path.unlink()
+        if db_path != default_db_path and not keep_db and db_path.exists():
+            db_path.unlink()
+
+        # Last step under the vault lock. On POSIX the lock file is deleted
+        # while still held, so no other process can lock it between release
+        # and delete. Windows refuses to delete an open file, so there
+        # _remove_lock_files deletes it after release.
+        if sys.platform != "win32":
+            (data_dir / VAULT_LOCK_NAME).unlink(missing_ok=True)
+        _remove_dir_if_empty(data_dir)
 
     print("")
     if keep_db:
@@ -319,3 +376,30 @@ def _uninstall(data_dir: Path, config_path: Path | None = None, db_path: Path | 
         print("Removed all eufy-sync data.")
 
     print(f"To remove the package itself, run: {install.uninstall_command()}")
+    return True
+
+
+def _remove_dir_if_empty(path: Path) -> None:
+    try:
+        path.rmdir()
+    except OSError:
+        pass
+
+
+def _remove_lock_files(data_dir: Path) -> None:
+    """Finish --uninstall once its locks are released.
+
+    On Windows the lock files could not be deleted while open, so they go
+    now; another process that has one open blocks the delete, which keeps it
+    safe. On POSIX they were already deleted while still held, and deleting
+    now could remove a lock file another process has just created and
+    locked. Either way the data dir goes too when nothing else is left."""
+    from eufy_sync.cli.lock import LOCK_NAME
+    from eufy_sync.credentials import VAULT_LOCK_NAME
+    if sys.platform == "win32":
+        for name in (LOCK_NAME, VAULT_LOCK_NAME):
+            try:
+                (data_dir / name).unlink(missing_ok=True)
+            except OSError:
+                pass
+    _remove_dir_if_empty(data_dir)

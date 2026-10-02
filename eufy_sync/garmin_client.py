@@ -68,9 +68,15 @@ def _match_uploaded_entry(entries: list[dict], uploaded_at: datetime) -> dict | 
 
 
 def _is_garmin_auth_failure(exc: Exception) -> bool:
-    """True when a Garmin call failed because the session is dead. Covers the
-    dedicated auth error and the 401/403 that the library reports as a generic
-    connection error ("API Error 401 - ...")."""
+    """True when a Garmin call failed because the session may be dead. Covers
+    the dedicated auth error and the 401/403 that the library reports as a
+    generic connection error ("API Error 401 - ...").
+
+    A Cloudflare 403 matches too: the library drops the response body before
+    raising, so the message is the same "API Error 403" either way. That is
+    safe only because a relogin keeps the stored token until the new login
+    succeeds, so a 403 that was only a passing block costs one login attempt,
+    not the session."""
     if isinstance(exc, GarminConnectAuthenticationError):
         return True
     return isinstance(exc, GarminConnectConnectionError) and (
@@ -84,6 +90,15 @@ class GarminClient:
         self._auth = GarminAuth(config.email, config.password)
         self._garmin = None
         self._allow_interactive = True
+        # At most one relogin per run, whether or not it worked. After a
+        # failed one, later calls raise its error again: a second attempt
+        # minutes later meets the same MFA demand or wrong password. After a
+        # successful one, a later 401/403 means the fresh session did not help
+        # (a Cloudflare block on the API while SSO still lets logins through),
+        # so the call's own error is raised. Every extra login raises the odds
+        # of a Garmin 429.
+        self._reauth_attempted = False
+        self._reauth_error: Exception | None = None
 
     def authenticate(self, allow_interactive: bool = True) -> None:
         self._allow_interactive = allow_interactive
@@ -96,13 +111,21 @@ class GarminClient:
         usually needs no input at all, so it tries once silently rather than
         ending the run on a re-auth nag the run could have fixed itself. When
         even that cannot proceed (MFA demanded, password wrong), the error
-        already names the command to run and travels to the caller unchanged."""
-        if not self._allow_interactive:
-            logger.info("Garmin session expired; re-authenticating without prompts")
-            self._garmin = self._auth.silent_reauth()
-        else:
-            logger.info("Garmin session expired; re-authenticating")
-            self._garmin = self._auth.force_reauth()
+        already names the command to run and travels to the caller unchanged.
+
+        Only one relogin is tried per run. After a failure, every later call
+        that needs one gets the same error back without contacting Garmin."""
+        self._reauth_attempted = True
+        try:
+            if not self._allow_interactive:
+                logger.info("Garmin session expired; re-authenticating without prompts")
+                self._garmin = self._auth.silent_reauth()
+            else:
+                logger.info("Garmin session expired; re-authenticating")
+                self._garmin = self._auth.force_reauth()
+        except Exception as e:
+            self._reauth_error = e
+            raise
 
     def _call_with_reauth(self, call):
         """Run a Garmin call, re-logging in once when the session is dead.
@@ -115,6 +138,15 @@ class GarminClient:
             return call()
         except (GarminConnectAuthenticationError, GarminConnectConnectionError) as e:
             if not _is_garmin_auth_failure(e):
+                raise
+            if self._reauth_attempted:
+                if self._reauth_error is not None:
+                    # This run already tried to log in again and failed.
+                    # Report that failure, which names the fix, rather than
+                    # this call's 401 or 403.
+                    raise self._reauth_error from e
+                # The relogin worked and Garmin still refuses: another login
+                # would not change that.
                 raise
             self._reauth()
             return call()
@@ -139,6 +171,8 @@ class GarminClient:
             return self._call_with_reauth(read)
         except Exception as e:
             # Fail open: let the upload proceed; Garmin de-dupes by timestamp.
+            # A failed relogin is remembered, so the upload reports it with its
+            # fix-it hint instead of logging in a second time.
             logger.warning("Garmin duplicate-check failed for %s: %s", date_str, e)
             return False
 

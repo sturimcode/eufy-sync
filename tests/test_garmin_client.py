@@ -298,6 +298,33 @@ def test_duplicate_check_fails_open_when_the_relogin_fails():
         assert client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc)) is False
 
 
+def test_a_successful_relogin_is_not_repeated_when_the_api_keeps_refusing():
+    # Cloudflare 403s on the API while SSO logins succeed: the first call
+    # relogs in, and every later call must fail with its own error instead
+    # of running a full login each time.
+    from garminconnect import GarminConnectConnectionError
+
+    blocked = GarminConnectConnectionError("API Error 403 - ")
+    stale = MagicMock()
+    stale.get_body_composition.side_effect = blocked
+    fresh = MagicMock()
+    fresh.get_body_composition.side_effect = blocked
+    fresh.get_daily_weigh_ins.side_effect = blocked
+    fresh.add_body_composition.side_effect = blocked
+    client = _client_with_fake_garmin(stale)
+    client._allow_interactive = False
+    bc = GarminBodyComposition(timestamp="2026-06-10T08:00:00+00:00", weight=86.2)
+
+    with patch.object(client._auth, "silent_reauth", return_value=fresh) as reauth:
+        assert client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc)) is False
+        with pytest.raises(GarminConnectConnectionError, match="403"):
+            client.check_connection()
+        with pytest.raises(GarminConnectConnectionError, match="403"):
+            client.upload_body_composition(bc)
+
+    reauth.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # close() persists whatever the library rotated during the run
 # ---------------------------------------------------------------------------
@@ -496,3 +523,68 @@ def test_delete_weight_entry_fails_open_when_the_relogin_fails():
     with patch.object(client._auth, "silent_reauth",
                       side_effect=PermanentSyncError("Garmin wants an MFA code")):
         assert client.delete_weight_entry(UPLOADED_AT, 85.0) is False
+
+
+# ---------------------------------------------------------------------------
+# One relogin per run
+# ---------------------------------------------------------------------------
+
+
+def test_failed_relogin_in_duplicate_check_is_not_retried_by_the_upload():
+    # The duplicate check fails open after a relogin that wants MFA. The
+    # upload that follows must report that same failure, with its fix-it hint,
+    # rather than try a second login (another MFA demand, more 429 risk).
+    from garminconnect import GarminConnectConnectionError
+
+    from eufy_sync.sync import PermanentSyncError
+    dead = MagicMock()
+    dead.get_body_composition.side_effect = GarminConnectConnectionError("API Error 403")
+    dead.add_body_composition.side_effect = GarminConnectConnectionError("API Error 403")
+    client = _client_with_fake_garmin(dead)
+    client._allow_interactive = False
+    failure = PermanentSyncError("Garmin wants an MFA code. Run: eufy-sync --reauth garmin")
+    bc = GarminBodyComposition(timestamp="2026-06-10T08:00:00+00:00", weight=80.0)
+    with patch.object(client._auth, "silent_reauth", side_effect=failure) as reauth:
+        assert client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc)) is False
+        with pytest.raises(PermanentSyncError) as exc:
+            client.upload_body_composition(bc)
+    reauth.assert_called_once()
+    assert exc.value is failure
+    assert "--reauth garmin" in str(exc.value)
+
+
+def test_failed_relogin_in_delete_is_not_retried_by_the_upload():
+    from garminconnect import GarminConnectAuthenticationError
+
+    from eufy_sync.sync import PermanentSyncError
+    dead = MagicMock()
+    dead.get_daily_weigh_ins.side_effect = GarminConnectAuthenticationError("dead")
+    dead.add_body_composition.side_effect = GarminConnectAuthenticationError("dead")
+    client = _client_with_fake_garmin(dead)
+    client._allow_interactive = True
+    failure = PermanentSyncError("Garmin login cancelled")
+    bc = GarminBodyComposition(timestamp="2026-06-10T08:00:00+00:00", weight=80.0)
+    with patch.object(client._auth, "force_reauth", side_effect=failure) as reauth:
+        assert client.delete_weight_entry(UPLOADED_AT, 85.0) is False
+        with pytest.raises(PermanentSyncError):
+            client.upload_body_composition(bc)
+    reauth.assert_called_once()
+
+
+def test_old_session_still_serves_calls_after_a_failed_relogin():
+    # A Cloudflare 403 reads like a dead session but may pass. After the
+    # relogin fails, the old session is kept, and a later call that goes
+    # through is not blocked by the remembered failure.
+    from garminconnect import GarminConnectConnectionError
+
+    from eufy_sync.sync import PermanentSyncError
+    session = MagicMock()
+    session.get_body_composition.side_effect = GarminConnectConnectionError("API Error 403")
+    session.add_body_composition.return_value = {"ok": True}
+    client = _client_with_fake_garmin(session)
+    client._allow_interactive = False
+    bc = GarminBodyComposition(timestamp="2026-06-10T08:00:00+00:00", weight=80.0)
+    with patch.object(client._auth, "silent_reauth", side_effect=PermanentSyncError("mfa")):
+        assert client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc)) is False
+        assert client.upload_body_composition(bc) == {"ok": True}
+    assert client._garmin is session

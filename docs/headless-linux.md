@@ -65,6 +65,22 @@ A user timer normally runs only while that user's systemd manager is active. If 
 sudo loginctl enable-linger "$USER"
 ```
 
+## Set the timezone
+
+eufy-sync uses the machine's timezone to decide which day a weigh-in belongs to when it checks Garmin for an existing entry, and to show dates in its summaries and notifications. Servers, NAS boxes, and containers often run on UTC, which can put an evening weigh-in on the next day. Set `TZ` to your local zone for the scheduled run.
+
+For the systemd service, add this line under `[Service]`:
+
+```ini
+Environment=TZ=America/New_York
+```
+
+For Docker, pass it when starting the container:
+
+```bash
+docker run -e TZ=America/New_York ...
+```
+
 ## Check a scheduled run
 
 ```bash

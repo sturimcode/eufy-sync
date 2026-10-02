@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from eufy_sync.config import EufyConfig
@@ -395,3 +396,178 @@ def test_processed_measurement_is_not_weight_only():
     c = _client()
     m = c._parse_record(_record("a", 800, 100))
     assert m.weight_only is False
+
+
+# ---------------------------------------------------------------------------
+# Login host fallback: EufyLife 3.3.12 logs in at home-api.eufylife.com. Use it
+# only when the original endpoint looks moved or gone, never after a rejected
+# password or a rate limit.
+# ---------------------------------------------------------------------------
+
+PRIMARY_LOGIN = "https://api.eufylife.com/v1/user/v2/email/login"
+FALLBACK_LOGIN = "https://home-api.eufylife.com/v1/user/v2/email/login/"
+
+
+def _login_client():
+    c = EufyClient.__new__(EufyClient)
+    c.config = EufyConfig(email="e@example.com", password="pw")
+    c.access_token = None
+    c.user_id = None
+    c._client = MagicMock()
+    c._save_token = MagicMock()
+    return c
+
+
+def _http_resp(status_code, json_body=None, *, url=PRIMARY_LOGIN):
+    request = httpx.Request("POST", url)
+    if json_body is None:
+        return httpx.Response(status_code, text="<html>Not Found</html>", request=request)
+    return httpx.Response(status_code, json=json_body, request=request)
+
+
+def _login_ok(token="tok-1", user_id="uid-1", **extra):
+    return {"res_code": 1, "access_token": token, "user_id": user_id, **extra}
+
+
+def _posted_urls(c):
+    return [call.args[0] for call in c._client.post.call_args_list]
+
+
+def test_login_primary_success_does_not_fall_back():
+    c = _login_client()
+    c._client.post.return_value = _http_resp(200, _login_ok(expires_in=86400))
+    c._fresh_login()
+    assert _posted_urls(c) == [PRIMARY_LOGIN]
+    assert (c.access_token, c.user_id) == ("tok-1", "uid-1")
+    c._save_token.assert_called_once_with(86400)
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_login_primary_gone_falls_back_to_home_api(status):
+    c = _login_client()
+    c._client.post.side_effect = [
+        _http_resp(status),
+        _http_resp(200, _login_ok("tok-2", "uid-2"), url=FALLBACK_LOGIN),
+    ]
+    c._fresh_login()
+    assert _posted_urls(c) == [PRIMARY_LOGIN, FALLBACK_LOGIN]
+    assert (c.access_token, c.user_id) == ("tok-2", "uid-2")
+
+    fallback = c._client.post.call_args_list[1]
+    assert fallback.kwargs["headers"]["User-Agent"] == "EufyLife-Android-3.3.12"
+    assert fallback.kwargs["headers"]["Country"] == "US"
+    assert fallback.kwargs["headers"]["Category"] == "Health"
+    assert fallback.kwargs["json"]["ab"] == "us"
+    assert fallback.kwargs["json"]["email"] == "e@example.com"
+
+
+def test_login_connection_failure_falls_back():
+    c = _login_client()
+    c._client.post.side_effect = [
+        httpx.ConnectError("Name or service not known"),
+        _http_resp(200, _login_ok(), url=FALLBACK_LOGIN),
+    ]
+    c._fresh_login()
+    assert _posted_urls(c) == [PRIMARY_LOGIN, FALLBACK_LOGIN]
+
+
+def test_login_non_json_200_falls_back():
+    c = _login_client()
+    c._client.post.side_effect = [
+        _http_resp(200),  # HTML body
+        _http_resp(200, _login_ok(), url=FALLBACK_LOGIN),
+    ]
+    c._fresh_login()
+    assert _posted_urls(c) == [PRIMARY_LOGIN, FALLBACK_LOGIN]
+
+
+def test_login_deprecated_message_falls_back():
+    c = _login_client()
+    c._client.post.side_effect = [
+        _http_resp(200, {"res_code": 26050, "message": "This API is deprecated, please upgrade the app"}),
+        _http_resp(200, _login_ok(), url=FALLBACK_LOGIN),
+    ]
+    c._fresh_login()
+    assert _posted_urls(c) == [PRIMARY_LOGIN, FALLBACK_LOGIN]
+
+
+def test_login_wrong_password_does_not_fall_back():
+    from eufy_sync.sync import PermanentSyncError
+    c = _login_client()
+    c._client.post.return_value = _http_resp(200, {"res_code": 26006, "message": "Incorrect password"})
+    with pytest.raises(PermanentSyncError):
+        c._fresh_login()
+    assert _posted_urls(c) == [PRIMARY_LOGIN]
+    c._save_token.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_login_auth_rejected_status_does_not_fall_back(status):
+    c = _login_client()
+    c._client.post.return_value = _http_resp(status, {"res_code": 0})
+    with pytest.raises(httpx.HTTPStatusError):
+        c._fresh_login()
+    assert _posted_urls(c) == [PRIMARY_LOGIN]
+
+
+def test_login_rate_limited_does_not_fall_back():
+    c = _login_client()
+    c._client.post.return_value = _http_resp(429, {"res_code": 0, "message": "Too many requests"})
+    with pytest.raises(httpx.HTTPStatusError):
+        c._fresh_login()
+    assert _posted_urls(c) == [PRIMARY_LOGIN]
+
+
+def test_login_fallback_wrong_password_raises_permanent_error():
+    from eufy_sync.sync import PermanentSyncError
+    c = _login_client()
+    c._client.post.side_effect = [
+        _http_resp(404),
+        _http_resp(200, {"res_code": 26006, "message": "Incorrect password"}, url=FALLBACK_LOGIN),
+    ]
+    with pytest.raises(PermanentSyncError):
+        c._fresh_login()
+    assert len(_posted_urls(c)) == 2
+
+
+def test_home_api_response_shape_parses():
+    """Field names from the EufyLife 3.3.12 login response, as read by
+    m4ary/eufylife-api-hacs and osjayaprakash/eufylife-scale-mcp."""
+    c = _login_client()
+    home_api_body = {
+        "res_code": 1,
+        "message": "success",
+        "access_token": "home-tok",
+        "user_id": "home-uid",
+        "expires_in": 2592000,
+        "user_center_id": "center-id",
+        "user_center_token": "center-tok",
+        "device_id": "phone-id",
+        "customers": [{"id": "cust-a", "name": "A"}, {"id": "cust-b", "name": "B"}],
+    }
+    c._client.post.side_effect = [_http_resp(404), _http_resp(200, home_api_body, url=FALLBACK_LOGIN)]
+    c._fresh_login()
+    # The data endpoints take the login access_token and user_id, not user_center_token.
+    assert c.access_token == "home-tok"
+    assert c.user_id == "home-uid"
+    c._save_token.assert_called_once_with(2592000)
+
+
+def test_login_response_nested_under_data_parses_and_defaults_ttl():
+    c = _login_client()
+    c._client.post.return_value = _http_resp(
+        200, {"res_code": 1, "data": {"access_token": "n-tok", "user_id": 12345}},
+    )
+    c._fresh_login()
+    assert (c.access_token, c.user_id) == ("n-tok", "12345")
+    c._save_token.assert_called_once_with(2592000)
+
+
+def test_login_logs_host_without_secrets(caplog):
+    c = _login_client()
+    c._client.post.side_effect = [_http_resp(404), _http_resp(200, _login_ok("secret-tok"), url=FALLBACK_LOGIN)]
+    with caplog.at_level("DEBUG", logger="eufy_sync.eufy_client"):
+        c._fresh_login()
+    assert "home-api.eufylife.com" in caplog.text
+    assert "secret-tok" not in caplog.text
+    assert "pw" not in caplog.text.split()

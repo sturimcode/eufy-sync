@@ -153,7 +153,9 @@ def _check_keychain(report) -> None:
             return
         report("PASS", "keychain", active_store_label())
     except Exception as e:
-        report("PASS", "keychain", f"file store (no keychain prompts) ({e})")
+        # A damaged or unreadable credentials file now raises here instead
+        # of quietly falling back to the keychain.
+        report("FAIL", "keychain", str(e))
 
 
 def _check_eufy_token(report, user):
@@ -281,9 +283,9 @@ def _check_state_db(report, db_path: Path, user) -> None:
             days = ago.days
             hours = int(ago.total_seconds() / 3600)
             if days > 0:
-                report("PASS", "state db", f"last sync {days}d ago")
+                report("PASS", "state db", f"latest weigh-in {days}d ago")
             else:
-                report("PASS", "state db", f"last sync {hours}h ago")
+                report("PASS", "state db", f"latest weigh-in {hours}h ago")
     except Exception as e:
         report("FAIL", "state db", str(e))
     finally:

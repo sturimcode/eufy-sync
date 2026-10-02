@@ -994,7 +994,8 @@ def test_second_full_record_same_day_does_not_delete(tmp_path: Path):
 def test_automatic_sync_revisits_older_weight_only_readings(tmp_path: Path):
     state = SyncState(tmp_path / "test.db")
     user = _garmin_user()
-    old_dt = datetime(2026, 5, 10, 12, tzinfo=timezone.utc)
+    # Inside UPGRADE_LOOKBACK_DAYS; older readings are no longer revisited.
+    old_dt = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=6)
     old_raw = _raw_measurement(85.0, old_dt)
     newest = _full_measurement(84.0, old_dt + timedelta(days=3))
     _run_garmin_sync(user, state, [old_raw, newest], has_weight_on_date_return=False)
@@ -1013,6 +1014,62 @@ def test_automatic_sync_revisits_older_weight_only_readings(tmp_path: Path):
     assert counts == {"garmin": 1}
     assert state.get_oldest_weight_only_timestamp(user.name, "garmin") is None
     assert state.get_latest_sync_timestamp(user.name, "garmin") == int(newest.timestamp.timestamp())
+    state.close()
+
+
+def test_stale_weight_only_reading_stops_widening_the_fetch_window(tmp_path: Path):
+    """A raw reading whose full record never matched must not pull every
+    run back to its date forever; past the lookback it is ignored."""
+    from eufy_sync.sync import UPGRADE_LOOKBACK_DAYS
+
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(days=UPGRADE_LOOKBACK_DAYS + 30)
+    recent = now - timedelta(days=1)
+    state.record_sync(user.name, "cust_stale", stale.isoformat(), 85.0,
+                      stale.isoformat(), target="garmin", weight_only=True)
+    state.record_sync(user.name, "cust_recent", recent.isoformat(), 84.0,
+                      recent.isoformat(), target="garmin")
+
+    source = MagicMock()
+    source.fetch_measurements.return_value = []
+    with patch("eufy_sync.sync.EufyClient", return_value=source), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=MagicMock()), \
+         patch("eufy_sync.sync.time.sleep"):
+        _, errors = sync_user(user, state)
+
+    assert errors == {}
+    after = source.fetch_measurements.call_args.kwargs["after_timestamp"]
+    assert after == int(recent.timestamp())
+    # The row is kept, so a backfill that returns its full record can still upgrade it.
+    assert len(state.weight_only_syncs_on_date(user.name, "garmin", stale.astimezone().date())) == 1
+    assert state.get_oldest_weight_only_timestamp(user.name, "garmin") == int(stale.timestamp())
+    state.close()
+
+
+def test_recent_weight_only_reading_still_widens_the_fetch_window(tmp_path: Path):
+    from eufy_sync.sync import UPGRADE_MAX_SECONDS
+
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_user()
+    now = datetime.now(timezone.utc)
+    pending = now - timedelta(days=5)
+    recent = now - timedelta(days=1)
+    state.record_sync(user.name, "cust_pending", pending.isoformat(), 85.0,
+                      pending.isoformat(), target="garmin", weight_only=True)
+    state.record_sync(user.name, "cust_recent", recent.isoformat(), 84.0,
+                      recent.isoformat(), target="garmin")
+
+    source = MagicMock()
+    source.fetch_measurements.return_value = []
+    with patch("eufy_sync.sync.EufyClient", return_value=source), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=MagicMock()), \
+         patch("eufy_sync.sync.time.sleep"):
+        sync_user(user, state)
+
+    after = source.fetch_measurements.call_args.kwargs["after_timestamp"]
+    assert after == int(pending.timestamp()) - UPGRADE_MAX_SECONDS
     state.close()
 
 

@@ -6,7 +6,9 @@ Flow:
    capture the callback code via a local HTTP server, and exchange for tokens.
 2. Tokens stored in keychain (file fallback).
 3. Access tokens expire after 6 hours; refresh tokens are indefinite.
-4. On each sync, we PUT /api/v3/athlete with the latest weight.
+4. On each sync, we PUT /athlete with the latest weight.
+5. The API host follows Strava's published move to api-v3.strava.com
+   (see _api_bases).
 """
 from __future__ import annotations
 
@@ -15,6 +17,8 @@ import logging
 import secrets
 import time
 import webbrowser
+from collections.abc import Callable
+from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Thread
@@ -28,10 +32,29 @@ logger = logging.getLogger(__name__)
 
 STRAVA_AUTH_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
-STRAVA_API_BASE = "https://www.strava.com/api/v3"
+STRAVA_API_BASE_OLD = "https://www.strava.com/api/v3"
+STRAVA_API_BASE_NEW = "https://api-v3.strava.com"
+# Strava's changelog (2026-06-01) says the new base is available from this date.
+NEW_API_BASE_FROM = date(2027, 1, 4)
 CALLBACK_PORT = 8089
 REDIRECT_URI = f"http://localhost:{CALLBACK_PORT}/callback"
 REFRESH_SAFETY_MARGIN = 300  # seconds before expiry to trigger refresh
+
+
+def _utc_today() -> date:
+    return datetime.now(timezone.utc).date()
+
+
+def _api_bases(today: date) -> tuple[str, ...]:
+    """API bases to try, in order, for a request made on ``today``.
+
+    Before the new host exists we use the old one. After that we try the new
+    host first and keep the old one as a fallback. Strava hasn't published a
+    shutdown date for the old host, so the fallback has no end date either.
+    """
+    if today < NEW_API_BASE_FROM:
+        return (STRAVA_API_BASE_OLD,)
+    return (STRAVA_API_BASE_NEW, STRAVA_API_BASE_OLD)
 
 
 def _auth_url(client_id: str, state_value: str) -> str:
@@ -163,12 +186,25 @@ def authorize_strava(config: StravaConfig) -> dict:
 
 
 class StravaClient:
-    """Syncs weight to Strava via PUT /api/v3/athlete."""
+    """Syncs weight to Strava via PUT /athlete."""
 
-    def __init__(self, config: StravaConfig):
+    def __init__(self, config: StravaConfig, today: Callable[[], date] = _utc_today):
         self.config = config
         self._client = httpx.Client(timeout=30.0)
         self._tokens: dict | None = None
+        self._today = today
+
+    def _api_request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        """Send an API request, falling back to the next base only when the
+        connection itself fails. Any HTTP response, including 401, 403 and
+        429, comes from a live host and is returned as is."""
+        bases = _api_bases(self._today())
+        for base in bases[:-1]:
+            try:
+                return self._client.request(method, f"{base}{path}", **kwargs)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                logger.info("Could not reach %s (%s); trying %s", base, e, bases[-1])
+        return self._client.request(method, f"{bases[-1]}{path}", **kwargs)
 
     def authenticate(self) -> None:
         """Load tokens and refresh if needed."""
@@ -220,7 +256,7 @@ class StravaClient:
 
     def check_connection(self) -> None:
         """Verify the saved session with a read-only athlete request."""
-        resp = self._client.get(f"{STRAVA_API_BASE}/athlete")
+        resp = self._api_request("GET", "/athlete")
         if resp.status_code in (401, 403):
             from eufy_sync.sync import PermanentSyncError
             raise PermanentSyncError("Strava rejected the session. Run: eufy-sync --setup-strava")
@@ -232,8 +268,9 @@ class StravaClient:
         Strava only accepts current weight, without a timestamp or body
         composition fields. The caller selects the newest valid reading.
         """
-        resp = self._client.put(
-            f"{STRAVA_API_BASE}/athlete",
+        resp = self._api_request(
+            "PUT",
+            "/athlete",
             data={"weight": round(weight_kg, 2)},
         )
 

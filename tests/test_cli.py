@@ -1797,3 +1797,121 @@ def test_dunder_version_matches_pyproject():
     with open(pyproject, "rb") as f:
         declared = tomllib.load(f)["project"]["version"]
     assert eufy_sync.__version__ == declared
+
+
+# --- --update-password logs in before it stores anything ---
+
+_OLD_GARMIN_TOKEN = {"di_token": "old", "di_refresh_token": "old-r", "di_client_id": "cid"}
+_OLD_ZWIFT_TOKEN = {"access_token": "old-zwift"}
+_OLD_EUFY_TOKEN = {"access_token": "old-eufy", "user_id": "u", "expires_at": 9e12}
+
+
+def _password_update_setup(tmp_path: Path) -> Path:
+    from eufy_sync.credentials import store_password, store_token
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, {"users": [{
+        "name": "default",
+        "eufy": {"email": "e@example.com"},
+        "garmin": {"email": "g@example.com"},
+        "zwift": {"email": "z@example.com"},
+    }]})
+    for service in ("eufy", "garmin", "zwift"):
+        store_password(f"default:{service}", f"old-{service}")
+    store_token("eufy", dict(_OLD_EUFY_TOKEN))
+    store_token("garmin", dict(_OLD_GARMIN_TOKEN))
+    store_token("zwift", dict(_OLD_ZWIFT_TOKEN))
+    return config_path
+
+
+def _stored(service: str) -> tuple:
+    from eufy_sync.credentials import get_password, get_token
+    return get_password(f"default:{service}"), get_token(service)
+
+
+def _garmin_rejecting_login():
+    from garminconnect import GarminConnectAuthenticationError
+    fake = MagicMock()
+    fake.login.side_effect = GarminConnectAuthenticationError("401 Unauthorized")
+    return patch("eufy_sync.garmin_auth.Garmin", return_value=fake)
+
+
+def test_update_password_typo_keeps_garmin_password_and_session(tmp_path, capsys):
+    from eufy_sync.cli.maintenance import _update_password
+    config_path = _password_update_setup(tmp_path)
+
+    with patch("getpass.getpass", side_effect=["", "typo", ""]), _garmin_rejecting_login():
+        with pytest.raises(SystemExit) as exc:
+            _update_password(config_path)
+
+    assert exc.value.code == 1
+    assert _stored("garmin") == ("old-garmin", _OLD_GARMIN_TOKEN)
+    assert _stored("zwift") == ("old-zwift", _OLD_ZWIFT_TOKEN)
+    assert _stored("eufy") == ("old-eufy", _OLD_EUFY_TOKEN)
+    assert "left unchanged" in capsys.readouterr().out
+
+
+def test_update_password_typo_keeps_zwift_password_and_session(tmp_path):
+    from eufy_sync.cli.maintenance import _update_password
+    from eufy_sync.sync import PermanentSyncError
+    config_path = _password_update_setup(tmp_path)
+
+    zwift = MagicMock()
+    zwift.authenticate.side_effect = PermanentSyncError("Zwift login was rejected")
+    with patch("getpass.getpass", side_effect=["", "", "typo"]), \
+         patch("eufy_sync.zwift_client.ZwiftClient", return_value=zwift):
+        with pytest.raises(SystemExit):
+            _update_password(config_path)
+
+    zwift.authenticate.assert_called_once_with(force=True)
+    assert _stored("zwift") == ("old-zwift", _OLD_ZWIFT_TOKEN)
+    assert _stored("garmin") == ("old-garmin", _OLD_GARMIN_TOKEN)
+
+
+def test_update_password_typo_keeps_eufy_password_and_session(tmp_path):
+    from eufy_sync.cli.maintenance import _update_password
+    from eufy_sync.sync import PermanentSyncError
+    config_path = _password_update_setup(tmp_path)
+
+    with patch("getpass.getpass", side_effect=["typo", "", ""]), \
+         patch("eufy_sync.eufy_client.EufyClient._fresh_login",
+               side_effect=PermanentSyncError("Eufy login failed")):
+        with pytest.raises(SystemExit):
+            _update_password(config_path)
+
+    assert _stored("eufy") == ("old-eufy", _OLD_EUFY_TOKEN)
+
+
+def test_update_password_stores_garmin_password_and_new_session_after_login(tmp_path):
+    import json
+
+    from eufy_sync.cli.maintenance import _update_password
+    config_path = _password_update_setup(tmp_path)
+
+    new_token = {"di_token": "new", "di_refresh_token": "new-r", "di_client_id": "cid"}
+    fake = MagicMock()
+    fake.client.dumps.return_value = json.dumps(new_token)
+    with patch("getpass.getpass", side_effect=["", "new-garmin", ""]), \
+         patch("eufy_sync.garmin_auth.Garmin", return_value=fake) as ctor:
+        _update_password(config_path)
+
+    # The login used the new password, not the stored one.
+    assert ctor.call_args.args[:2] == ("g@example.com", "new-garmin")
+    assert _stored("garmin") == ("new-garmin", new_token)
+    assert _stored("zwift") == ("old-zwift", _OLD_ZWIFT_TOKEN)
+
+
+def test_update_password_keeps_earlier_updates_when_a_later_login_fails(tmp_path, capsys):
+    # Each service is all-or-nothing on its own: Eufy logged in and is stored,
+    # Garmin did not and is left exactly as it was.
+    from eufy_sync.cli.maintenance import _update_password
+    config_path = _password_update_setup(tmp_path)
+
+    with patch("getpass.getpass", side_effect=["new-eufy", "typo", ""]), \
+         patch("eufy_sync.eufy_client.EufyClient._fresh_login"), \
+         _garmin_rejecting_login():
+        with pytest.raises(SystemExit):
+            _update_password(config_path)
+
+    assert _stored("eufy")[0] == "new-eufy"
+    assert _stored("garmin") == ("old-garmin", _OLD_GARMIN_TOKEN)
+    assert "Already updated: Eufy" in capsys.readouterr().out

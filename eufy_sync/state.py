@@ -205,12 +205,22 @@ class SyncState:
                 (user_name, measurement_id),
             )
 
-    def get_oldest_weight_only_timestamp(self, user_name: str, target: str) -> int | None:
+    def get_oldest_weight_only_timestamp(
+        self, user_name: str, target: str, since: int | None = None,
+    ) -> int | None:
+        """Oldest weight-only sync still waiting for its full record. With
+        since (unix seconds), older rows are ignored: past that age the full
+        record is not coming, and reaching back for it would refetch all
+        history since then on every run. The rows themselves stay, so a
+        backfill that does return the full record can still upgrade them.
+        Compared in Python because the stored strings mix UTC offsets."""
         rows = self._conn.execute(
             "SELECT measurement_timestamp FROM sync_log WHERE user_name = ? AND target = ? AND weight_only = 1",
             (user_name, target),
         )
         timestamps = [datetime.fromisoformat(row[0]).timestamp() for row in rows]
+        if since is not None:
+            timestamps = [ts for ts in timestamps if ts >= since]
         return int(min(timestamps)) if timestamps else None
 
     def get_latest_sync_timestamp(self, user_name: str, target: str | None = None) -> int | None:

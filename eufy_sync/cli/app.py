@@ -1,6 +1,7 @@
 """The eufy-sync command line entry point and sync driver."""
 from __future__ import annotations
 
+import contextlib
 import logging
 import sys
 from pathlib import Path
@@ -64,6 +65,20 @@ def _password_failure_title(failures: list) -> str:
     return "eufy-sync: login failed"
 
 
+@contextlib.contextmanager
+def _credential_lock(command: str):
+    """Hold the sync lock for a command that changes credentials, tokens, or
+    config, or exit with a retry hint when a sync or another such command has
+    it. A lock file that cannot be opened also refuses, unlike the sync path:
+    an unserialized credential write can strand a token a sync just rotated."""
+    from eufy_sync.cli import lock
+    with lock.single_instance(require_lock=True) as acquired:
+        if not acquired:
+            print(f"Another eufy-sync run is in progress. Retry {command} when it finishes.")
+            sys.exit(1)
+        yield
+
+
 def _sync_with_network_retry(user, state, **kwargs):
     """Give scheduled network failures one delayed retry, keeping partial counts."""
     from eufy_sync.network import is_transient_network_error
@@ -89,6 +104,29 @@ def _sync_with_network_retry(user, state, **kwargs):
                 return totals, errors
         logger.warning("Network unavailable; retrying scheduled sync once in %ds", NETWORK_RETRY_DELAY)
         sleep(NETWORK_RETRY_DELAY)
+
+
+def _exit_could_not_start(error: Exception) -> None:
+    msg = f"eufy-sync could not start: {error}"
+    print(msg)
+    platform_support.notify("eufy-sync failed", str(error)[:200])
+    sys.exit(1)
+
+
+def _load_config_or_exit(config_path: Path, migrate: bool = True):
+    from eufy_sync.config import load_config
+    try:
+        return load_config(config_path, migrate=migrate)
+    except SystemExit:
+        raise
+    except Exception as e:
+        _exit_could_not_start(e)
+
+
+def _check_target(args, config) -> None:
+    if args.target and not any(getattr(u, args.target, None) for u in config.users):
+        print(f"Target '{args.target}' is not configured. Check your config.")
+        sys.exit(1)
 
 
 def main() -> None:
@@ -169,14 +207,22 @@ def _main() -> None:
 
     # Handle full uninstall
     if args.uninstall:
-        maintenance._uninstall(shared.DATA_DIR, config_path=config_path, db_path=db_path)
+        from eufy_sync.cli import lock
+        with _credential_lock("--uninstall"):
+            removed = maintenance._uninstall(shared.DATA_DIR, config_path=config_path, db_path=db_path)
+            if removed:
+                # POSIX: delete the sync lock file before releasing it.
+                lock.unlink_while_held()
+        if removed:
+            maintenance._remove_lock_files(shared.DATA_DIR)
         return
 
     # Handle credential store mode switches
     if args.use_file_store:
         from eufy_sync import credentials
         try:
-            credentials.use_file_store()
+            with _credential_lock("--use-file-store"):
+                credentials.use_file_store()
         except RuntimeError as e:
             print(str(e))
             sys.exit(1)
@@ -186,7 +232,8 @@ def _main() -> None:
     if args.use_keychain:
         from eufy_sync import credentials
         try:
-            credentials.use_keychain_store()
+            with _credential_lock("--use-keychain"):
+                credentials.use_keychain_store()
         except RuntimeError as e:
             print(str(e))
             sys.exit(1)
@@ -209,55 +256,43 @@ def _main() -> None:
 
     # Handle self-update
     if args.update:
-        updater._self_update()
+        # A reinstall mid-sync swaps the code under the running process.
+        with _credential_lock("--update"):
+            updater._self_update()
         return
 
     # Handle Strava setup
     if args.setup_strava:
-        setup._setup_strava(config_path)
+        with _credential_lock("--setup-strava"):
+            setup._setup_strava(config_path)
         return
 
     if args.setup_zwift:
-        from eufy_sync.cli import lock
-        with lock.single_instance(require_lock=True) as acquired:
-            if not acquired:
-                print("Another eufy-sync run is in progress. Retry --setup-zwift when it finishes.")
-                sys.exit(1)
+        with _credential_lock("--setup-zwift"):
             setup._setup_zwift(config_path)
         return
 
     if args.disconnect_zwift:
-        from eufy_sync.cli import lock
-        with lock.single_instance(require_lock=True) as acquired:
-            if not acquired:
-                print("Another eufy-sync run is in progress. Retry --disconnect-zwift when it finishes.")
-                sys.exit(1)
+        with _credential_lock("--disconnect-zwift"):
             maintenance._disconnect_zwift(config_path)
         return
 
     # Handle profile selection
     if args.select_profile:
-        profiles._select_profile(config_path)
+        with _credential_lock("--select-profile"):
+            profiles._select_profile(config_path)
         return
 
     # Handle password update
     if args.update_password:
-        from eufy_sync.cli import lock
-        with lock.single_instance(require_lock=True) as acquired:
-            if not acquired:
-                print("Another eufy-sync run is in progress. Retry --update-password when it finishes.")
-                sys.exit(1)
+        with _credential_lock("--update-password"):
             maintenance._update_password(config_path)
         return
 
     # Handle reauth
     if args.reauth is not None:
         target = None if args.reauth == "all" else args.reauth
-        from eufy_sync.cli import lock
-        with lock.single_instance(require_lock=True) as acquired:
-            if not acquired:
-                print("Another eufy-sync run is in progress. Retry --reauth when it finishes.")
-                sys.exit(1)
+        with _credential_lock("--reauth"):
             maintenance._reauth(config_path, force=True, target=target)
         return
 
@@ -277,55 +312,36 @@ def _main() -> None:
         platform_support.notify("eufy-sync", msg)
         sys.exit(1)
 
-    try:
-        if first_run:
-            setup._first_run_setup(config_path)
+    if args.status or args.history is not None:
+        # Read-only and unlocked, so it must not write the vault: no config
+        # password migration, and legacy keychain items are read in place
+        # rather than moved. A sync holding the lock may be saving the vault
+        # right now, and a second writer could undo its token refresh.
+        config = _load_config_or_exit(config_path, migrate=False)
+        _check_target(args, config)
+        from eufy_sync.state import SyncState
+        try:
+            state = SyncState(db_path)
+        except Exception as e:
+            print(f"Could not read sync state: {e}")
+            sys.exit(1)
+        if args.status:
+            status._show_status(state, config.users)
         else:
-            # Migrate existing plaintext passwords to keychain (one-time)
-            setup._migrate_config_passwords(config_path)
-            # One-time upgrade notice for users coming from eufy-garmin-sync
-            setup._show_upgrade_notice()
-
-        # Load config (passwords resolved from keychain or YAML fallback)
-        from eufy_sync.config import load_config
-        config = load_config(config_path)
-    except SystemExit:
-        raise
-    except Exception as e:
-        msg = f"eufy-sync could not start: {e}"
-        print(msg)
-        platform_support.notify("eufy-sync failed", str(e)[:200])
-        sys.exit(1)
-
-    has_garmin = any(u.garmin for u in config.users)
-
-    if args.target and not any(getattr(u, args.target, None) for u in config.users):
-        print(f"Target '{args.target}' is not configured. Check your config.")
-        sys.exit(1)
-
-    # Handle status
-    if args.status:
-        from eufy_sync.state import SyncState
-        try:
-            state = SyncState(db_path)
-        except Exception as e:
-            print(f"Could not read sync state: {e}")
-            sys.exit(1)
-        status._show_status(state, config.users)
+            status._show_history(state, config.users, limit=args.history)
         state.close()
         return
 
-    # Handle history
-    if args.history is not None:
-        from eufy_sync.state import SyncState
+    if first_run:
+        # Setup stores passwords and can log in to Garmin and Zwift. The
+        # lock is released before the first sync takes it again below.
         try:
-            state = SyncState(db_path)
+            with _credential_lock("eufy-sync"):
+                setup._first_run_setup(config_path)
+        except SystemExit:
+            raise
         except Exception as e:
-            print(f"Could not read sync state: {e}")
-            sys.exit(1)
-        status._show_history(state, config.users, limit=args.history)
-        state.close()
-        return
+            _exit_could_not_start(e)
 
     # Run sync
     from eufy_sync.cli import lock
@@ -343,6 +359,24 @@ def _main() -> None:
         if not acquired:
             print("Another eufy-sync run is in progress; skipping.")
             return
+
+        # The password migrations below write the credential vault, so they
+        # run only while this process holds the lock.
+        if not first_run:
+            try:
+                # Migrate existing plaintext passwords to keychain (one-time)
+                setup._migrate_config_passwords(config_path)
+                # One-time upgrade notice for users coming from eufy-garmin-sync
+                setup._show_upgrade_notice()
+            except SystemExit:
+                raise
+            except Exception as e:
+                _exit_could_not_start(e)
+        # Load config (passwords resolved from keychain or YAML fallback)
+        config = _load_config_or_exit(config_path)
+
+        has_garmin = any(u.garmin for u in config.users)
+        _check_target(args, config)
 
         updater._check_for_updates()
 

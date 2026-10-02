@@ -48,14 +48,15 @@ def _print_summary(
     user = users[0]
     ts = state.get_latest_sync_timestamp(user.name)
     if ts:
-        last_sync = datetime.fromtimestamp(ts, tz=timezone.utc)
-        ago = datetime.now(timezone.utc) - last_sync
+        # The newest synced measurement's time, not when sync last ran.
+        latest = datetime.fromtimestamp(ts, tz=timezone.utc)
+        ago = datetime.now(timezone.utc) - latest
         days = ago.days
         hours = int(ago.total_seconds() / 3600) % 24
         if days > 0:
-            parts.append(f"last sync: {days}d ago")
+            parts.append(f"latest weigh-in: {days}d ago")
         else:
-            parts.append(f"last sync: {hours}h ago")
+            parts.append(f"latest weigh-in: {hours}h ago")
 
     from eufy_sync.eufy_client import EufyClient
     eufy_status = EufyClient(user.eufy).token_status()

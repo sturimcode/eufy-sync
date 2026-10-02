@@ -5,7 +5,7 @@ Running `eufy-sync` with no options syncs new measurements to every configured t
 ## Check and preview
 
 ```bash
-eufy-sync --status             # last sync and token health
+eufy-sync --status             # latest synced weigh-in and token health
 eufy-sync --history            # the last 14 sync-history entries
 eufy-sync --history 30         # choose how many entries to show
 eufy-sync --dry-run            # preview without uploading
