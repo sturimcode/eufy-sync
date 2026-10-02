@@ -298,6 +298,33 @@ def test_duplicate_check_fails_open_when_the_relogin_fails():
         assert client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc)) is False
 
 
+def test_a_successful_relogin_is_not_repeated_when_the_api_keeps_refusing():
+    # Cloudflare 403s on the API while SSO logins succeed: the first call
+    # relogs in, and every later call must fail with its own error instead
+    # of running a full login each time.
+    from garminconnect import GarminConnectConnectionError
+
+    blocked = GarminConnectConnectionError("API Error 403 - ")
+    stale = MagicMock()
+    stale.get_body_composition.side_effect = blocked
+    fresh = MagicMock()
+    fresh.get_body_composition.side_effect = blocked
+    fresh.get_daily_weigh_ins.side_effect = blocked
+    fresh.add_body_composition.side_effect = blocked
+    client = _client_with_fake_garmin(stale)
+    client._allow_interactive = False
+    bc = GarminBodyComposition(timestamp="2026-06-10T08:00:00+00:00", weight=86.2)
+
+    with patch.object(client._auth, "silent_reauth", return_value=fresh) as reauth:
+        assert client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc)) is False
+        with pytest.raises(GarminConnectConnectionError, match="403"):
+            client.check_connection()
+        with pytest.raises(GarminConnectConnectionError, match="403"):
+            client.upload_body_composition(bc)
+
+    reauth.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # close() persists whatever the library rotated during the run
 # ---------------------------------------------------------------------------

@@ -90,10 +90,14 @@ class GarminClient:
         self._auth = GarminAuth(config.email, config.password)
         self._garmin = None
         self._allow_interactive = True
-        # The error from a relogin that failed this run, if any. Later calls
-        # raise it again instead of trying another login: a second attempt
-        # minutes later meets the same MFA demand or wrong password, and every
-        # extra login raises the odds of a Garmin 429.
+        # At most one relogin per run, whether or not it worked. After a
+        # failed one, later calls raise its error again: a second attempt
+        # minutes later meets the same MFA demand or wrong password. After a
+        # successful one, a later 401/403 means the fresh session did not help
+        # (a Cloudflare block on the API while SSO still lets logins through),
+        # so the call's own error is raised. Every extra login raises the odds
+        # of a Garmin 429.
+        self._reauth_attempted = False
         self._reauth_error: Exception | None = None
 
     def authenticate(self, allow_interactive: bool = True) -> None:
@@ -111,6 +115,7 @@ class GarminClient:
 
         Only one relogin is tried per run. After a failure, every later call
         that needs one gets the same error back without contacting Garmin."""
+        self._reauth_attempted = True
         try:
             if not self._allow_interactive:
                 logger.info("Garmin session expired; re-authenticating without prompts")
@@ -134,11 +139,15 @@ class GarminClient:
         except (GarminConnectAuthenticationError, GarminConnectConnectionError) as e:
             if not _is_garmin_auth_failure(e):
                 raise
-            if self._reauth_error is not None:
-                # This run already tried to log in again and failed. Report
-                # that failure, which names the fix, rather than this call's
-                # 401 or 403.
-                raise self._reauth_error from e
+            if self._reauth_attempted:
+                if self._reauth_error is not None:
+                    # This run already tried to log in again and failed.
+                    # Report that failure, which names the fix, rather than
+                    # this call's 401 or 403.
+                    raise self._reauth_error from e
+                # The relogin worked and Garmin still refuses: another login
+                # would not change that.
+                raise
             self._reauth()
             return call()
 
