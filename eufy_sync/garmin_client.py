@@ -65,18 +65,23 @@ def _match_uploaded_entry(entries: list[dict], uploaded_at: datetime) -> dict | 
     therefore match on it. Only when Garmin returns no timestamps at all does
     a single weight match stand on its own - one response carries the same
     fields for every entry, so the two cases do not mix in practice."""
-    timestamped = [e for e in entries if _entry_instants(e)]
-    if timestamped:
-        matches = [
-            e for e in timestamped
-            if any(
-                abs((instant - uploaded_at).total_seconds()) <= _TIMESTAMP_TOLERANCE_SECONDS
-                for instant in _entry_instants(e)
-            )
-        ]
-    else:
-        matches = entries
+    matches = _entries_at(entries, uploaded_at)
     return matches[0] if len(matches) == 1 else None
+
+
+def _entries_at(entries: list[dict], uploaded_at: datetime) -> list[dict]:
+    """The entries whose own timestamp sits within the tolerance of
+    uploaded_at, or all of them when Garmin sent no timestamps."""
+    timestamped = [e for e in entries if _entry_instants(e)]
+    if not timestamped:
+        return list(entries)
+    return [
+        e for e in timestamped
+        if any(
+            abs((instant - uploaded_at).total_seconds()) <= _TIMESTAMP_TOLERANCE_SECONDS
+            for instant in _entry_instants(e)
+        )
+    ]
 
 
 # The library raises HTTP failures with the status only in the message:
@@ -247,6 +252,12 @@ class GarminClient:
         self._reauth_attempted = False
         self._reauth_error: Exception | None = None
         self._last_response = _LastResponse()
+        # Set once a browser-fingerprint retry succeeds. The block is a
+        # property of the network, not the session, so from then on every call
+        # in this run goes straight through curl_cffi instead of paying a
+        # refused plain request first. A new GarminClient (a new run) starts
+        # over on plain requests.
+        self._impersonate_always = False
 
     def authenticate(self, allow_interactive: bool = True) -> None:
         self._allow_interactive = allow_interactive
@@ -324,6 +335,8 @@ class GarminClient:
         exactly like a refused token. Trying the fingerprint first costs one
         request; a relogin costs a login and risks a 429, and on a blocked
         network its own token check fails the same way."""
+        if self._impersonate_always and self._can_impersonate():
+            return self._call_impersonating(call)
         try:
             return self._attempt(call)
         except (GarminConnectAuthenticationError, GarminConnectConnectionError) as e:
@@ -334,7 +347,11 @@ class GarminClient:
                 "Garmin refused the call (%s%s); retrying once with a browser fingerprint",
                 e, ", Cloudflare block page" if blocked else "",
             )
-            return self._call_impersonating(call)
+            result = self._call_impersonating(call)
+            if not self._impersonate_always:
+                logger.info("Browser fingerprint got through; using it for the rest of this run")
+                self._impersonate_always = True
+            return result
 
     def _call_with_reauth(self, call):
         """Run a Garmin call, re-logging in once when the session is dead.
@@ -457,7 +474,9 @@ class GarminClient:
         """Upload one body-composition FIT and sort out what the answer means.
 
         Modeled on scalebridge-sync's upload outcomes:
-          - 2xx: uploaded. A 409 counts too: Garmin already holds this file.
+          - 2xx: uploaded. A 409 counts too, but only once a lookup finds
+            the weigh-in on Garmin; an unconfirmed 409 is PermanentSyncError,
+            so nothing is recorded as synced on Garmin's word alone.
           - 401, or 403: a dead session or a blocked network. The fingerprint
             retry and the run's one relogin heal what they can; a refusal that
             outlives both raises PermanentSyncError, since _retry asking again
@@ -473,8 +492,7 @@ class GarminClient:
                 return self._add_body_composition(body_comp)
             except GarminConnectConnectionError as e:
                 if _status_code(e) == 409:
-                    logger.info("Garmin already has this body comp file (409); counting it as uploaded")
-                    return {"status": "duplicate"}
+                    return self._confirm_duplicate(body_comp, e)
                 raise
 
         try:
@@ -493,6 +511,37 @@ class GarminClient:
             body_comp.weight, body_comp.timestamp,
         )
         return result if isinstance(result, dict) else {"status": "ok"}
+
+    def _confirm_duplicate(self, body_comp: GarminBodyComposition, conflict: Exception) -> dict:
+        """Accept a 409 only when Garmin really holds this weigh-in: an entry
+        within the weight window whose own timestamp matches the instant we
+        sent, the same test delete_weight_entry trusts. Runs inside the upload
+        attempt, so it rides whichever transport the upload used."""
+        from eufy_sync.sync import PermanentSyncError
+
+        uploaded_at = datetime.fromisoformat(body_comp.timestamp)
+        if uploaded_at.tzinfo is None:
+            uploaded_at = uploaded_at.astimezone()
+        date_str = uploaded_at.astimezone().strftime("%Y-%m-%d")
+        try:
+            data = self._garmin.get_daily_weigh_ins(date_str)
+            near = [
+                entry for entry in data.get("dateWeightList", [])
+                if abs(entry.get("weight", 0) / 1000.0 - body_comp.weight) <= _WEIGHT_TOLERANCE_KG
+            ]  # Garmin stores grams
+            found = bool(_entries_at(near, uploaded_at))
+        except Exception as e:
+            raise PermanentSyncError(
+                f"Garmin answered the body comp upload with 409 Conflict ({conflict}), and the "
+                f"lookup to confirm it already holds the weigh-in failed: {e}"
+            ) from conflict
+        if not found:
+            raise PermanentSyncError(
+                f"Garmin answered the body comp upload with 409 Conflict ({conflict}), but has no "
+                f"{body_comp.weight:.1f} kg weigh-in at {body_comp.timestamp}; not counting it as uploaded"
+            ) from conflict
+        logger.info("Garmin already holds this weigh-in (409, confirmed by lookup); counting it as uploaded")
+        return {"status": "duplicate"}
 
     def _classify_upload_failure(self, exc: Exception) -> None:
         """Raise the right error for an upload Garmin refused, or return to

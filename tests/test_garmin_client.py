@@ -743,6 +743,50 @@ def test_json_403_on_a_read_tries_the_fingerprint_before_any_relogin():
     assert set(call["params"]) == {"startDate", "endDate"}
 
 
+def test_once_the_fingerprint_works_later_calls_skip_plain_requests():
+    # The block belongs to the network, so after one fingerprint success the
+    # rest of the run goes straight through curl_cffi. A new client (the next
+    # run) starts on plain requests again.
+    held = {"samplePk": 1, "weight": 86200.0, "timestampGMT": _millis(BC_INSTANT)}
+    garmin, adapter = _real_garmin([JSON_403])
+    client = _client_on(garmin)
+    cffi = _FakeCffi([
+        _ok({"dateWeightList": []}),
+        _ok({"dateWeightList": [held]}),
+        _ok({}),
+        _ok({"detailedImportResult": {}}, status=202),
+    ])
+    original_session = garmin.client._api_session
+
+    with patch.object(garmin_client, "_new_impersonating_session", cffi.session), \
+            patch.object(client._auth, "silent_reauth") as reauth:
+        assert client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc)) is False
+        assert client.delete_weight_entry(BC_INSTANT, 86.2) is True
+        client.upload_body_composition(BC)
+
+    reauth.assert_not_called()
+    assert len(adapter.sent) == 1   # only the first, refused, plain request
+    assert [c["method"] for c in cffi.calls] == ["GET", "GET", "DELETE", "POST"]
+    assert garmin.client._api_session is original_session
+
+    next_run, next_adapter = _real_garmin([_ok({"dateWeightList": []})])
+    fresh_client = _client_on(next_run)
+    with patch.object(garmin_client, "_new_impersonating_session", cffi.session):
+        fresh_client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc))
+    assert len(next_adapter.sent) == 1 and len(cffi.calls) == 4
+
+
+def test_a_failed_fingerprint_retry_does_not_make_it_sticky():
+    garmin, adapter = _real_garmin([JSON_403, _ok({"dateWeightList": []})])
+    client = _client_on(garmin)
+    client._reauth_attempted = True   # isolate the fallback from the relogin
+    cffi = _FakeCffi([JSON_403])
+    with patch.object(garmin_client, "_new_impersonating_session", cffi.session):
+        assert client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc)) is False
+        assert client.has_weight_on_date(datetime(2026, 6, 10, tzinfo=timezone.utc)) is False
+    assert len(adapter.sent) == 2 and len(cffi.calls) == 1
+
+
 def test_a_cloudflare_block_that_survives_the_fingerprint_never_relogs_in():
     from eufy_sync.sync import PermanentSyncError
 
@@ -815,15 +859,47 @@ def test_no_fallback_when_the_library_has_no_api_session():
 # ---------------------------------------------------------------------------
 
 
-def test_upload_409_counts_as_already_uploaded():
-    garmin, adapter = _real_garmin([(409, {"Content-Type": "application/json"}, json.dumps({
-        "detailedImportResult": {"failures": [{"messages": [{"content": "Duplicate Activity."}]}]},
-    }).encode())])
+CONFLICT_409 = (409, {"Content-Type": "application/json"}, json.dumps({
+    "detailedImportResult": {"failures": [{"messages": [{"content": "Duplicate Activity."}]}]},
+}).encode())
+BC_INSTANT = datetime.fromisoformat(BC.timestamp)
+
+
+def test_upload_409_counts_as_uploaded_once_the_lookup_finds_the_weigh_in():
+    held = {"samplePk": 1, "weight": 86200.0, "timestampGMT": _millis(BC_INSTANT)}
+    garmin, adapter = _real_garmin([CONFLICT_409, _ok({"dateWeightList": [held]})])
     client = _client_on(garmin)
     with patch.object(client._auth, "silent_reauth") as reauth:
         assert client.upload_body_composition(BC) == {"status": "duplicate"}
     reauth.assert_not_called()
-    assert len(adapter.sent) == 1
+    assert len(adapter.sent) == 2
+    assert "/weight-service/weight/dayview/" in adapter.sent[1].url
+
+
+@pytest.mark.parametrize("entries", [
+    [],
+    # Right weight, but a manual weigh-in hours away is not our upload.
+    [{"samplePk": 1, "weight": 86200.0, "timestampGMT": _millis(BC_INSTANT + timedelta(hours=3))}],
+    # Right time, wrong weight.
+    [{"samplePk": 1, "weight": 90000.0, "timestampGMT": _millis(BC_INSTANT)}],
+])
+def test_upload_409_without_the_weigh_in_on_garmin_is_permanent(entries):
+    from eufy_sync.sync import PermanentSyncError, _is_permanent
+
+    garmin, _ = _real_garmin([CONFLICT_409, _ok({"dateWeightList": entries})])
+    client = _client_on(garmin)
+    with pytest.raises(PermanentSyncError, match="409") as exc:
+        client.upload_body_composition(BC)
+    assert _is_permanent(exc.value)
+
+
+def test_upload_409_is_permanent_when_the_confirming_lookup_fails():
+    from eufy_sync.sync import PermanentSyncError
+
+    garmin, _ = _real_garmin([CONFLICT_409, (500, {"Content-Type": "application/json"}, b"{}")])
+    client = _client_on(garmin)
+    with pytest.raises(PermanentSyncError, match="409"):
+        client.upload_body_composition(BC)
 
 
 def test_upload_429_becomes_a_rate_limit_that_sync_does_not_retry():
