@@ -36,9 +36,6 @@ STRAVA_API_BASE_OLD = "https://www.strava.com/api/v3"
 STRAVA_API_BASE_NEW = "https://api-v3.strava.com"
 # Strava's changelog (2026-06-01) says the new base is available from this date.
 NEW_API_BASE_FROM = date(2027, 1, 4)
-# Third-party trackers report the old base stops working by this date.
-# Strava's own docs name it only as the end of oauth/deauthorize.
-OLD_API_BASE_UNTIL = date(2027, 6, 1)
 CALLBACK_PORT = 8089
 REDIRECT_URI = f"http://localhost:{CALLBACK_PORT}/callback"
 REFRESH_SAFETY_MARGIN = 300  # seconds before expiry to trigger refresh
@@ -51,16 +48,13 @@ def _utc_today() -> date:
 def _api_bases(today: date) -> tuple[str, ...]:
     """API bases to try, in order, for a request made on ``today``.
 
-    Before the new host exists we use the old one. During the overlap we try
-    the new host first and keep the old one as a fallback, since users may
-    run an old release well past either date. Once the old host is retired,
-    only the new one is left.
+    Before the new host exists we use the old one. After that we try the new
+    host first and keep the old one as a fallback. Strava hasn't published a
+    shutdown date for the old host, so the fallback has no end date either.
     """
     if today < NEW_API_BASE_FROM:
         return (STRAVA_API_BASE_OLD,)
-    if today < OLD_API_BASE_UNTIL:
-        return (STRAVA_API_BASE_NEW, STRAVA_API_BASE_OLD)
-    return (STRAVA_API_BASE_NEW,)
+    return (STRAVA_API_BASE_NEW, STRAVA_API_BASE_OLD)
 
 
 def _auth_url(client_id: str, state_value: str) -> str:

@@ -251,7 +251,7 @@ def test_auth_url_encodes_every_query_value():
 BEFORE_NEW_HOST = date(2027, 1, 3)
 NEW_HOST_DAY_ONE = date(2027, 1, 4)
 LAST_OVERLAP_DAY = date(2027, 5, 31)
-OLD_HOST_RETIRED = date(2027, 6, 1)
+LONG_AFTER = date(2028, 3, 1)
 
 
 def _client_on(day: date) -> StravaClient:
@@ -281,8 +281,7 @@ def _urls(mock_request) -> list[str]:
     (BEFORE_NEW_HOST, STRAVA_API_BASE_OLD),
     (NEW_HOST_DAY_ONE, STRAVA_API_BASE_NEW),
     (LAST_OVERLAP_DAY, STRAVA_API_BASE_NEW),
-    (OLD_HOST_RETIRED, STRAVA_API_BASE_NEW),
-    (date(2028, 3, 1), STRAVA_API_BASE_NEW),
+    (LONG_AFTER, STRAVA_API_BASE_NEW),
 ])
 def test_api_base_follows_the_published_schedule(day, expected):
     client = _client_on(day)
@@ -359,12 +358,11 @@ def test_connection_failure_before_the_switch_is_not_retried():
     client.close()
 
 
-def test_connection_failure_after_old_host_retired_has_no_fallback():
-    client = _client_on(OLD_HOST_RETIRED)
-    with patch.object(client._client, "request", side_effect=httpx.ConnectError("refused")) as mock_request:
-        with pytest.raises(httpx.ConnectError):
-            client.update_weight(86.2)
-    assert _urls(mock_request) == [f"{STRAVA_API_BASE_NEW}/athlete"]
+def test_old_host_stays_as_fallback_with_no_end_date():
+    client = _client_on(LONG_AFTER)
+    with patch.object(client._client, "request", side_effect=[httpx.ConnectError("refused"), _ok()]) as mock_request:
+        client.update_weight(86.2)
+    assert _urls(mock_request) == [f"{STRAVA_API_BASE_NEW}/athlete", f"{STRAVA_API_BASE_OLD}/athlete"]
     client.close()
 
 
