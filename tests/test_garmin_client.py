@@ -623,6 +623,16 @@ JSON_403 = (
 )
 
 
+# A gateway error page in Cloudflare's livery. It says nothing about whether
+# Garmin received the request.
+CF_502 = (
+    502,
+    {"Content-Type": "text/html; charset=UTF-8", "Server": "cloudflare", "CF-RAY": "8f1-EWR"},
+    b"<html><head><title>502 Bad gateway</title></head><body><div id='cf-error-details'>"
+    b"<span>Cloudflare Ray ID: <strong>8f1</strong></span></div></body></html>",
+)
+
+
 def _ok(body: dict, status: int = 200):
     return (status, {"Content-Type": "application/json"}, json.dumps(body).encode())
 
@@ -893,13 +903,128 @@ def test_upload_409_without_the_weigh_in_on_garmin_is_permanent(entries):
     assert _is_permanent(exc.value)
 
 
-def test_upload_409_is_permanent_when_the_confirming_lookup_fails():
+@pytest.mark.parametrize("entry", [
+    {"samplePk": 1, "weight": 86200.0},
+    {"samplePk": 1, "weight": 86200.0, "timestampGMT": None, "date": "2026-06-10"},
+    {"samplePk": 1, "weight": 86200.0, "timestampGMT": "08:00"},
+])
+def test_upload_409_is_not_confirmed_by_an_untimed_entry(entry):
+    """Same weight, but no parseable timestamp: it could be any weigh-in that
+    day, so it does not prove ours is there. delete_weight_entry still trusts
+    a lone untimed match; the 409 confirmation does not."""
     from eufy_sync.sync import PermanentSyncError
 
-    garmin, _ = _real_garmin([CONFLICT_409, (500, {"Content-Type": "application/json"}, b"{}")])
+    garmin, _ = _real_garmin([CONFLICT_409, _ok({"dateWeightList": [entry]})])
     client = _client_on(garmin)
     with pytest.raises(PermanentSyncError, match="409"):
         client.upload_body_composition(BC)
+
+
+@pytest.mark.parametrize("status", [500, 502, 503])
+def test_upload_409_stays_retryable_when_the_confirming_lookup_fails(status):
+    from garminconnect import GarminConnectConnectionError
+
+    from eufy_sync.sync import _is_permanent
+
+    garmin, adapter = _real_garmin([CONFLICT_409, (status, {"Content-Type": "application/json"}, b"{}")])
+    client = _client_on(garmin)
+    cffi = _FakeCffi([])
+    with patch.object(garmin_client, "_new_impersonating_session", cffi.session), \
+            patch.object(client._auth, "silent_reauth") as reauth:
+        with pytest.raises(GarminConnectConnectionError) as exc:
+            client.upload_body_composition(BC)
+    assert not _is_permanent(exc.value)
+    reauth.assert_not_called()
+    # One POST, one GET; nothing replayed through curl_cffi.
+    assert [r.method for r in adapter.sent] == ["POST", "GET"]
+    assert cffi.calls == []
+
+
+def test_upload_409_lookup_network_failure_stays_retryable():
+    from garminconnect import GarminConnectConnectionError
+
+    from eufy_sync.sync import _is_permanent
+
+    fake = MagicMock()
+    fake.add_body_composition.side_effect = GarminConnectConnectionError("API Error 409 - Duplicate")
+    fake.get_daily_weigh_ins.side_effect = GarminConnectConnectionError("Connection error: timed out")
+    client = _client_with_fake_garmin(fake)
+    with pytest.raises(GarminConnectConnectionError, match="timed out") as exc:
+        client.upload_body_composition(BC)
+    assert not _is_permanent(exc.value)
+    fake.add_body_composition.assert_called_once()
+
+
+def test_upload_409_lookup_rate_limit_ends_garmin_for_the_run():
+    from garminconnect import GarminConnectTooManyRequestsError
+
+    garmin, adapter = _real_garmin([CONFLICT_409, (429, {"Content-Type": "application/json"}, b"{}")])
+    client = _client_on(garmin)
+    with pytest.raises(GarminConnectTooManyRequestsError):
+        client.upload_body_composition(BC)
+    assert [r.method for r in adapter.sent] == ["POST", "GET"]
+
+
+def test_upload_409_lookup_gets_the_fingerprint_fallback_without_resending_the_upload():
+    held = {"samplePk": 1, "weight": 86200.0, "timestampGMT": _millis(BC_INSTANT)}
+    garmin, adapter = _real_garmin([CONFLICT_409, JSON_403])
+    client = _client_on(garmin)
+    cffi = _FakeCffi([_ok({"dateWeightList": [held]})])
+    with patch.object(garmin_client, "_new_impersonating_session", cffi.session), \
+            patch.object(client._auth, "silent_reauth") as reauth:
+        assert client.upload_body_composition(BC) == {"status": "duplicate"}
+    reauth.assert_not_called()
+    assert [r.method for r in adapter.sent] == ["POST", "GET"]
+    assert [c["method"] for c in cffi.calls] == ["GET"]
+    assert client._impersonate_always is True
+
+
+def test_upload_409_lookup_rides_the_sticky_fingerprint_path():
+    held = {"samplePk": 1, "weight": 86200.0, "timestampGMT": _millis(BC_INSTANT)}
+    garmin, adapter = _real_garmin([])
+    client = _client_on(garmin)
+    client._impersonate_always = True
+    cffi = _FakeCffi([CONFLICT_409, _ok({"dateWeightList": [held]})])
+    with patch.object(garmin_client, "_new_impersonating_session", cffi.session):
+        assert client.upload_body_composition(BC) == {"status": "duplicate"}
+    assert adapter.sent == []
+    assert [c["method"] for c in cffi.calls] == ["POST", "GET"]
+
+
+def test_upload_409_lookup_relogs_in_once_without_resending_the_upload():
+    from garminconnect import GarminConnectConnectionError
+
+    held = {"samplePk": 1, "weight": 86200.0, "timestampGMT": _millis(BC_INSTANT)}
+    dead = MagicMock()
+    dead.add_body_composition.side_effect = GarminConnectConnectionError("API Error 409 - Duplicate")
+    dead.get_daily_weigh_ins.side_effect = GarminConnectConnectionError("API Error 401 - ")
+    fresh = MagicMock()
+    fresh.get_daily_weigh_ins.return_value = {"dateWeightList": [held]}
+    client = _client_with_fake_garmin(dead)
+    client._allow_interactive = False
+    with patch.object(client._auth, "silent_reauth", return_value=fresh) as reauth:
+        assert client.upload_body_composition(BC) == {"status": "duplicate"}
+    reauth.assert_called_once()
+    dead.add_body_composition.assert_called_once()
+    fresh.add_body_composition.assert_not_called()
+
+
+def test_upload_409_lookup_refused_after_the_relogin_is_permanent():
+    from garminconnect import GarminConnectConnectionError
+
+    from eufy_sync.sync import PermanentSyncError
+
+    dead = MagicMock()
+    dead.add_body_composition.side_effect = GarminConnectConnectionError("API Error 409 - Duplicate")
+    dead.get_daily_weigh_ins.side_effect = GarminConnectConnectionError("API Error 401 - ")
+    fresh = MagicMock()
+    fresh.get_daily_weigh_ins.side_effect = GarminConnectConnectionError("API Error 401 - ")
+    client = _client_with_fake_garmin(dead)
+    client._allow_interactive = False
+    with patch.object(client._auth, "silent_reauth", return_value=fresh):
+        with pytest.raises(PermanentSyncError, match="--reauth garmin"):
+            client.upload_body_composition(BC)
+    fresh.add_body_composition.assert_not_called()
 
 
 def test_upload_429_becomes_a_rate_limit_that_sync_does_not_retry():
@@ -944,6 +1069,57 @@ def test_upload_408_and_5xx_stay_transient_for_retry(status):
             client.upload_body_composition(BC)
     reauth.assert_not_called()
     assert not _is_permanent(exc.value)
+
+
+@pytest.mark.parametrize("response", [
+    CF_502,
+    (504, CF_502[1], CF_502[2].replace(b"502", b"504")),
+    (500, {"Content-Type": "text/html"}, b"<html>Just a moment...</html>"),
+])
+def test_upload_after_a_gateway_error_is_never_replayed_through_curl_cffi(response):
+    """Garmin may have stored the upload behind a gateway error, so only the
+    ordinary retry policy may send it again, not the fingerprint fallback."""
+    from garminconnect import GarminConnectConnectionError
+
+    from eufy_sync.sync import _is_permanent
+
+    garmin, adapter = _real_garmin([response])
+    client = _client_on(garmin)
+    cffi = _FakeCffi([])
+    with patch.object(garmin_client, "_new_impersonating_session", cffi.session), \
+            patch.object(client._auth, "silent_reauth") as reauth:
+        with pytest.raises(GarminConnectConnectionError) as exc:
+            client.upload_body_composition(BC)
+    assert len(adapter.sent) == 1 and cffi.calls == []
+    reauth.assert_not_called()
+    assert not _is_permanent(exc.value)
+    assert client._impersonate_always is False
+
+
+def test_upload_is_not_replayed_when_the_recorded_answer_contradicts_a_403_message():
+    # The recorded response is what Garmin answered; a stray "403" in the
+    # error text must not trigger a second POST after a 502.
+    from garminconnect import GarminConnectConnectionError
+
+    from eufy_sync.sync import PermanentSyncError
+
+    fake = MagicMock()
+    client = _client_with_fake_garmin(fake)
+    client._reauth_attempted = True   # isolate the fallback from the relogin
+
+    def gateway_failure(**kwargs):
+        client._last_response.record(_FakeCffiResponse(*CF_502))
+        raise GarminConnectConnectionError("API Error 403 - proxied")
+
+    fake.add_body_composition.side_effect = gateway_failure
+    with patch.object(client, "_call_impersonating") as fallback, \
+            patch.object(client, "_can_impersonate", return_value=True), \
+            patch.object(client._auth, "silent_reauth") as reauth:
+        with pytest.raises(PermanentSyncError):
+            client.upload_body_composition(BC)
+    fallback.assert_not_called()
+    reauth.assert_not_called()
+    fake.add_body_composition.assert_called_once()
 
 
 def test_upload_network_failure_stays_transient():
@@ -997,6 +1173,13 @@ def test_status_code_reads_the_library_messages(message, expected):
     (JSON_403, False),   # Cloudflare headers alone prove nothing
     ((403, {"Content-Type": "text/html"}, b"<html>Forbidden</html>"), False),
     ((200, {"Content-Type": "text/html"}, b"Just a moment"), False),
+    (CF_502, False),   # branded gateway page: Garmin may have the request
+    ((504, {"Content-Type": "text/html", "cf-mitigated": "challenge"}, b"<html></html>"), False),
+    ((503, {"Content-Type": "text/html"}, b"<title>Just a moment...</title>"), True),
+    ((429, {"Content-Type": "text/html"}, b"<div id='cf-chl-widget'></div>"), True),
+    ((429, {"Content-Type": "text/html"}, b"<div id='cf-error-details'>Cloudflare Ray ID</div>"), False),
+    ((403, {"Content-Type": "text/html"}, b"<title>Attention Required! | Cloudflare</title>"), True),
+    ((403, {"Content-Type": "text/html"}, b"<div id='cf-error-details'>Cloudflare Ray ID: 8f1</div>"), False),
 ])
 def test_cloudflare_block_detection(response, blocked):
     recorder = garmin_client._LastResponse()

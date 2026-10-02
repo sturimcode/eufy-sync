@@ -54,6 +54,14 @@ def _hermetic_machine(tmp_path, monkeypatch):
     monkeypatch.setattr("keyring.get_password", get_password)
     monkeypatch.setattr("keyring.delete_password", delete_password)
 
+    # A test that reaches an unpatched relogin would otherwise run a real
+    # Garmin SSO login with its fake credentials. Tests that need a login
+    # patch GarminAuth or the Garmin class and never get here.
+    def refuse_login(self, *args, **kwargs):
+        raise RuntimeError("tests must not log in to Garmin; patch the relogin")
+
+    monkeypatch.setattr("garminconnect.Garmin.login", refuse_login)
+
 
 @pytest.fixture(autouse=True)
 def _mute_notifications(monkeypatch):
