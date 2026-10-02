@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from garminconnect import GarminConnectTooManyRequestsError
@@ -28,6 +28,12 @@ UPGRADE_MAX_WEIGHT_KG = 0.1
 # their full record. One that has not matched within two weeks never will,
 # and an unbounded reach-back would refetch everything since it on every run.
 UPGRADE_LOOKBACK_DAYS = 14
+# A failed upload is retried because the fetch cursor stays behind it, so a
+# measurement that never uploads would block every newer one to that target.
+# Give up after two weeks (the same reach as upgrades) or after two weeks'
+# worth of scheduled runs at one every 4 hours, whichever comes first.
+RETRY_MAX_AGE_DAYS = UPGRADE_LOOKBACK_DAYS
+MAX_RETRY_ATTEMPTS = 84
 
 
 class PermanentSyncError(RuntimeError):
@@ -67,6 +73,51 @@ def _retry(fn, description: str):
             logger.warning("%s failed (attempt %d/%d): %s. Retrying in %ds...",
                            description, attempt + 1, MAX_RETRIES, e, delay)
             time.sleep(delay)
+
+
+def _given_up_retries(user_name: str, state: SyncState, target_names: list[str], dry_run: bool) -> set[tuple[str, str]]:
+    """Tidy the retry queue for this run's targets and return the
+    (target, measurement_id) pairs that must not be uploaded again.
+
+    The queue does not replay anything itself: the per-target cursor already
+    re-fetches a failed measurement. The queue counts the attempts, so a
+    measurement that keeps failing stops holding back newer ones.
+    """
+    given_up: set[tuple[str, str]] = set()
+    oldest_allowed = time.time() - RETRY_MAX_AGE_DAYS * 86400
+    for row in state.get_upload_retries(user_name):
+        target, mid = row["target"], row["measurement_id"]
+        if target not in target_names:
+            continue
+        if state.is_synced(user_name, mid, target):
+            if not dry_run:
+                state.clear_upload_retry(user_name, target, mid)
+            continue
+        taken_at = datetime.fromisoformat(row["measurement_timestamp"]).timestamp()
+        if target in ("strava", "zwift"):
+            latest = state.get_latest_sync_timestamp(user_name, target)
+            if latest is not None and taken_at <= latest:
+                # A newer weight already reached it; this one is obsolete.
+                if not dry_run:
+                    state.clear_upload_retry(user_name, target, mid)
+                continue
+        if row["gave_up"]:
+            given_up.add((target, mid))
+            continue
+        if row["attempts"] >= MAX_RETRY_ATTEMPTS:
+            reason = f"it failed {row['attempts']} times"
+        elif taken_at < oldest_allowed:
+            reason = f"it is more than {RETRY_MAX_AGE_DAYS} days old"
+        else:
+            continue
+        logger.warning(
+            "Giving up on the %s upload of %.2f kg from %s: %s",
+            target.capitalize(), row["weight_kg"], row["measurement_timestamp"], reason,
+        )
+        if not dry_run:
+            state.give_up_upload_retry(user_name, target, mid)
+        given_up.add((target, mid))
+    return given_up
 
 
 def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = None, headless: bool = False, dry_run: bool = False, repair_days: int | None = None, target: str | None = None, report: SyncReport | None = None) -> tuple[dict[str, int], dict[str, str]]:
@@ -164,6 +215,8 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                 cursors.append(ts if ts is not None else default_cursor)
             after_timestamp = min(cursors)
 
+        given_up = _given_up_retries(user.name, state, [name for name, _ in targets], dry_run)
+
         pending = {}
         pending_previous_ids = {}
         if any(name == "garmin" for name, _ in targets):
@@ -246,6 +299,16 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     logger.debug("Skipping %s history older than its current weight: %s", target_name.capitalize(), target_measurement.measurement_id)
                     continue
                 if target_name in current_weight_timestamps and m.measurement_id != target_measurement.measurement_id:
+                    continue
+                # Repair is an explicit request to resend, so it overrides. A
+                # saved replacement for a deleted weight-only entry always
+                # goes through: skipping it would leave that day empty.
+                if (
+                    not repair
+                    and (target_name, target_measurement.measurement_id) in given_up
+                    and target_measurement.measurement_id not in pending
+                ):
+                    logger.debug("Skipping %s upload that was given up: %s", target_name.capitalize(), target_measurement.measurement_id)
                     continue
 
                 # Still consulted in repair mode: it decides whether the sync
@@ -377,6 +440,10 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                         logger.info("Upgraded weight-only entry to full body comp for %s", m.timestamp.astimezone().date())
                     if target_name == "garmin" and (upgrade_row is not None or m.measurement_id in pending):
                         state.clear_pending_upgrade(user.name, m.measurement_id)
+                    if target_name in current_weight_timestamps:
+                        state.clear_upload_retries_through(user.name, target_name, target_measurement.timestamp)
+                    else:
+                        state.clear_upload_retry(user.name, target_name, m.measurement_id)
                 except UnsupportedMeasurementError as e:
                     logger.warning("Skipping %s for %s: %s", target_name.capitalize(), user.name, e)
                     continue
@@ -387,6 +454,27 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     # reach the caller unwrapped.
                     errors[target_name] = str(e)
                     targets = [t for t in targets if t[0] != target_name]
+                    # Permanent and auth failures need the user, not a retry.
+                    # A replacement for a weight-only entry already has its
+                    # own store (pending_upgrades) and must never be given up.
+                    if not _is_permanent(e) and upgrade_row is None and m.measurement_id not in pending:
+                        attempts = state.record_upload_failure(
+                            user_name=user.name,
+                            target=target_name,
+                            measurement_id=target_measurement.measurement_id,
+                            measurement_timestamp=target_measurement.timestamp.isoformat(),
+                            weight_kg=target_measurement.weight_kg,
+                            failed_at=datetime.now(timezone.utc).isoformat(),
+                        )
+                        if target_name in current_weight_timestamps:
+                            # Only the newest weight is worth sending later.
+                            state.clear_upload_retries_through(
+                                user.name, target_name, target_measurement.timestamp - timedelta(microseconds=1),
+                            )
+                        logger.info(
+                            "%s will retry %s on the next run (failed %d time%s)",
+                            target_name.capitalize(), target_measurement.measurement_id, attempts, "" if attempts == 1 else "s",
+                        )
                     continue
 
                 counts[target_name] += 1

@@ -48,6 +48,18 @@ class SyncState:
                 measurement_json TEXT NOT NULL,
                 PRIMARY KEY(user_name, measurement_id)
             );
+            CREATE TABLE IF NOT EXISTS upload_retries (
+                user_name TEXT NOT NULL,
+                target TEXT NOT NULL,
+                measurement_id TEXT NOT NULL,
+                measurement_timestamp TEXT NOT NULL,
+                weight_kg REAL,
+                first_failed_at TEXT NOT NULL,
+                last_failed_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 1,
+                gave_up INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(user_name, target, measurement_id)
+            );
         """)
         self._conn.commit()
 
@@ -204,6 +216,89 @@ class SyncState:
                 "DELETE FROM pending_upgrades WHERE user_name = ? AND measurement_id = ?",
                 (user_name, measurement_id),
             )
+
+    def record_upload_failure(
+        self,
+        user_name: str,
+        target: str,
+        measurement_id: str,
+        measurement_timestamp: str,
+        weight_kg: float,
+        failed_at: str,
+    ) -> int:
+        """Note a retryable upload failure and return its attempt count.
+        Holds only what sync_log already holds for a delivered measurement:
+        no credentials, no error text."""
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO upload_retries
+                   (user_name, target, measurement_id, measurement_timestamp, weight_kg,
+                    first_failed_at, last_failed_at, attempts)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                   ON CONFLICT(user_name, target, measurement_id) DO UPDATE SET
+                       attempts = attempts + 1, last_failed_at = excluded.last_failed_at""",
+                (user_name, target, measurement_id, measurement_timestamp, weight_kg, failed_at, failed_at),
+            )
+        row = self._conn.execute(
+            "SELECT attempts FROM upload_retries WHERE user_name = ? AND target = ? AND measurement_id = ?",
+            (user_name, target, measurement_id),
+        ).fetchone()
+        return row[0]
+
+    def get_upload_retries(self, user_name: str) -> list[dict]:
+        cursor = self._conn.execute(
+            """SELECT target, measurement_id, measurement_timestamp, weight_kg, attempts, gave_up
+               FROM upload_retries WHERE user_name = ?""",
+            (user_name,),
+        )
+        return [
+            {
+                "target": target, "measurement_id": mid, "measurement_timestamp": ts,
+                "weight_kg": kg, "attempts": attempts, "gave_up": bool(gave_up),
+            }
+            for target, mid, ts, kg, attempts, gave_up in cursor.fetchall()
+        ]
+
+    def waiting_upload_retries(self, user_name: str) -> dict[str, int]:
+        """Per-target count of failed uploads still due a retry."""
+        cursor = self._conn.execute(
+            """SELECT target, COUNT(*) FROM upload_retries
+               WHERE user_name = ? AND gave_up = 0 GROUP BY target""",
+            (user_name,),
+        )
+        return dict(cursor.fetchall())
+
+    def give_up_upload_retry(self, user_name: str, target: str, measurement_id: str) -> None:
+        """Stop retrying. The row stays as a marker: the fetch window can still
+        reach this measurement, and without it the next run would retry it."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE upload_retries SET gave_up = 1 WHERE user_name = ? AND target = ? AND measurement_id = ?",
+                (user_name, target, measurement_id),
+            )
+
+    def clear_upload_retry(self, user_name: str, target: str, measurement_id: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM upload_retries WHERE user_name = ? AND target = ? AND measurement_id = ?",
+                (user_name, target, measurement_id),
+            )
+
+    def clear_upload_retries_through(self, user_name: str, target: str, timestamp: datetime) -> None:
+        """Drop entries for measurements taken at or before timestamp. For a
+        target that holds only the current weight, a newer value replaces
+        them. Compared in Python because the stored strings mix UTC offsets."""
+        rows = self._conn.execute(
+            "SELECT measurement_id, measurement_timestamp FROM upload_retries WHERE user_name = ? AND target = ?",
+            (user_name, target),
+        ).fetchall()
+        stale = [mid for mid, ts in rows if datetime.fromisoformat(ts) <= timestamp]
+        if stale:
+            with self._conn:
+                self._conn.executemany(
+                    "DELETE FROM upload_retries WHERE user_name = ? AND target = ? AND measurement_id = ?",
+                    [(user_name, target, mid) for mid in stale],
+                )
 
     def get_oldest_weight_only_timestamp(
         self, user_name: str, target: str, since: int | None = None,
