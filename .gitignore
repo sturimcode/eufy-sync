@@ -14,3 +14,7 @@ dist/
 build/
 *.plist
 uv.lock
+
+# Internal design notes and maintenance logs stay local
+docs/design/
+docs/research/
