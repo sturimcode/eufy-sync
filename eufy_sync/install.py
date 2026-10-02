@@ -31,7 +31,10 @@ def install_argv(spec: str) -> list[str]:
     "eufy-sync[browser]") through the installer that owns this copy."""
     which = installer()
     if which == "uv":
-        return ["uv", "tool", "install", "--force", spec]
+        # uv trusts its cached package index, which can predate a release
+        # published minutes ago. pip revalidates index pages on every
+        # install, so the pipx and pip paths need no equivalent.
+        return ["uv", "tool", "install", "--force", "--refresh-package", "eufy-sync", spec]
     if which == "pipx":
         return ["pipx", "install", "--force", spec]
     return [sys.executable, "-m", "pip", "install", "--upgrade", spec]

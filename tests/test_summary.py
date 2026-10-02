@@ -63,7 +63,7 @@ def test_summary_no_new_measurements(capsys):
 
     output = capsys.readouterr().out.strip()
     assert "No new measurements" in output
-    assert "last sync: 5h ago" in output
+    assert "latest weigh-in: 5h ago" in output
     assert "Garmin connected" in output
 
 
@@ -76,7 +76,7 @@ def test_summary_no_new_measurements_days_ago(capsys):
         _print_summary({}, [], state, [user])
 
     output = capsys.readouterr().out.strip()
-    assert "last sync: 3d ago" in output
+    assert "latest weigh-in: 3d ago" in output
 
 
 def test_summary_synced_garmin_only(capsys):
