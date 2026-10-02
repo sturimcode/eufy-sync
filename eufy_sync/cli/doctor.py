@@ -302,7 +302,7 @@ def _check_version(report) -> None:
         if latest is None:
             report("WARN", "version", "could not check")
             return
-        if latest == __version__:
+        if not updater.is_newer(latest, __version__):
             report("PASS", "version", f"{__version__} (up to date)")
             return
         report(

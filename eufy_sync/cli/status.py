@@ -101,6 +101,21 @@ def _print_summary(
     )
 
 
+def _retry_queue_line(state, user) -> str | None:
+    """'2 uploads waiting to retry (Garmin)', or None when nothing waits.
+    Targets no longer configured are left out: nothing will retry them."""
+    waiting = {
+        target: count
+        for target, count in state.waiting_upload_retries(user.name).items()
+        if getattr(user, target, None) is not None
+    }
+    total = sum(waiting.values())
+    if not total:
+        return None
+    names = ", ".join(target.capitalize() for target in sorted(waiting))
+    return f"{total} upload{'' if total == 1 else 's'} waiting to retry ({names})"
+
+
 def _show_status(state, users: list) -> None:
     """Print detailed sync status for all users."""
     for user in users:
@@ -117,6 +132,10 @@ def _show_status(state, users: list) -> None:
             print(f"Last synced measurement: {last_sync.strftime('%Y-%m-%d %H:%M UTC')} ({hours}h ago)")
         else:
             print("Last synced measurement: never")
+
+        retry_line = _retry_queue_line(state, user)
+        if retry_line:
+            print(retry_line)
 
         # Eufy token health
         from eufy_sync.eufy_client import EufyClient

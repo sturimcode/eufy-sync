@@ -13,6 +13,23 @@ from eufy_sync import install, platform_support
 from eufy_sync.cli import shared
 
 
+def _parse(v: str) -> tuple:
+    # Compare numeric prefix only - tolerates suffixes like "1.7.2rc1" or "1.7.2.dev0".
+    if not v or len(v) > 64:
+        raise ValueError(f"Implausible version string: {v!r}")
+    match = re.match(r"^\d+(?:\.\d+)*", v)
+    if not match:
+        raise ValueError(f"Implausible version string: {v!r}")
+    return tuple(int(x) for x in match.group(0).split("."))
+
+
+def is_newer(latest: str, current: str) -> bool:
+    """True when latest is a strictly newer release than current. An install
+    ahead of PyPI (a fresh release the index hasn't caught up with, or a dev
+    checkout) is never offered a downgrade."""
+    return _parse(latest) > _parse(current)
+
+
 def _latest_pypi_version() -> str | None:
     """Return the latest eufy-sync version on PyPI, or None if unreachable."""
     try:
@@ -43,15 +60,6 @@ def _check_for_updates() -> None:
             return
 
         from eufy_sync import __version__
-
-        def _parse(v: str) -> tuple:
-            # Compare numeric prefix only - tolerates suffixes like "1.7.2rc1" or "1.7.2.dev0".
-            if not v or len(v) > 64:
-                raise ValueError(f"Implausible version string: {v!r}")
-            match = re.match(r"^\d+(?:\.\d+)*", v)
-            if not match:
-                raise ValueError(f"Implausible version string: {v!r}")
-            return tuple(int(x) for x in match.group(0).split("."))
 
         latest_parsed = _parse(latest)
         current_parsed = _parse(__version__)
@@ -91,11 +99,11 @@ def _self_update() -> None:
     if latest is None:
         print("Could not reach PyPI. Check your connection and try again.")
         return
-    if latest == __version__:
-        print(f"Already on the latest version (v{__version__}).")
-        return
     if not re.match(r"^\d+(?:\.\d+)*", latest):
         print(f"Unexpected version from PyPI ({latest!r}); update manually with pipx.")
+        return
+    if not is_newer(latest, __version__):
+        print(f"Already on the latest version (v{__version__}).")
         return
 
     # A uv or pipx reinstall replaces the whole tool venv, so the pin has to

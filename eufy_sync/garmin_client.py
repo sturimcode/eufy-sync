@@ -1,12 +1,25 @@
 """Garmin Connect client. Delegates login, refresh, and upload to
 python-garminconnect; keeps a same-date duplicate check.
+
+The library logs in through curl_cffi but sends every data call through plain
+requests, and on some networks (VPNs, datacenter IPs) Cloudflare refuses that
+TLS fingerprint with a 403 even though the token is fine (upstream issue #444).
+A call refused that way is sent once more through curl_cffi with a browser
+fingerprint, reusing the session's token, before anything here treats the
+session as dead.
 """
 from __future__ import annotations
 
 import logging
+import re
+import time
 from datetime import datetime, timezone
 
-from garminconnect import GarminConnectAuthenticationError, GarminConnectConnectionError
+from garminconnect import (
+    GarminConnectAuthenticationError,
+    GarminConnectConnectionError,
+    GarminConnectTooManyRequestsError,
+)
 
 from eufy_sync.config import GarminConfig
 from eufy_sync.garmin_auth import GarminAuth
@@ -21,6 +34,10 @@ logger = logging.getLogger(__name__)
 # far short of a separate weigh-in.
 _WEIGHT_TOLERANCE_KG = 0.1
 _TIMESTAMP_TOLERANCE_SECONDS = 120
+# The lookup that confirms a 409 is retried on its own, a few times with a
+# short pause, rather than by sync's _retry, which would resend the upload.
+_CONFIRM_LOOKUP_ATTEMPTS = 3
+_CONFIRM_LOOKUP_BACKOFF_SECONDS = 2
 
 
 def _entry_instants(entry: dict) -> list[datetime]:
@@ -50,21 +67,82 @@ def _match_uploaded_entry(entries: list[dict], uploaded_at: datetime) -> dict | 
     is not unique. Weight alone is not enough: a manual weigh-in on the same
     day within the weight window would match too, and deleting it would throw
     away data eufy-sync never created. Entries that carry a timestamp must
-    therefore match on it. Only when Garmin returns no timestamps at all does
-    a single weight match stand on its own - one response carries the same
-    fields for every entry, so the two cases do not mix in practice."""
-    timestamped = [e for e in entries if _entry_instants(e)]
-    if timestamped:
-        matches = [
-            e for e in timestamped
-            if any(
-                abs((instant - uploaded_at).total_seconds()) <= _TIMESTAMP_TOLERANCE_SECONDS
-                for instant in _entry_instants(e)
-            )
-        ]
-    else:
-        matches = entries
+    therefore match on it.
+
+    Only delete_weight_entry uses this, and it deliberately keeps one
+    permissive case: when Garmin returns no usable timestamps at all, a single
+    weight match stands on its own. That case replaces our own weight-only
+    upload with the full record for the same weigh-in, two entries in the
+    window leave everything alone, and a wrong guess costs one entry the next
+    upload restores. One response carries the same fields for every entry, so
+    the two cases do not mix in practice. Confirming a 409 does not get this
+    leeway (see _timed_entries_at)."""
+    matches = _entries_at(entries, uploaded_at)
     return matches[0] if len(matches) == 1 else None
+
+
+def _entries_at(entries: list[dict], uploaded_at: datetime) -> list[dict]:
+    """The entries whose own timestamp sits within the tolerance of
+    uploaded_at, or all of them when Garmin sent no timestamps. The fallback
+    exists for delete_weight_entry only; see _match_uploaded_entry."""
+    timestamped = [e for e in entries if _entry_instants(e)]
+    if not timestamped:
+        return list(entries)
+    return _timed_entries_at(timestamped, uploaded_at)
+
+
+def _timed_entries_at(entries: list[dict], uploaded_at: datetime) -> list[dict]:
+    """The entries with a parseable timestamp within the tolerance of
+    uploaded_at. An entry without one never qualifies: confirming a 409 marks
+    the measurement uploaded for good, so a same-weight entry from some other
+    time must not stand in for ours."""
+    return [
+        e for e in entries
+        if any(
+            abs((instant - uploaded_at).total_seconds()) <= _TIMESTAMP_TOLERANCE_SECONDS
+            for instant in _entry_instants(e)
+        )
+    ]
+
+
+# The library raises HTTP failures with the status only in the message:
+# "API Error 403 - ..." from a direct call, "API call client error (403): ..."
+# once its error decorator has rewrapped it.
+_STATUS_RE = re.compile(r"(?:API Error|error \(|HTTP)\s*(\d{3})\b")
+
+# Text that only a Cloudflare challenge carries: the "Just a moment" page and
+# its challenge-platform script. The API host sits behind Cloudflare, so cf-ray,
+# "server: cloudflare", and the "Cloudflare Ray ID" footer appear on ordinary
+# answers and on gateway error pages too, and prove nothing on their own.
+_CHALLENGE_MARKERS = (
+    "just a moment",
+    "cf-chl",
+    "challenge-platform",
+)
+# Text on Cloudflare's firewall block page ("Sorry, you have been blocked",
+# error 1020). Its cf-error-details box also sits on 5xx gateway pages, so it
+# counts only with a 403.
+_BLOCK_PAGE_MARKERS = (
+    "attention required",
+    "you have been blocked",
+)
+# Statuses a Cloudflare challenge is served with. Any other 5xx is a gateway
+# or origin failure, where the request may well have reached Garmin.
+_CHALLENGE_STATUSES = (403, 429, 503)
+
+# The browser fingerprint for the fallback. Issue #444's reporter got 200s
+# with this one, the library's native headers, and the same token that plain
+# requests could not use.
+_IMPERSONATE = "chrome"
+
+
+def _status_code(exc: BaseException) -> int | None:
+    """The HTTP status behind a library error, or None for a non-HTTP one."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int):
+        return status
+    match = _STATUS_RE.search(str(exc))
+    return int(match.group(1)) if match else None
 
 
 def _is_garmin_auth_failure(exc: Exception) -> bool:
@@ -72,16 +150,135 @@ def _is_garmin_auth_failure(exc: Exception) -> bool:
     the dedicated auth error and the 401/403 that the library reports as a
     generic connection error ("API Error 401 - ...").
 
-    A Cloudflare 403 matches too: the library drops the response body before
-    raising, so the message is the same "API Error 403" either way. That is
-    safe only because a relogin keeps the stored token until the new login
-    succeeds, so a 403 that was only a passing block costs one login attempt,
-    not the session."""
+    A 403 stays ambiguous even with the response in hand: the network block
+    in issue #444 answers with the same JSON ForbiddenException a refused
+    token gets. By the time a 403 reaches the relogin, the browser-fingerprint
+    retry has already failed, and a relogin keeps the stored token until the
+    new login succeeds, so a 403 that was only a passing block costs one
+    login attempt, not the session."""
     if isinstance(exc, GarminConnectAuthenticationError):
         return True
-    return isinstance(exc, GarminConnectConnectionError) and (
-        "401" in str(exc) or "403" in str(exc)
-    )
+    return isinstance(exc, GarminConnectConnectionError) and _status_code(exc) in (401, 403)
+
+
+class _LastResponse:
+    """The status, headers, and start of the body of the most recent failed
+    response on the library's API session or on the fallback.
+
+    The library drops the response before raising, so this is the only place a
+    Cloudflare block page and a JSON 403 from the API can be told apart."""
+
+    _BODY_LIMIT = 4096
+
+    def __init__(self):
+        self.clear()
+
+    def clear(self) -> None:
+        self.status: int | None = None
+        self.headers: dict[str, str] = {}
+        self.body = ""
+
+    def record(self, resp) -> None:
+        status = getattr(resp, "status_code", None)
+        if not isinstance(status, int) or status < 400:
+            return
+        self.status = status
+        try:
+            self.headers = {str(k).lower(): str(v) for k, v in resp.headers.items()}
+        except Exception:
+            self.headers = {}
+        try:
+            self.body = (resp.text or "")[: self._BODY_LIMIT]
+        except Exception:
+            self.body = ""
+
+    def hook(self, resp, *args, **kwargs) -> None:
+        """requests response hook. Returns None so the response is unchanged."""
+        self.record(resp)
+
+    def is_cloudflare_block(self) -> bool:
+        """True only on affirmative evidence that Cloudflare stopped the
+        request before Garmin saw it: the cf-mitigated header, or a challenge
+        or block page with a status Cloudflare serves those with. A branded
+        502/504 gateway page is not a block; the request may have reached the
+        origin, so it is left to the ordinary retry policy."""
+        status = self.status
+        if status is None or status not in _CHALLENGE_STATUSES:
+            return False
+        if self.headers.get("cf-mitigated", "").lower() == "challenge":
+            return True
+        if "html" not in self.headers.get("content-type", "").lower():
+            return False
+        body = self.body.lower()
+        if any(marker in body for marker in _CHALLENGE_MARKERS):
+            return True
+        return status == 403 and any(marker in body for marker in _BLOCK_PAGE_MARKERS)
+
+
+def _new_impersonating_session():
+    """A curl_cffi session with a browser TLS fingerprint. Kept separate so
+    tests can swap in a fake transport."""
+    from curl_cffi import requests as cffi_requests
+    return cffi_requests.Session(impersonate=_IMPERSONATE)
+
+
+class _ImpersonatingSession:
+    """Stands in for the library's requests.Session during one fallback call.
+
+    The library still builds the URL, the auth headers, and its own error
+    handling; only the transport changes. curl_cffi refuses requests' files=
+    argument, so a file upload is rebuilt as a CurlMime multipart body, which
+    curl_cffi does support."""
+
+    def __init__(self, recorder: _LastResponse):
+        self._recorder = recorder
+
+    def request(self, method, url, headers=None, files=None, **kwargs):
+        mime = _to_curl_mime(files) if files else None
+        if mime is not None:
+            kwargs["multipart"] = mime
+        sess = _new_impersonating_session()
+        try:
+            resp = sess.request(method, url, headers=headers, **kwargs)
+        finally:
+            if mime is not None:
+                mime.close()
+            sess.close()
+        self._recorder.record(resp)
+        return resp
+
+
+def _to_curl_mime(files: dict):
+    """Rebuild a requests-style files= mapping as a curl_cffi multipart body.
+
+    Accepts the shapes the library uses: {"file": (name, bytes_or_fileobj)}
+    with an optional third content-type element, or a bare bytes/file value."""
+    from curl_cffi import CurlMime
+    mime = CurlMime()
+    try:
+        for field, value in files.items():
+            filename, content, content_type = None, value, "application/octet-stream"
+            if isinstance(value, (tuple, list)):
+                filename, content = value[0], value[1]
+                if len(value) > 2 and value[2]:
+                    content_type = value[2]
+            if hasattr(content, "read"):
+                content = content.read()
+            if isinstance(content, str):
+                content = content.encode()
+            mime.addpart(name=field, filename=filename, content_type=content_type, data=bytes(content))
+    except Exception:
+        mime.close()
+        raise
+    return mime
+
+
+class _Conflict:
+    """An upload Garmin answered with 409, handed out of the upload call so
+    the confirming lookup runs outside it."""
+
+    def __init__(self, error: Exception):
+        self.error = error
 
 
 class GarminClient:
@@ -99,11 +296,32 @@ class GarminClient:
         # of a Garmin 429.
         self._reauth_attempted = False
         self._reauth_error: Exception | None = None
+        self._last_response = _LastResponse()
+        # Set once a browser-fingerprint retry succeeds. The block is a
+        # property of the network, not the session, so from then on every call
+        # in this run goes straight through curl_cffi instead of paying a
+        # refused plain request first. A new GarminClient (a new run) starts
+        # over on plain requests.
+        self._impersonate_always = False
 
     def authenticate(self, allow_interactive: bool = True) -> None:
         self._allow_interactive = allow_interactive
         self._garmin = self._auth.login(interactive=allow_interactive)
+        self._watch_responses(self._garmin)
         logger.info("Authenticated to Garmin Connect as %s", self.config.email)
+
+    def _watch_responses(self, garmin) -> None:
+        """Hook the library's API session so a failed call's response can be
+        inspected after the library has raised without it. _api_session is
+        private but present in every release we allow (0.3.10 onward); without
+        it the hook is skipped and every 403 counts as ambiguous."""
+        sess = getattr(getattr(garmin, "client", None), "_api_session", None)
+        hooks = getattr(sess, "hooks", None)
+        if not isinstance(hooks, dict):
+            return
+        response_hooks = hooks.setdefault("response", [])
+        if self._last_response.hook not in response_hooks:
+            response_hooks.append(self._last_response.hook)
 
     def _reauth(self) -> None:
         """Replace a dead session with a fresh login, prompting when a person
@@ -126,6 +344,71 @@ class GarminClient:
         except Exception as e:
             self._reauth_error = e
             raise
+        self._watch_responses(self._garmin)
+
+    def _attempt(self, call):
+        """Run call once, forgetting the response of any earlier failure so a
+        network error is never judged by a stale block page."""
+        self._last_response.clear()
+        return call()
+
+    def _call_impersonating(self, call):
+        """Run call once more with the library's API session swapped for a
+        curl_cffi one. The token, URL, and headers stay the library's."""
+        client = self._garmin.client
+        original = client._api_session
+        client._api_session = _ImpersonatingSession(self._last_response)
+        try:
+            return self._attempt(call)
+        finally:
+            client._api_session = original
+
+    def _can_impersonate(self) -> bool:
+        client = getattr(self._garmin, "client", None)
+        if getattr(client, "_api_session", None) is None:
+            return False
+        try:
+            import curl_cffi  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    def _refused_with_403(self, exc: Exception) -> bool:
+        """Whether the failed attempt was answered with a 403. The recorded
+        response wins over the error text: the call is replayed on this
+        answer, and an upload POST must never be replayed after a 5xx or a
+        timeout, where Garmin may already have stored it."""
+        recorded = self._last_response.status
+        if recorded is not None:
+            return recorded == 403
+        return _status_code(exc) == 403
+
+    def _call_with_fallback(self, call):
+        """Run call; when the network refused it, run it once more through a
+        browser fingerprint. A Cloudflare challenge or block qualifies, and so
+        does any 403, because the #444 block answers with a JSON 403 that
+        looks exactly like a refused token. Nothing else does: a 5xx or a
+        network failure is never replayed here, since the request may have
+        reached Garmin and an upload would be sent twice. Trying the fingerprint first costs one
+        request; a relogin costs a login and risks a 429, and on a blocked
+        network its own token check fails the same way."""
+        if self._impersonate_always and self._can_impersonate():
+            return self._call_impersonating(call)
+        try:
+            return self._attempt(call)
+        except (GarminConnectAuthenticationError, GarminConnectConnectionError) as e:
+            blocked = self._last_response.is_cloudflare_block()
+            if not (blocked or self._refused_with_403(e)) or not self._can_impersonate():
+                raise
+            logger.info(
+                "Garmin refused the call (%s%s); retrying once with a browser fingerprint",
+                e, ", Cloudflare block page" if blocked else "",
+            )
+            result = self._call_impersonating(call)
+            if not self._impersonate_always:
+                logger.info("Browser fingerprint got through; using it for the rest of this run")
+                self._impersonate_always = True
+            return result
 
     def _call_with_reauth(self, call):
         """Run a Garmin call, re-logging in once when the session is dead.
@@ -133,11 +416,16 @@ class GarminClient:
         The duplicate check is the run's first Garmin call, so a token that
         expired between runs used to fail here on every scheduled sync before
         upload's own healing could kick in. Non-auth errors, and anything the
-        relogin or the retry raises, travel to the caller unchanged."""
+        relogin or the retry raises, travel to the caller unchanged.
+
+        Each session gets one browser-fingerprint retry before its 403 counts
+        against it (see _call_with_fallback). A Cloudflare block page that
+        survives that retry never triggers a relogin: the token was not the
+        problem, and a new one would meet the same block."""
         try:
-            return call()
+            return self._call_with_fallback(call)
         except (GarminConnectAuthenticationError, GarminConnectConnectionError) as e:
-            if not _is_garmin_auth_failure(e):
+            if not _is_garmin_auth_failure(e) or self._last_response.is_cloudflare_block():
                 raise
             if self._reauth_attempted:
                 if self._reauth_error is not None:
@@ -149,7 +437,7 @@ class GarminClient:
                 # would not change that.
                 raise
             self._reauth()
-            return call()
+            return self._call_with_fallback(call)
 
     def check_connection(self) -> None:
         """Verify an authenticated read, propagating failures to diagnostics."""
@@ -240,14 +528,143 @@ class GarminClient:
         )
 
     def upload_body_composition(self, body_comp: GarminBodyComposition) -> dict:
-        # Transient connection errors propagate to _retry; only a dead session
-        # (token expired or revoked, seen as a 401) heals and retries here.
-        result = self._call_with_reauth(lambda: self._add_body_composition(body_comp))
+        """Upload one body-composition FIT and sort out what the answer means.
+
+        Modeled on scalebridge-sync's upload outcomes:
+          - 2xx: uploaded. A 409 counts too, but only once a lookup finds
+            the weigh-in on Garmin (see _confirm_duplicate).
+          - 401, or 403: a dead session or a blocked network. The fingerprint
+            retry and the run's one relogin heal what they can; a refusal that
+            outlives both raises PermanentSyncError, since _retry asking again
+            seconds later would meet the same answer.
+          - 429: GarminConnectTooManyRequestsError, which sync treats as
+            permanent for this run, as it does a login 429. Retrying a rate
+            limit in a loop only extends it.
+          - 408 and 5xx, and network failures: raised unchanged for _retry.
+          - Any other 4xx: Garmin rejected this upload itself; asking again
+            sends the same bytes. PermanentSyncError."""
+        def upload():
+            try:
+                return self._add_body_composition(body_comp)
+            except GarminConnectConnectionError as e:
+                if _status_code(e) == 409:
+                    # Returned, not raised: the lookup below runs as its own
+                    # call, so its recovery never replays this POST.
+                    return _Conflict(e)
+                raise
+
+        try:
+            result = self._call_with_reauth(upload)
+        except GarminConnectTooManyRequestsError:
+            raise
+        except (GarminConnectAuthenticationError, GarminConnectConnectionError) as e:
+            if e is not self._reauth_error:
+                # A failed relogin's own error already says what went wrong
+                # and travels unchanged; only Garmin's answer to the upload
+                # is sorted here.
+                self._classify_upload_failure(e)
+            raise
+        if isinstance(result, _Conflict):
+            return self._confirm_duplicate(body_comp, result.error)
         logger.info(
             "Uploaded body comp to Garmin: %.1f kg at %s",
             body_comp.weight, body_comp.timestamp,
         )
         return result if isinstance(result, dict) else {"status": "ok"}
+
+    def _confirm_duplicate(self, body_comp: GarminBodyComposition, conflict: Exception) -> dict:
+        """Accept a 409 only when Garmin really holds this weigh-in: an entry
+        within the weight window whose own parseable timestamp is within the
+        time window of the instant we sent. An entry without a timestamp never
+        confirms; see _timed_entries_at.
+
+        The lookup gets the same recovery as any other read (fingerprint
+        fallback, the sticky curl_cffi path, the run's one relogin), and
+        only it is repeated, never the upload. A 5xx or network failure is
+        retried here a few times with a short pause; if the answer is still
+        unknown, RetryNextRunError sends the measurement to the retry queue
+        without sync's _retry posting it again this run. A 429 ends Garmin
+        for this run like an upload 429 does. Only a lookup that answers and
+        lacks the weigh-in is PermanentSyncError."""
+        from eufy_sync.sync import PermanentSyncError, RetryNextRunError
+
+        uploaded_at = datetime.fromisoformat(body_comp.timestamp)
+        if uploaded_at.tzinfo is None:
+            uploaded_at = uploaded_at.astimezone()
+        date_str = uploaded_at.astimezone().strftime("%Y-%m-%d")
+
+        def lookup() -> bool:
+            data = self._garmin.get_daily_weigh_ins(date_str)
+            near = [
+                entry for entry in (data or {}).get("dateWeightList", [])
+                if abs(entry.get("weight", 0) / 1000.0 - body_comp.weight) <= _WEIGHT_TOLERANCE_KG
+            ]  # Garmin stores grams
+            return bool(_timed_entries_at(near, uploaded_at))
+
+        for attempt in range(_CONFIRM_LOOKUP_ATTEMPTS):
+            try:
+                found = self._call_with_reauth(lookup)
+                break
+            except GarminConnectTooManyRequestsError:
+                raise
+            except (GarminConnectAuthenticationError, GarminConnectConnectionError, OSError) as e:
+                if e is self._reauth_error:
+                    raise
+                status = _status_code(e)
+                if status == 429:
+                    raise GarminConnectTooManyRequestsError(
+                        f"Garmin rate limited the lookup confirming a 409 upload: {e}"
+                    ) from e
+                if isinstance(e, GarminConnectAuthenticationError) or status in (401, 403):
+                    # Refused after the fallback and the relogin, like an upload
+                    # would be: the same advice applies.
+                    self._classify_upload_failure(e)
+                    raise
+                if attempt == _CONFIRM_LOOKUP_ATTEMPTS - 1:
+                    logger.warning(
+                        "Garmin answered the upload with 409 Conflict, and the lookup to confirm it "
+                        "already holds the weigh-in failed %d times: %s", _CONFIRM_LOOKUP_ATTEMPTS, e,
+                    )
+                    raise RetryNextRunError(
+                        f"Garmin answered the upload with 409 Conflict, but the lookup to confirm "
+                        f"it holds the weigh-in kept failing ({e}); trying again next run"
+                    ) from e
+                delay = _CONFIRM_LOOKUP_BACKOFF_SECONDS * (2 ** attempt)
+                logger.info("Lookup confirming a 409 upload failed (%s); retrying in %ds", e, delay)
+                time.sleep(delay)
+        if not found:
+            raise PermanentSyncError(
+                f"Garmin answered the body comp upload with 409 Conflict ({conflict}), but has no "
+                f"{body_comp.weight:.1f} kg weigh-in at {body_comp.timestamp}; not counting it as uploaded"
+            ) from conflict
+        logger.info("Garmin already holds this weigh-in (409, confirmed by lookup); counting it as uploaded")
+        return {"status": "duplicate"}
+
+    def _classify_upload_failure(self, exc: Exception) -> None:
+        """Raise the right error for an upload Garmin refused, or return to
+        let a transient failure travel to _retry unchanged."""
+        from eufy_sync.sync import PermanentSyncError
+
+        status = _status_code(exc)
+        if status == 429:
+            retry_after = self._last_response.headers.get("retry-after")
+            logger.warning(
+                "Garmin rate-limited the upload%s; leaving it for the next run",
+                f" (Retry-After: {retry_after}s)" if retry_after else "",
+            )
+            raise GarminConnectTooManyRequestsError(f"Garmin upload rate limited: {exc}") from exc
+        if isinstance(exc, GarminConnectAuthenticationError) or status in (401, 403):
+            if self._last_response.is_cloudflare_block():
+                raise PermanentSyncError(
+                    f"Cloudflare is blocking Garmin uploads from this network (HTTP {status}). "
+                    "A VPN or datacenter connection is the usual cause; try another network."
+                ) from exc
+            raise PermanentSyncError(
+                f"Garmin still refused the upload ({exc}) after a fresh login. "
+                "If you are on a VPN, try without it; otherwise run: eufy-sync --reauth garmin"
+            ) from exc
+        if status is not None and 400 <= status < 500 and status != 408:
+            raise PermanentSyncError(f"Garmin rejected the body comp upload (HTTP {status}): {exc}") from exc
 
     def close(self) -> None:
         # Last chance to keep whatever the library rotated mid-run: its refresh
