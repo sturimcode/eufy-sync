@@ -7,8 +7,11 @@ import sys
 from pathlib import Path
 from time import sleep
 
+# Nothing imported here may load garminconnect or curl_cffi (doctor does, so
+# it is imported where it runs). --update has to work when either is broken,
+# since updating is how a broken install gets fixed.
 from eufy_sync import platform_support
-from eufy_sync.cli import doctor, maintenance, profiles, setup, shared, status, updater
+from eufy_sync.cli import maintenance, profiles, setup, shared, status, updater
 from eufy_sync.reporting import SyncReport, garmin_existing_note, update_counts_summary
 
 logger = logging.getLogger("eufy_sync")
@@ -197,7 +200,7 @@ def _main() -> None:
     # Handle doctor - must report even on a fresh install, never launch the
     # first-run wizard, and never traceback.
     if args.doctor:
-        from eufy_sync.cli import lock
+        from eufy_sync.cli import doctor, lock
         # Live checks can refresh tokens, so they share the sync lock.
         with lock.single_instance(require_lock=True) as acquired:
             if not acquired:

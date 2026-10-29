@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -332,3 +334,59 @@ def test_an_install_ahead_of_pypi_is_not_offered_a_downgrade(capsys):
         updater._self_update()
     run.assert_not_called()
     assert "Already on the latest version" in capsys.readouterr().out
+
+
+_UPDATE_WITHOUT_GARMIN_STACK = """
+import sys
+import types
+
+
+class _Unloadable:
+    # Every import of either package fails, the way curl_cffi 0.15 and 0.16
+    # failed on macOS 27 (an ImportError from dlopen), and is recorded.
+    attempts = []
+
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in ("curl_cffi", "garminconnect"):
+            self.attempts.append(name)
+            raise ImportError(f"{name} cannot load on this machine")
+        return None
+
+
+blocker = _Unloadable()
+sys.meta_path.insert(0, blocker)
+
+from eufy_sync.cli import updater
+
+calls = []
+
+
+def record(cmd, *args, **kwargs):
+    calls.append(cmd)
+    return types.SimpleNamespace(returncode=0)
+
+
+updater._latest_pypi_version = lambda: "99.0.0"
+updater.subprocess = types.SimpleNamespace(run=record, Popen=record)
+sys.argv = ["eufy-sync", "--update"]
+
+from eufy_sync.cli import main
+
+main()
+assert calls, "the upgrade command never ran"
+assert not blocker.attempts, f"--update imported {blocker.attempts}"
+"""
+
+
+def test_update_runs_when_garminconnect_and_curl_cffi_cannot_load(tmp_path):
+    # --update is how a machine with a broken curl_cffi gets the release that
+    # fixes it, so nothing on that path may import either package. A fresh
+    # interpreter, because this one already has both loaded.
+    env = {**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "-c", _UPDATE_WITHOUT_GARMIN_STACK],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "to v99.0.0" in result.stdout
