@@ -257,9 +257,19 @@ class StravaClient:
     def check_connection(self) -> None:
         """Verify the saved session with a read-only athlete request."""
         resp = self._api_request("GET", "/athlete")
-        if resp.status_code in (401, 403):
+        if resp.status_code == 401:
             from eufy_sync.sync import PermanentSyncError
             raise PermanentSyncError("Strava rejected the session. Run: eufy-sync --setup-strava")
+        if resp.status_code == 403:
+            # Strava blocks an API app whose owner has no subscription. The
+            # message must not name --setup-strava: doctor would offer it as
+            # the fix, and signing in again cannot help.
+            from eufy_sync.sync import PermanentSyncError
+            raise PermanentSyncError(
+                "Strava returned HTTP 403 because the account that owns your Strava API app "
+                "likely has no active subscription; Strava has required one for API apps "
+                "since June 2026. Signing in again won't fix it."
+            )
         resp.raise_for_status()
 
     def update_weight(self, weight_kg: float) -> dict:
@@ -277,6 +287,13 @@ class StravaClient:
         if resp.status_code != 200:
             logger.debug("Strava weight update failed: %d %s", resp.status_code, resp.text)
             # 4xx (except 429) won't recover by retrying; signal that to _retry.
+            if resp.status_code == 403:
+                from eufy_sync.sync import PermanentSyncError
+                raise PermanentSyncError(
+                    "Failed to update Strava weight (HTTP 403). The account that owns the "
+                    "API app may need its Strava subscription renewed. If the subscription "
+                    "is active, run eufy-sync --setup-strava and allow profile edits."
+                )
             if 400 <= resp.status_code < 500 and resp.status_code != 429:
                 from eufy_sync.sync import PermanentSyncError
                 raise PermanentSyncError(

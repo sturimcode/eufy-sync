@@ -99,7 +99,7 @@ On macOS and Windows, setup offers automatic sync every four hours after a succe
 
 ## Adding Strava
 
-Strava requires an active subscription to create a new API application. This is [Strava's requirement](https://developers.strava.com/docs/getting-started/), and Garmin sync works without Strava.
+Strava requires an active subscription to create an API application and keep it working. If the subscription lapses, Strava refuses the app with HTTP 403, and weight updates stop until you renew it. This is [Strava's requirement](https://developers.strava.com/docs/getting-started/), and Garmin sync works without Strava.
 
 1. Create a Strava API app at <https://www.strava.com/settings/api>.
 2. Set **Authorization Callback Domain** to `localhost`.
