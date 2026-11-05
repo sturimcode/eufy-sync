@@ -2,11 +2,13 @@
 python-garminconnect; keeps a same-date duplicate check.
 
 The library logs in through curl_cffi but sends every data call through plain
-requests, and on some networks (VPNs, datacenter IPs) Cloudflare refuses that
-TLS fingerprint with a 403 even though the token is fine (upstream issue #444).
-A call refused that way is sent once more through curl_cffi with a browser
-fingerprint, reusing the session's token, before anything here treats the
-session as dead.
+requests. A data call refused with a 403 or a Cloudflare challenge is sent once
+more through curl_cffi with a browser fingerprint, reusing the session's token,
+before anything here treats the session as dead. That retry settles two causes
+a fresh login cannot fix: a network that refuses the plain requests client, and
+a `default` entry in ~/.netrc, which requests sends to every host in place of
+the Bearer token (curl_cffi does not read netrc). The second is what upstream
+issue #444 turned out to be.
 """
 from __future__ import annotations
 
@@ -130,9 +132,7 @@ _BLOCK_PAGE_MARKERS = (
 # or origin failure, where the request may well have reached Garmin.
 _CHALLENGE_STATUSES = (403, 429, 503)
 
-# The browser fingerprint for the fallback. Issue #444's reporter got 200s
-# with this one, the library's native headers, and the same token that plain
-# requests could not use.
+# The browser fingerprint the fallback presents.
 _IMPERSONATE = "chrome"
 
 
@@ -150,12 +150,12 @@ def _is_garmin_auth_failure(exc: Exception) -> bool:
     the dedicated auth error and the 401/403 that the library reports as a
     generic connection error ("API Error 401 - ...").
 
-    A 403 stays ambiguous even with the response in hand: the network block
-    in issue #444 answers with the same JSON ForbiddenException a refused
-    token gets. By the time a 403 reaches the relogin, the browser-fingerprint
-    retry has already failed, and a relogin keeps the stored token until the
-    new login succeeds, so a 403 that was only a passing block costs one
-    login attempt, not the session."""
+    A 403 stays ambiguous even with the response in hand: a network block, or
+    a ~/.netrc entry that replaces the token, gets the same JSON
+    ForbiddenException a refused token gets. By the time a 403 reaches the
+    relogin, the browser-fingerprint retry has already failed, and a relogin
+    keeps the stored token until the new login succeeds, so a 403 that was
+    only a passing block costs one login attempt, not the session."""
     if isinstance(exc, GarminConnectAuthenticationError):
         return True
     return isinstance(exc, GarminConnectConnectionError) and _status_code(exc) in (401, 403)
@@ -386,10 +386,11 @@ class GarminClient:
     def _call_with_fallback(self, call):
         """Run call; when the network refused it, run it once more through a
         browser fingerprint. A Cloudflare challenge or block qualifies, and so
-        does any 403, because the #444 block answers with a JSON 403 that
-        looks exactly like a refused token. Nothing else does: a 5xx or a
-        network failure is never replayed here, since the request may have
-        reached Garmin and an upload would be sent twice. Trying the fingerprint first costs one
+        does any 403, because a network block or a ~/.netrc entry that
+        replaces the token answers with a JSON 403 that looks exactly like a
+        refused token. Nothing else does: a 5xx or a network failure is never
+        replayed here, since the request may have reached Garmin and an
+        upload would be sent twice. Trying the fingerprint first costs one
         request; a relogin costs a login and risks a 429, and on a blocked
         network its own token check fails the same way."""
         if self._impersonate_always and self._can_impersonate():

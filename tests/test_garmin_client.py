@@ -599,7 +599,7 @@ def test_old_session_still_serves_calls_after_a_failed_relogin():
 
 
 # ---------------------------------------------------------------------------
-# Cloudflare blocks and the browser-fingerprint fallback (upstream issue #444)
+# Cloudflare blocks, JSON 403s, and the browser-fingerprint fallback
 #
 # These run the real library against fake transports: a requests adapter for
 # the library's own API session and a fake curl_cffi session for the fallback.
@@ -614,8 +614,9 @@ CF_PAGE = (
     b"<body><script src='/cdn-cgi/challenge-platform/h/b/orchestrate'></script></body></html>",
 )
 CF_MITIGATED = (403, {"Content-Type": "text/html", "cf-mitigated": "challenge"}, b"<html></html>")
-# Issue #444's block: the same JSON a refused token gets, behind the same
-# Cloudflare headers every API answer carries.
+# A network block, or a ~/.netrc entry that replaces the token (upstream issue
+# #444): the same JSON a refused token gets, behind the same Cloudflare headers
+# every API answer carries.
 JSON_403 = (
     403,
     {"Content-Type": "application/json", "Server": "cloudflare", "CF-RAY": "8f1-EWR"},
@@ -734,9 +735,9 @@ def test_cloudflare_page_on_upload_retries_through_curl_cffi_without_relogin():
 
 
 def test_json_403_on_a_read_tries_the_fingerprint_before_any_relogin():
-    # Issue #444: the block is a JSON 403. The fingerprint retry is one
-    # request; a relogin is a login, a 429 risk, and on that network its own
-    # token check fails the same way.
+    # A block or a ~/.netrc entry answers with a JSON 403. The fingerprint
+    # retry is one request; a relogin is a login, a 429 risk, and in either
+    # case its own token check fails the same way.
     garmin, _ = _real_garmin([JSON_403])
     client = _client_on(garmin)
     cffi = _FakeCffi([_ok({"dateWeightList": [{"weight": 86000}]})])

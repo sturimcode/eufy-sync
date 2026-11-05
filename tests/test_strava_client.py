@@ -389,3 +389,44 @@ def test_oauth_urls_stay_on_www_strava_com_after_the_move():
     from eufy_sync.strava_client import STRAVA_AUTH_URL, STRAVA_TOKEN_URL
     assert STRAVA_AUTH_URL == "https://www.strava.com/oauth/authorize"
     assert STRAVA_TOKEN_URL == "https://www.strava.com/oauth/token"
+
+
+def test_check_connection_401_asks_for_a_new_sign_in():
+    from eufy_sync.sync import PermanentSyncError
+    client = _client_on(date(2026, 11, 2))
+    with patch.object(client._client, "request", return_value=_status(401)):
+        with pytest.raises(PermanentSyncError, match="--setup-strava"):
+            client.check_connection()
+    client.close()
+
+
+def test_check_connection_403_points_at_the_subscription_not_a_sign_in():
+    # doctor offers any --setup-strava it finds in the message as the fix, and
+    # signing in again cannot unblock an app whose owner has no subscription.
+    from eufy_sync.sync import PermanentSyncError
+    client = _client_on(date(2026, 11, 2))
+    with patch.object(client._client, "request", return_value=_status(403)):
+        with pytest.raises(PermanentSyncError) as excinfo:
+            client.check_connection()
+    message = str(excinfo.value)
+    assert "HTTP 403" in message
+    assert "subscription" in message
+    assert "--setup-strava" not in message
+    client.close()
+
+
+@patch("eufy_sync.strava_client._save_tokens")
+@patch("eufy_sync.strava_client._load_tokens")
+def test_update_weight_403_names_both_causes(mock_load, mock_save):
+    from eufy_sync.sync import PermanentSyncError
+    mock_load.return_value = _make_tokens()
+    client = StravaClient(_make_config())
+    client.authenticate()
+    with patch.object(client._client, "request", return_value=_status(403)):
+        with pytest.raises(PermanentSyncError) as excinfo:
+            client.update_weight(86.2)
+    message = str(excinfo.value)
+    assert message.startswith("Failed to update Strava weight (HTTP 403).")
+    assert "subscription" in message
+    assert "eufy-sync --setup-strava" in message
+    client.close()

@@ -529,3 +529,20 @@ def test_garmin_and_strava_skipped_when_not_configured(tmp_path, monkeypatch, ca
     assert "garmin session" not in out
     assert "strava token" not in out
     assert code == 0
+
+
+def test_strava_403_fails_without_offering_a_new_sign_in(tmp_path, monkeypatch, capsys):
+    config_path, db_path = _patch_all_pass(tmp_path, monkeypatch)
+    doctor.StravaClient.return_value.check_connection.side_effect = RuntimeError(
+        "Strava returned HTTP 403 because the account that owns your Strava API app "
+        "likely has no active subscription; Strava has required one for API apps "
+        "since June 2026. Signing in again won't fix it."
+    )
+
+    code = doctor._run_doctor(config_path, db_path)
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "strava token" in out
+    assert "subscription" in out
+    assert "fix: eufy-sync --setup-strava" not in out
