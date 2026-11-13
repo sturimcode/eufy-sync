@@ -34,7 +34,7 @@ def test_upload_maps_fields_to_add_body_composition():
         muscle_mass=45.2,
         basal_met=1650,
         metabolic_age=28,
-        bmi=None,
+        bmi=23.1,
     )
     client.upload_body_composition(bc)
     kwargs = fake.add_body_composition.call_args.kwargs
@@ -43,7 +43,7 @@ def test_upload_maps_fields_to_add_body_composition():
     assert kwargs["percent_fat"] == 18.5
     assert kwargs["visceral_fat_rating"] == 8.0
     assert kwargs["basal_met"] == 1650
-    assert kwargs["bmi"] is None
+    assert kwargs["bmi"] == 23.1
 
 
 def test_has_weight_on_date_true_with_daily_summaries_key():

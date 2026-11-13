@@ -14,7 +14,7 @@ Syncs body composition from a Eufy smart scale to Garmin Connect, plus current w
 
 | Target | What syncs |
 |--------|------------|
-| Garmin Connect | Full body composition: weight, body fat, muscle mass, bone mass, hydration, BMR, visceral fat, metabolic age |
+| Garmin Connect | Full body composition: weight, BMI, body fat, muscle mass, bone mass, hydration, BMR, visceral fat, metabolic age |
 | Strava | Current weight |
 | Zwift (experimental, opt-in) | Current weight, verified after saving |
 

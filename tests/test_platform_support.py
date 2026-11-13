@@ -41,3 +41,24 @@ def test_macos_agent_status_warns_when_not_installed(tmp_path):
     assert status["label"] == "launch agent"
     assert status["detail"] == "not installed"
     assert status["fix"] == "eufy-sync --install-agent"
+
+
+def test_repair_agent_is_a_no_op_off_windows():
+    assert generic.repair_agent() is False
+    assert macos.repair_agent() is False
+
+
+def test_repair_agent_dispatches_to_the_active_platform():
+    with patch.object(platform_support, "_impl", return_value=generic):
+        assert platform_support.repair_agent() is False
+
+
+def test_a_failing_repair_never_stops_the_sync(monkeypatch):
+    from eufy_sync.cli import app
+
+    def boom():
+        raise OSError("wrapper is locked")
+
+    monkeypatch.setattr(app.platform_support, "repair_agent", boom)
+    app._repair_agent()  # must not raise
+

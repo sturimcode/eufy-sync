@@ -80,11 +80,19 @@ def _check_for_updates() -> None:
         pass  # never let update check break a sync
 
 
+# Right after a release, PyPI's JSON API can name a version that its package
+# index does not serve yet, and the pinned install fails as unsatisfiable for up
+# to about a minute (seen 2026-10-02 and 2026-11-05). One retry after this wait
+# covers it; a failure for any other reason costs one extra minute.
+UPDATE_RETRY_DELAY = 60
+
+
 def _quote_cmd(cmd: list[str]) -> str:
     """Join an argv into one command string, double-quoting any element that
     contains a space so a path like C:\\Program Files\\... survives as a single
-    argument when the string is handed to cmd.exe."""
-    return " ".join(f'"{part}"' if " " in part else part for part in cmd)
+    argument when the string is handed to cmd.exe. A parenthesis is quoted too:
+    the Windows retry runs inside a ( ) block, which a bare ) would close."""
+    return " ".join(f'"{part}"' if any(c in part for c in " ()") else part for part in cmd)
 
 
 def _self_update() -> None:
@@ -120,9 +128,21 @@ def _self_update() -> None:
         flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0) | getattr(
             subprocess, "CREATE_NEW_PROCESS_GROUP", 0
         )
-        inner = "timeout /t 2 /nobreak >nul & " + _quote_cmd(cmd) + " & echo. & pause"
+        # cmd binds || tighter than &, so the retry runs only when the first
+        # install fails, and the pause runs either way. The echoed text must
+        # stay free of the characters cmd treats as syntax.
+        install_line = _quote_cmd(cmd)
+        retry = (
+            f"echo Update failed. The new version may not be ready. Trying again in {UPDATE_RETRY_DELAY} seconds."
+            f" & timeout /t {UPDATE_RETRY_DELAY} /nobreak >nul & {install_line}"
+        )
+        inner = f"timeout /t 2 /nobreak >nul & {install_line} || ({retry}) & echo. & pause"
+        # One string, not an argv list: for a list, Windows subprocess escapes
+        # the quotes around a spaced installer path as \", which cmd.exe does
+        # not understand. As a string, cmd sees plain quotes, and the operators
+        # in the inner line stay inside them until the new console runs it.
         subprocess.Popen(
-            ["cmd", "/c", "start", "eufy-sync update", "cmd", "/c", inner],
+            f'cmd /c start "eufy-sync update" cmd /c "{inner}"',
             creationflags=flags,
         )
         print(f"Updating eufy-sync from v{__version__} to v{latest} in a new window...")
@@ -131,6 +151,13 @@ def _self_update() -> None:
 
     print(f"Updating eufy-sync from v{__version__} to v{latest}...")
     result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print(
+            "Update failed; the new version may not be available for download yet. "
+            f"Trying again in {UPDATE_RETRY_DELAY} seconds."
+        )
+        time.sleep(UPDATE_RETRY_DELAY)
+        result = subprocess.run(cmd)
     if result.returncode == 0:
         print(f"Updated to v{latest}.")
     else:

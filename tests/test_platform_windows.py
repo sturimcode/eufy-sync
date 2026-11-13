@@ -8,6 +8,11 @@ touching a real Task Scheduler.
 from __future__ import annotations
 
 import base64
+import ntpath
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -361,3 +366,173 @@ def test_offer_skips_without_a_tty(data_dir):
         windows.offer_agent()
 
     install.assert_not_called()
+
+
+# --- Full program path (issue #77) -------------------------------------------
+
+RELATIVE = ".\\eufy-sync.EXE"  # what shutil.which answers from the program's folder
+
+
+def _wrapper_bytes(data_dir):
+    return (data_dir / windows.WRAPPER_NAME).read_bytes()
+
+
+def test_install_stores_the_full_path_when_which_answers_a_relative_one(data_dir):
+    """Task Scheduler starts the wrapper outside the program's folder, where a
+    relative path finds nothing and every scheduled run fails unreported."""
+    with patch.object(windows.shutil, "which", return_value=RELATIVE), \
+         patch.object(windows.subprocess, "run", return_value=_ok()):
+        windows.install_agent()
+
+    content = _wrapper_bytes(data_dir).decode("utf-8")
+    assert content == windows._wrapper_content(ntpath.abspath(RELATIVE))
+    assert f'""""{RELATIVE}""' not in content
+
+
+def test_binary_keeps_a_full_path_as_it_is():
+    with patch.object(windows.shutil, "which", return_value="C:\\Tools\\eufy-sync.exe"):
+        assert windows._binary() == "C:\\Tools\\eufy-sync.exe"
+
+
+def test_agent_status_compares_against_the_full_path(data_dir):
+    _write_current_wrapper(data_dir, ntpath.abspath(RELATIVE))
+
+    with patch.object(windows.shutil, "which", return_value=RELATIVE), \
+         patch.object(windows.subprocess, "run", return_value=_ok()):
+        status = windows.agent_status()
+
+    assert status["status"] == "PASS"
+
+
+def test_repair_rewrites_a_wrapper_holding_a_relative_path(data_dir):
+    _write_current_wrapper(data_dir, RELATIVE)
+    full = "C:\\Tools\\eufy-sync.exe"
+
+    with patch.object(windows.shutil, "which", return_value=full):
+        assert windows.repair_agent() is True
+        assert _wrapper_bytes(data_dir) == windows._wrapper_content(full).encode("utf-8")
+        assert windows.repair_agent() is False  # already right: nothing to do
+
+
+def test_repair_points_the_wrapper_at_the_program_when_its_old_path_is_gone(data_dir, tmp_path):
+    _write_current_wrapper(data_dir, str(tmp_path / "removed" / "eufy-sync.exe"))
+    current = tmp_path / "current" / "eufy-sync.exe"
+    current.parent.mkdir()
+    current.write_text("")
+
+    with patch.object(windows.shutil, "which", return_value=str(current)):
+        assert windows.repair_agent() is True
+
+    # _binary resolves with Windows path rules, which on macOS and Linux also
+    # turn the separators around; on Windows the path comes back unchanged.
+    expected = windows._wrapper_content(ntpath.abspath(str(current)))
+    assert _wrapper_bytes(data_dir) == expected.encode("utf-8")
+
+
+def test_repair_leaves_a_working_wrapper_alone_when_path_finds_another_copy(data_dir, tmp_path):
+    """Running a test build from another folder must not repoint automatic
+    sync: the wrapper's program still exists, so it stays."""
+    installed = tmp_path / "installed" / "eufy-sync.exe"
+    installed.parent.mkdir()
+    installed.write_text("")
+    _write_current_wrapper(data_dir, str(installed))
+    before = _wrapper_bytes(data_dir)
+
+    with patch.object(windows.shutil, "which", return_value=str(tmp_path / "dev" / "eufy-sync.exe")):
+        assert windows.repair_agent() is False
+
+    assert _wrapper_bytes(data_dir) == before
+
+
+def test_repair_leaves_a_wrapper_it_cannot_read_alone(data_dir):
+    """Nothing shows an unrecognized wrapper is broken, so it is not
+    repointed at whatever PATH finds; --doctor reports it instead."""
+    (data_dir / windows.WRAPPER_NAME).write_text("a wrapper from somewhere else")
+    before = _wrapper_bytes(data_dir)
+
+    with patch.object(windows.shutil, "which", return_value="C:\\Tools\\eufy-sync.exe"):
+        assert windows.repair_agent() is False
+
+    assert _wrapper_bytes(data_dir) == before
+
+
+def test_binary_resolves_a_path_without_a_drive():
+    """Python 3.12 calls \\Tools\\eufy-sync.exe absolute, but it has no drive
+    and means another place when the task starts on a different one."""
+    with patch.object(windows.shutil, "which", return_value="\\Tools\\eufy-sync.exe"):
+        assert windows._binary() == ntpath.abspath("\\Tools\\eufy-sync.exe")
+
+
+def test_repair_does_nothing_without_automatic_sync(data_dir):
+    with patch.object(windows.shutil, "which", return_value="C:\\Tools\\eufy-sync.exe"):
+        assert windows.repair_agent() is False
+    assert not (data_dir / windows.WRAPPER_NAME).exists()
+
+
+def test_repair_does_nothing_when_eufy_sync_is_not_on_path(data_dir):
+    _write_current_wrapper(data_dir, RELATIVE)
+    before = _wrapper_bytes(data_dir)
+
+    with patch.object(windows.shutil, "which", return_value=None):
+        assert windows.repair_agent() is False
+
+    assert _wrapper_bytes(data_dir) == before
+
+
+# --- The real wrapper under Windows Script Host -------------------------------
+
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="runs the real wrapper on Windows")
+
+
+def _run_wrapper(data_dir, program):
+    wrapper = data_dir / windows.WRAPPER_NAME
+    wrapper.write_bytes(windows._wrapper_content(str(program)).encode("utf-8"))
+    # cscript prints a VBScript runtime error to the console where wscript,
+    # which Task Scheduler uses, would open a dialog.
+    return subprocess.run(["cscript", "//nologo", str(wrapper)], capture_output=True, text=True, timeout=120)
+
+
+@windows_only
+def test_wrapper_hands_back_the_programs_exit_code(data_dir, tmp_path):
+    program = tmp_path / "eufy-sync.cmd"
+    program.write_bytes(b"@echo ran %*\r\n@exit /b 7\r\n")
+
+    result = _run_wrapper(data_dir, program)
+
+    assert result.returncode == 7
+    assert "ran --headless" in (data_dir / "sync.log").read_text()
+
+
+@windows_only
+def test_wrapper_fails_with_an_exit_code_not_a_script_error_when_the_program_is_missing(data_dir, tmp_path):
+    """HomeVitals starts its program directly, so a missing or locked program
+    raises inside VBScript and leaves an error box that blocks every later
+    scheduled run. This wrapper starts it through cmd, which turns the same
+    failure into an exit code. Keep it that way."""
+    result = _run_wrapper(data_dir, tmp_path / "missing" / "eufy-sync.exe")
+
+    assert result.returncode != 0
+    assert "runtime error" not in (result.stdout + result.stderr).lower()
+
+
+@windows_only
+def test_binary_is_a_full_path_when_run_from_the_programs_folder(tmp_path, monkeypatch):
+    (tmp_path / "eufy-sync.cmd").write_bytes(b"@exit /b 0\r\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32"))
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    if shutil.which("eufy-sync") is None:
+        pytest.skip("this Python's shutil.which does not search the current folder")
+
+    binary = windows._binary()
+
+    assert ntpath.isabs(binary)
+    assert os.path.isfile(binary)
+
+
+@windows_only
+def test_binary_adds_the_drive_on_windows():
+    with patch.object(windows.shutil, "which", return_value="\\Tools\\eufy-sync.exe"):
+        drive, _ = ntpath.splitdrive(windows._binary())
+    assert drive
+

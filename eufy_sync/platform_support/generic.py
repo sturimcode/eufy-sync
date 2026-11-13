@@ -38,3 +38,8 @@ def agent_installed() -> bool:
 
 def purge_agent() -> None:
     pass
+
+
+def repair_agent() -> bool:
+    """Nothing to repair here; see the Windows implementation."""
+    return False

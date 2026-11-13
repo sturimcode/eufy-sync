@@ -60,3 +60,9 @@ def agent_installed() -> bool:
 
 def purge_agent() -> None:
     _impl().purge_agent()
+
+
+def repair_agent() -> bool:
+    """Fix an automatic-sync registration that can no longer start eufy-sync.
+    True when something was rewritten."""
+    return _impl().repair_agent()
