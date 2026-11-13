@@ -30,6 +30,15 @@ def _mock_pypi_response(version: str) -> MagicMock:
     return resp
 
 
+_CONSOLE_PREFIX = 'cmd /c start "eufy-sync update" cmd /c "'
+
+
+def _inner_of(line: str) -> str:
+    """The command line the detached update console runs."""
+    assert line.startswith(_CONSOLE_PREFIX) and line.endswith('"')
+    return line[len(_CONSOLE_PREFIX):-1]
+
+
 def test_skips_when_cache_is_fresh(tmp_path: Path):
     cache_file = tmp_path / "update_check"
     cache_file.write_text(str(time.time()))  # just checked
@@ -215,9 +224,14 @@ def test_self_update_windows_quotes_spaced_executable_path():
          patch("eufy_sync.cli.updater.subprocess.Popen") as mock_popen:
         _self_update()
 
-    inner = mock_popen.call_args.args[0][-1]
+    line = mock_popen.call_args.args[0]
+    inner = _inner_of(line)
     assert '"C:\\Program Files\\Python\\python.exe"' in inner
     assert "eufy-sync==9.9.9" in inner
+    # Handed over as one string, so no layer escapes those quotes as \",
+    # which cmd.exe would read literally.
+    assert isinstance(line, str)
+    assert '\\"' not in line
 
 
 def test_self_update_uses_pip_when_no_pipx():
@@ -278,12 +292,11 @@ def test_self_update_on_windows_uses_detached_console():
     mock_run.assert_not_called()
     mock_popen.assert_called_once()
 
-    argv = mock_popen.call_args.args[0]
-    assert argv[:4] == ["cmd", "/c", "start", "eufy-sync update"]
+    line = mock_popen.call_args.args[0]
+    assert line.startswith('cmd /c start "eufy-sync update" cmd /c "')
 
     # The pinned version is what the detached console actually installs.
-    inner = argv[-1]
-    assert "eufy-sync==9.9.9" in inner
+    assert "eufy-sync==9.9.9" in _inner_of(line)
 
 
 def test_self_update_on_darwin_runs_inline():
@@ -444,7 +457,7 @@ def _windows_inner(install_argv):
          patch("eufy_sync.install.install_argv", return_value=install_argv), \
          patch("eufy_sync.cli.updater.subprocess.Popen") as popen:
         _self_update()
-    return popen.call_args.args[0][-1]
+    return _inner_of(popen.call_args.args[0])
 
 
 def test_windows_update_console_retries_only_after_a_failure():
@@ -482,7 +495,10 @@ def test_windows_update_console_really_retries(tmp_path, monkeypatch, fails_firs
     marker = tmp_path / "failed-once"
     if not fails_first:
         marker.write_text("")
-    fake = tmp_path / "fake-install.cmd"
+    # A folder name with a space and parentheses, the hardest case for cmd.
+    folder = tmp_path / "Program Files (x86)"
+    folder.mkdir()
+    fake = folder / "fake-install.cmd"
     fake.write_bytes(
         (
             "@echo off\r\n"
@@ -494,8 +510,10 @@ def test_windows_update_console_really_retries(tmp_path, monkeypatch, fails_firs
     )
 
     inner = _windows_inner([str(fake), "eufy-sync==9.9.9"])
-    # No console here: timeout and pause return at once with stdin closed.
-    subprocess.run(["cmd", "/c", inner], stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+    # Two cmd layers, as in the real launch (cmd /c start ... cmd /c "inner"),
+    # minus start's new window. No console here: timeout and pause return at
+    # once with stdin closed.
+    subprocess.run(f'cmd /c cmd /c "{inner}"', stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
 
     assert attempts.read_text().count("attempt") == expected_attempts
 

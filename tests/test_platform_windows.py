@@ -423,7 +423,10 @@ def test_repair_points_the_wrapper_at_the_program_when_its_old_path_is_gone(data
     with patch.object(windows.shutil, "which", return_value=str(current)):
         assert windows.repair_agent() is True
 
-    assert _wrapper_bytes(data_dir) == windows._wrapper_content(str(current)).encode("utf-8")
+    # _binary resolves with Windows path rules, which on macOS and Linux also
+    # turn the separators around; on Windows the path comes back unchanged.
+    expected = windows._wrapper_content(ntpath.abspath(str(current)))
+    assert _wrapper_bytes(data_dir) == expected.encode("utf-8")
 
 
 def test_repair_leaves_a_working_wrapper_alone_when_path_finds_another_copy(data_dir, tmp_path):
@@ -439,6 +442,25 @@ def test_repair_leaves_a_working_wrapper_alone_when_path_finds_another_copy(data
         assert windows.repair_agent() is False
 
     assert _wrapper_bytes(data_dir) == before
+
+
+def test_repair_leaves_a_wrapper_it_cannot_read_alone(data_dir):
+    """Nothing shows an unrecognized wrapper is broken, so it is not
+    repointed at whatever PATH finds; --doctor reports it instead."""
+    (data_dir / windows.WRAPPER_NAME).write_text("a wrapper from somewhere else")
+    before = _wrapper_bytes(data_dir)
+
+    with patch.object(windows.shutil, "which", return_value="C:\\Tools\\eufy-sync.exe"):
+        assert windows.repair_agent() is False
+
+    assert _wrapper_bytes(data_dir) == before
+
+
+def test_binary_resolves_a_path_without_a_drive():
+    """Python 3.12 calls \\Tools\\eufy-sync.exe absolute, but it has no drive
+    and means another place when the task starts on a different one."""
+    with patch.object(windows.shutil, "which", return_value="\\Tools\\eufy-sync.exe"):
+        assert windows._binary() == ntpath.abspath("\\Tools\\eufy-sync.exe")
 
 
 def test_repair_does_nothing_without_automatic_sync(data_dir):
@@ -506,4 +528,11 @@ def test_binary_is_a_full_path_when_run_from_the_programs_folder(tmp_path, monke
 
     assert ntpath.isabs(binary)
     assert os.path.isfile(binary)
+
+
+@windows_only
+def test_binary_adds_the_drive_on_windows():
+    with patch.object(windows.shutil, "which", return_value="\\Tools\\eufy-sync.exe"):
+        drive, _ = ntpath.splitdrive(windows._binary())
+    assert drive
 

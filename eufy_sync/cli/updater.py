@@ -137,8 +137,12 @@ def _self_update() -> None:
             f" & timeout /t {UPDATE_RETRY_DELAY} /nobreak >nul & {install_line}"
         )
         inner = f"timeout /t 2 /nobreak >nul & {install_line} || ({retry}) & echo. & pause"
+        # One string, not an argv list: for a list, Windows subprocess escapes
+        # the quotes around a spaced installer path as \", which cmd.exe does
+        # not understand. As a string, cmd sees plain quotes, and the operators
+        # in the inner line stay inside them until the new console runs it.
         subprocess.Popen(
-            ["cmd", "/c", "start", "eufy-sync update", "cmd", "/c", inner],
+            f'cmd /c start "eufy-sync update" cmd /c "{inner}"',
             creationflags=flags,
         )
         print(f"Updating eufy-sync from v{__version__} to v{latest} in a new window...")

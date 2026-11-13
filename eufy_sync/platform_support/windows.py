@@ -137,9 +137,11 @@ def _binary() -> str | None:
     found = shutil.which("eufy-sync")
     if not found:
         return None
+    # Always resolved: Python 3.12's isabs accepts \Tools\eufy-sync.exe, which
+    # has no drive and points elsewhere when the task starts on another one.
     # ntpath rather than os.path, so tests on macOS and Linux treat a path like
     # C:\Tools\eufy-sync.exe as Windows does. On Windows they are one module.
-    return found if ntpath.isabs(found) else ntpath.abspath(found)
+    return ntpath.abspath(found)
 
 
 def _install_scheduled_task() -> None:
@@ -291,14 +293,19 @@ def repair_agent() -> bool:
     whose program has since moved or been removed. A wrapper that names a
     program which exists is left alone, even if PATH now finds a different
     copy first, so running a test build from another folder never repoints
-    automatic sync. Only the wrapper file changes: the task runs the wrapper
-    by a path that stays the same. True when the wrapper was rewritten.
+    automatic sync; so is a wrapper whose program path cannot be read. Only
+    the wrapper file changes: the task runs the wrapper by a path that stays
+    the same. True when the wrapper was rewritten.
     """
     wrapper_path = shared.DATA_DIR / WRAPPER_NAME
     if not wrapper_path.exists():
         return False
     match = _WRAPPED_BINARY.search(wrapper_path.read_bytes().decode("utf-8", "replace"))
-    if match and os.path.isabs(match.group(1)) and os.path.isfile(match.group(1)):
+    if not match:
+        # Not a wrapper this code wrote, so nothing shows its program is
+        # broken. --doctor still reports it; --install-agent replaces it.
+        return False
+    if os.path.isabs(match.group(1)) and os.path.isfile(match.group(1)):
         return False
     binary = _binary()
     if not binary:
