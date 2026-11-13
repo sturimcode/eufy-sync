@@ -255,6 +255,7 @@ def test_self_update_reports_failed_install(capsys):
          patch("eufy_sync.__version__", "1.0.0"), \
          patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
          patch("eufy_sync.install.shutil.which", return_value="/usr/local/bin/pipx"), \
+         patch("eufy_sync.cli.updater.time.sleep"), \
          patch("eufy_sync.cli.updater.subprocess.run", return_value=MagicMock(returncode=1)):
         _self_update()
 
@@ -390,3 +391,111 @@ def test_update_runs_when_garminconnect_and_curl_cffi_cannot_load(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "to v99.0.0" in result.stdout
+
+
+# --- Retry when PyPI's index lags a fresh release ------------------------------
+
+def _inline_update(run_results):
+    """Run _self_update on the inline (non-Windows) path with the given
+    install return codes; returns (run mock, sleep mock)."""
+    from eufy_sync.cli.updater import _self_update
+    with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Darwin"), \
+         patch("eufy_sync.install.shutil.which", return_value="/usr/local/bin/pipx"), \
+         patch("eufy_sync.cli.updater.time.sleep") as sleep, \
+         patch("eufy_sync.cli.updater.subprocess.run",
+               side_effect=[MagicMock(returncode=rc) for rc in run_results]) as run:
+        _self_update()
+    return run, sleep
+
+
+def test_self_update_retries_once_when_the_first_install_fails(capsys):
+    from eufy_sync.cli.updater import UPDATE_RETRY_DELAY
+    run, sleep = _inline_update([1, 0])
+
+    assert run.call_count == 2
+    assert run.call_args_list[0] == run.call_args_list[1]
+    sleep.assert_called_once_with(UPDATE_RETRY_DELAY)
+    out = capsys.readouterr().out
+    assert f"Trying again in {UPDATE_RETRY_DELAY} seconds" in out
+    assert "Updated to v9.9.9." in out
+
+
+def test_self_update_gives_the_manual_command_after_the_retry_fails(capsys):
+    run, _ = _inline_update([1, 1])
+
+    assert run.call_count == 2
+    assert "Update failed. Run manually: pipx install --force eufy-sync==9.9.9" in capsys.readouterr().out
+
+
+def test_self_update_does_not_wait_when_the_install_works(capsys):
+    run, sleep = _inline_update([0])
+
+    assert run.call_count == 1
+    sleep.assert_not_called()
+
+
+def _windows_inner(install_argv):
+    from eufy_sync.cli.updater import _self_update
+    with patch("eufy_sync.cli.updater._latest_pypi_version", return_value="9.9.9"), \
+         patch("eufy_sync.__version__", "1.0.0"), \
+         patch("eufy_sync.cli.updater.platform.system", return_value="Windows"), \
+         patch("eufy_sync.install.install_argv", return_value=install_argv), \
+         patch("eufy_sync.cli.updater.subprocess.Popen") as popen:
+        _self_update()
+    return popen.call_args.args[0][-1]
+
+
+def test_windows_update_console_retries_only_after_a_failure():
+    from eufy_sync.cli.updater import UPDATE_RETRY_DELAY
+    inner = _windows_inner(["uv", "tool", "install", "--force", "eufy-sync==9.9.9"])
+
+    first, _, rest = inner.partition(" || (")
+    assert first.endswith("uv tool install --force eufy-sync==9.9.9")
+    assert f"timeout /t {UPDATE_RETRY_DELAY} /nobreak >nul & uv tool install --force eufy-sync==9.9.9)" in rest
+    assert inner.endswith(") & echo. & pause")
+
+
+def test_windows_retry_message_is_safe_to_echo_in_cmd():
+    inner = _windows_inner(["uv", "tool", "install", "--force", "eufy-sync==9.9.9"])
+    message = inner.split("echo ", 1)[1].split(" & timeout", 1)[0]
+
+    assert not any(c in message for c in '()&|<>^%"!')
+
+
+def test_quote_cmd_quotes_parentheses_so_the_retry_block_stays_closed():
+    from eufy_sync.cli.updater import _quote_cmd
+
+    assert _quote_cmd(["C:\\Tools(x)\\python.exe", "-m", "pip"]) == '"C:\\Tools(x)\\python.exe" -m pip'
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="runs the real cmd chain on Windows")
+@pytest.mark.parametrize("fails_first, expected_attempts", [(True, 2), (False, 1)])
+def test_windows_update_console_really_retries(tmp_path, monkeypatch, fails_first, expected_attempts):
+    """Run the console's command line under cmd with a stand-in installer that
+    fails once, to prove the || ( ) chain does what the string tests say."""
+    from eufy_sync.cli import updater
+
+    monkeypatch.setattr(updater, "UPDATE_RETRY_DELAY", 1)
+    attempts = tmp_path / "attempts.log"
+    marker = tmp_path / "failed-once"
+    if not fails_first:
+        marker.write_text("")
+    fake = tmp_path / "fake-install.cmd"
+    fake.write_bytes(
+        (
+            "@echo off\r\n"
+            f'echo attempt>>"{attempts}"\r\n'
+            f'if exist "{marker}" exit /b 0\r\n'
+            f'type nul>"{marker}"\r\n'
+            "exit /b 1\r\n"
+        ).encode()
+    )
+
+    inner = _windows_inner([str(fake), "eufy-sync==9.9.9"])
+    # No console here: timeout and pause return at once with stdin closed.
+    subprocess.run(["cmd", "/c", inner], stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+
+    assert attempts.read_text().count("attempt") == expected_attempts
+

@@ -12,6 +12,7 @@ from garminconnect import GarminConnectTooManyRequestsError
 from eufy_sync import state as state_module
 from eufy_sync.config import UserConfig
 from eufy_sync.eufy_client import AmbiguousProfileError, EufyClient, EufyMeasurement
+from eufy_sync.network import is_transient_network_error
 from eufy_sync.reporting import SyncReport
 from eufy_sync.state import SyncState
 from eufy_sync.transform import transform
@@ -211,7 +212,12 @@ def sync_user(user: UserConfig, state: SyncState, backfill_days: int | None = No
                     client.authenticate()
                 targets.append((target_name, client))
             except Exception as e:
-                logger.error("Authentication failed for %s/%s: %s", user.name, target_name, e)
+                if is_transient_network_error(str(e)):
+                    # No connection is not a sign-in problem; calling it one
+                    # sends a reader of the log after the wrong fix.
+                    logger.warning("Could not reach %s for %s: %s", target_name, user.name, e)
+                else:
+                    logger.error("Authentication failed for %s/%s: %s", user.name, target_name, e)
                 errors[target_name] = str(e)
                 if first_exception is None:
                     first_exception = e

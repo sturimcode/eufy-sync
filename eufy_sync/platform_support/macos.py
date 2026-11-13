@@ -288,3 +288,8 @@ def uninstall_agent() -> None:
 
 def offer_agent() -> None:
     _offer_launch_agent()
+
+
+def repair_agent() -> bool:
+    """Nothing to repair here; see the Windows implementation."""
+    return False

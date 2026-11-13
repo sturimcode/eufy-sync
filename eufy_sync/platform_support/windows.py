@@ -9,14 +9,17 @@ stay stable across updates, so a pipx/uv upgrade that swaps the underlying
 binary does not require re-registering the task.
 
 The public entry points (notify, install_agent, uninstall_agent, offer_agent,
-agent_status, agent_installed, purge_agent) are what the platform_support
-package dispatches to. notify raises a native toast through PowerShell WinRT,
+agent_status, agent_installed, purge_agent, repair_agent) are what the
+platform_support package dispatches to. notify raises a native toast through PowerShell WinRT,
 fire-and-forget.
 """
 from __future__ import annotations
 
 import base64
+import ntpath
+import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -116,9 +119,32 @@ def _write_wrapper(binary_path: str):
     return wrapper_path
 
 
+# The program path inside a wrapper written by _wrapper_content, where every
+# quote of the inner cmd line is doubled. A Windows path cannot hold a quote.
+_WRAPPED_BINARY = re.compile(r'cmd /c """"(.+?)"" --headless')
+
+
+def _binary() -> str | None:
+    """The full path of eufy-sync on PATH, or None.
+
+    On Windows, shutil.which searches the current folder first and answers
+    ".\\eufy-sync.EXE" when run from the folder that holds the program. Task
+    Scheduler starts the wrapper somewhere else, where that relative path finds
+    nothing, so every scheduled run would fail before eufy-sync starts and
+    nothing would report it. Christopher (smithbuilt on GitHub) found this in
+    HomeVitals, his fork (issue #77).
+    """
+    found = shutil.which("eufy-sync")
+    if not found:
+        return None
+    # ntpath rather than os.path, so tests on macOS and Linux treat a path like
+    # C:\Tools\eufy-sync.exe as Windows does. On Windows they are one module.
+    return found if ntpath.isabs(found) else ntpath.abspath(found)
+
+
 def _install_scheduled_task() -> None:
     """Register the per-user scheduled task for automatic sync."""
-    binary = shutil.which("eufy-sync")
+    binary = _binary()
     if not binary:
         print("Warning: could not find eufy-sync on PATH. Skipping auto-sync setup.")
         return
@@ -200,7 +226,7 @@ def agent_status() -> dict | None:
         if result.returncode != 0:
             return {"status": "WARN", "label": "scheduled task", "detail": "not installed", "fix": "eufy-sync --install-agent"}
 
-        binary = shutil.which("eufy-sync")
+        binary = _binary()
         if binary and wrapper_path.read_bytes() != _wrapper_content(binary).encode("utf-8"):
             return {"status": "WARN", "label": "scheduled task", "detail": "outdated registration", "fix": "eufy-sync --install-agent"}
 
@@ -256,6 +282,31 @@ def notify(title: str, message: str, command: str | None = None) -> None:
         )
     except Exception:
         pass
+
+
+def repair_agent() -> bool:
+    """Rewrite the wrapper when the program path in it can no longer start.
+
+    Covers a wrapper registered with a relative path (see _binary) and one
+    whose program has since moved or been removed. A wrapper that names a
+    program which exists is left alone, even if PATH now finds a different
+    copy first, so running a test build from another folder never repoints
+    automatic sync. Only the wrapper file changes: the task runs the wrapper
+    by a path that stays the same. True when the wrapper was rewritten.
+    """
+    wrapper_path = shared.DATA_DIR / WRAPPER_NAME
+    if not wrapper_path.exists():
+        return False
+    match = _WRAPPED_BINARY.search(wrapper_path.read_bytes().decode("utf-8", "replace"))
+    if match and os.path.isabs(match.group(1)) and os.path.isfile(match.group(1)):
+        return False
+    binary = _binary()
+    if not binary:
+        return False
+    if wrapper_path.read_bytes() == _wrapper_content(binary).encode("utf-8"):
+        return False
+    _write_wrapper(binary)
+    return True
 
 
 def install_agent() -> None:

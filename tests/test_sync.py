@@ -424,6 +424,59 @@ def test_one_target_auth_failure_does_not_block_the_other(tmp_path: Path):
     state.close()
 
 
+def test_network_failure_at_sign_in_is_not_logged_as_an_auth_failure(tmp_path: Path, caplog, monkeypatch):
+    """With no connection, a target's sign-in fails with a DNS error. The log
+    must say the service could not be reached, not that authentication
+    failed, or a reader goes after the wrong fix."""
+    import httpx
+
+    caplog.set_level("INFO", logger="eufy_sync")
+    monkeypatch.setattr(logging.getLogger("eufy_sync"), "handlers", [caplog.handler])
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_and_strava_user()
+
+    fake_eufy = MagicMock()
+    fake_eufy.fetch_measurements.return_value = []
+    fake_garmin = MagicMock()
+    fake_strava = MagicMock()
+    fake_strava.authenticate.side_effect = httpx.ConnectError(
+        "[Errno 8] nodename nor servname provided, or not known"
+    )
+
+    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=fake_garmin), \
+         patch("eufy_sync.strava_client.StravaClient", return_value=fake_strava), \
+         patch("eufy_sync.sync.time.sleep"):
+        _, errors = sync_user(user, state, backfill_days=7)
+
+    assert "nodename nor servname" in errors["strava"]
+    assert "Could not reach strava for" in caplog.text
+    assert "Authentication failed" not in caplog.text
+    state.close()
+
+
+def test_sign_in_failure_that_is_not_the_network_is_still_an_auth_failure(tmp_path: Path, caplog, monkeypatch):
+    caplog.set_level("INFO", logger="eufy_sync")
+    monkeypatch.setattr(logging.getLogger("eufy_sync"), "handlers", [caplog.handler])
+    state = SyncState(tmp_path / "test.db")
+    user = _garmin_and_strava_user()
+
+    fake_eufy = MagicMock()
+    fake_eufy.fetch_measurements.return_value = []
+    fake_strava = MagicMock()
+    fake_strava.authenticate.side_effect = RuntimeError("Strava token revoked")
+
+    with patch("eufy_sync.sync.EufyClient", return_value=fake_eufy), \
+         patch("eufy_sync.garmin_client.GarminClient", return_value=MagicMock()), \
+         patch("eufy_sync.strava_client.StravaClient", return_value=fake_strava), \
+         patch("eufy_sync.sync.time.sleep"):
+        sync_user(user, state, backfill_days=7)
+
+    assert "Authentication failed for" in caplog.text
+    assert "Strava token revoked" in caplog.text
+    state.close()
+
+
 def test_all_targets_auth_failure_raises(tmp_path: Path):
     """If every target fails to authenticate, sync_user raises (whole-user
     failure) rather than silently doing nothing."""

@@ -109,6 +109,20 @@ def _sync_with_network_retry(user, state, **kwargs):
         sleep(NETWORK_RETRY_DELAY)
 
 
+def _repair_agent() -> None:
+    """Heal an automatic-sync registration that can no longer start eufy-sync.
+
+    The broken case (Windows: a relative or missing program path) fails every
+    scheduled run before eufy-sync starts, so nothing reports it; a run the
+    user starts is the only chance to notice. A problem here never stops the
+    sync."""
+    try:
+        if platform_support.repair_agent():
+            logger.info("Automatic sync could not start eufy-sync; rewrote its wrapper with the full program path")
+    except Exception as e:
+        logger.debug("Could not check the automatic sync registration: %s", e)
+
+
 def _exit_could_not_start(error: Exception) -> None:
     msg = f"eufy-sync could not start: {error}"
     print(msg)
@@ -382,6 +396,7 @@ def _main() -> None:
         _check_target(args, config)
 
         updater._check_for_updates()
+        _repair_agent()
 
         backfill = args.backfill_days
         if first_run and backfill is None:
