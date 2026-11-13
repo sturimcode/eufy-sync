@@ -61,6 +61,8 @@ eufy-sync --backfill-days 30
 
 The Eufy cloud reports weight at about 0.05 kg resolution. This can differ from the Eufy app, which may read Bluetooth data at higher precision. Most measurements match within 0.1 lb; some can differ by up to about 0.5 lb, with a little more rounding when Garmin converts kilograms to pounds.
 
+If Garmin Connect's website shows metabolic age as a huge number of years, the page is displaying Garmin's stored millisecond value without converting it back to years. The data is correct, and nothing needs repairing.
+
 For missing Garmin history, see [History recovery](command-reference.md#history-recovery).
 
 ## Platform problems
