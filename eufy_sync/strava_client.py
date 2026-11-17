@@ -7,7 +7,11 @@ Flow:
 2. Tokens stored in keychain (file fallback).
 3. Access tokens expire after 6 hours; refresh tokens are indefinite.
 4. On each sync, we PUT /athlete with the latest weight.
-5. The API host follows Strava's published move to api-v3.strava.com
+5. Strava lets the athlete untick individual permissions on the consent
+   screen. Since 2026-04-23 the token response lists the scopes actually
+   granted; we refuse a grant without profile:write and keep the list so a
+   later 403 can name the real cause.
+6. The API host follows Strava's published move to api-v3.strava.com
    (see _api_bases).
 """
 from __future__ import annotations
@@ -39,6 +43,35 @@ NEW_API_BASE_FROM = date(2027, 1, 4)
 CALLBACK_PORT = 8089
 REDIRECT_URI = f"http://localhost:{CALLBACK_PORT}/callback"
 REFRESH_SAFETY_MARGIN = 300  # seconds before expiry to trigger refresh
+REQUESTED_SCOPES = ("profile:write", "profile:read_all")
+WRITE_SCOPE = "profile:write"
+MISSING_WRITE_SCOPE_MESSAGE = (
+    "Strava did not grant permission to edit your profile, which eufy-sync "
+    "needs to update your weight. Run eufy-sync --setup-strava and leave the "
+    "profile permission ticked."
+)
+
+
+def _parse_scopes(raw) -> list[str] | None:
+    """Turn a granted-scope value into a list, or None when Strava sent none.
+
+    The token response uses spaces; the callback query string uses commas.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        return [str(s) for s in raw if s]
+    return [s for s in str(raw).replace(",", " ").split() if s]
+
+
+def _lacks_write_scope(tokens: dict | None) -> bool:
+    """True only when we know the granted scopes and profile:write is absent.
+
+    Grants saved before Strava returned scopes have no list; treat those as
+    unknown rather than missing.
+    """
+    scopes = (tokens or {}).get("scope")
+    return scopes is not None and WRITE_SCOPE not in scopes
 
 
 def _utc_today() -> date:
@@ -63,7 +96,7 @@ def _auth_url(client_id: str, state_value: str) -> str:
         "client_id": client_id,
         "response_type": "code",
         "redirect_uri": REDIRECT_URI,
-        "scope": "profile:write,profile:read_all",
+        "scope": ",".join(REQUESTED_SCOPES),
         "approval_prompt": "force",
         "state": state_value,
     })
@@ -79,6 +112,7 @@ def authorize_strava(config: StravaConfig) -> dict:
     Returns the token dict (access_token, refresh_token, expires_at).
     """
     captured_code: list[str] = []
+    captured_scope: list[str] = []
     captured_error: list[str] = []
     state_value = secrets.token_urlsafe(32)
 
@@ -94,6 +128,8 @@ def authorize_strava(config: StravaConfig) -> dict:
                     self.wfile.write(b"<html><body><h2>Invalid state parameter</h2></body></html>")
                     return
                 captured_code.append(query["code"][0])
+                if "scope" in query:
+                    captured_scope.append(query["scope"][0])
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()
@@ -179,6 +215,14 @@ def authorize_strava(config: StravaConfig) -> dict:
         "refresh_token": data["refresh_token"],
         "expires_at": data.get("expires_at", now + data.get("expires_in", 21600)),
     }
+    granted = _parse_scopes(data.get("scope"))
+    if granted is None and captured_scope:
+        granted = _parse_scopes(captured_scope[0])
+    if granted is not None:
+        tokens["scope"] = granted
+    if _lacks_write_scope(tokens):
+        # A grant that can't write the weight would only fail on every sync.
+        raise RuntimeError(MISSING_WRITE_SCOPE_MESSAGE)
 
     _save_tokens(tokens)
     logger.info("Strava authorization complete")
@@ -246,16 +290,25 @@ class StravaClient:
             )
 
         data = resp.json()
+        previous_scope = self._tokens.get("scope")
         self._tokens = {
             "access_token": data["access_token"],
             "refresh_token": data["refresh_token"],
             "expires_at": data.get("expires_at", time.time() + data.get("expires_in", 21600)),
         }
+        granted = _parse_scopes(data.get("scope"))
+        if granted is None:
+            granted = previous_scope
+        if granted is not None:
+            self._tokens["scope"] = granted
         _save_tokens(self._tokens)
         logger.info("Refreshed Strava access token")
 
     def check_connection(self) -> None:
         """Verify the saved session with a read-only athlete request."""
+        if _lacks_write_scope(self._tokens):
+            from eufy_sync.sync import PermanentSyncError
+            raise PermanentSyncError(MISSING_WRITE_SCOPE_MESSAGE)
         resp = self._api_request("GET", "/athlete")
         if resp.status_code == 401:
             from eufy_sync.sync import PermanentSyncError
@@ -289,6 +342,16 @@ class StravaClient:
             # 4xx (except 429) won't recover by retrying; signal that to _retry.
             if resp.status_code == 403:
                 from eufy_sync.sync import PermanentSyncError
+                if _lacks_write_scope(self._tokens):
+                    raise PermanentSyncError(
+                        f"Failed to update Strava weight (HTTP 403). {MISSING_WRITE_SCOPE_MESSAGE}"
+                    )
+                if (self._tokens or {}).get("scope") is not None:
+                    raise PermanentSyncError(
+                        "Failed to update Strava weight (HTTP 403). Profile edits are allowed, "
+                        "so the account that owns the API app likely needs its Strava "
+                        "subscription renewed. Signing in again won't fix it."
+                    )
                 raise PermanentSyncError(
                     "Failed to update Strava weight (HTTP 403). The account that owns the "
                     "API app may need its Strava subscription renewed. If the subscription "

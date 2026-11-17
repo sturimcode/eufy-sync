@@ -104,7 +104,7 @@ Strava requires an active subscription to create an API application and keep it 
 1. Create a Strava API app at <https://www.strava.com/settings/api>.
 2. Set **Authorization Callback Domain** to `localhost`.
 3. Run `eufy-sync --setup-strava` and enter the Client ID and Secret.
-4. Authorize eufy-sync in the browser when it opens.
+4. Authorize eufy-sync in the browser when it opens. Leave the permission to edit your profile ticked: Strava lets you untick it, but eufy-sync needs it to update your weight, and setup stops if it is missing.
 
 ## Adding Zwift (experimental)
 

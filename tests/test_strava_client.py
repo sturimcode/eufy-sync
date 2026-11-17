@@ -430,3 +430,149 @@ def test_update_weight_403_names_both_causes(mock_load, mock_save):
     assert "subscription" in message
     assert "eufy-sync --setup-strava" in message
     client.close()
+
+
+# --- Granted scopes (Strava changelog 2026-04-23: the token response lists them) ---
+
+
+def _run_authorize(token_body: dict, callback_scope: str | None = None):
+    """Drive authorize_strava end to end: the 'browser' hits the local
+    callback, and the token exchange returns ``token_body``."""
+    import threading
+    from urllib.parse import parse_qs, urlparse
+
+    from eufy_sync.strava_client import REDIRECT_URI, authorize_strava
+
+    def fake_browser(url):
+        state = parse_qs(urlparse(url).query)["state"][0]
+        params = {"code": "abc", "state": state}
+        if callback_scope is not None:
+            params["scope"] = callback_scope
+
+        def hit():
+            httpx.get(REDIRECT_URI, params=params, timeout=5)
+
+        threading.Thread(target=hit, daemon=True).start()
+        return True
+
+    token_resp = MagicMock()
+    token_resp.status_code = 200
+    token_resp.json.return_value = {
+        "access_token": "a", "refresh_token": "r", "expires_at": time.time() + 21600,
+        **token_body,
+    }
+    with patch("eufy_sync.strava_client.webbrowser.open", side_effect=fake_browser), \
+         patch("eufy_sync.strava_client.httpx.post", return_value=token_resp), \
+         patch("eufy_sync.strava_client._save_tokens") as mock_save:
+        try:
+            result = authorize_strava(_make_config())
+        except RuntimeError as e:
+            return e, mock_save
+    return result, mock_save
+
+
+def test_auth_url_still_requests_profile_write():
+    from urllib.parse import parse_qs, urlparse
+
+    from eufy_sync.strava_client import _auth_url
+    scope = parse_qs(urlparse(_auth_url("1", "s")).query)["scope"][0]
+    assert scope.split(",") == ["profile:write", "profile:read_all"]
+
+
+def test_authorize_saves_the_granted_scopes_from_the_token_response():
+    result, mock_save = _run_authorize({"scope": "profile:write profile:read_all"})
+    assert result["scope"] == ["profile:write", "profile:read_all"]
+    mock_save.assert_called_once()
+
+
+def test_authorize_refuses_a_grant_without_profile_write():
+    result, mock_save = _run_authorize({"scope": "read profile:read_all"})
+    assert isinstance(result, RuntimeError)
+    assert "--setup-strava" in str(result)
+    mock_save.assert_not_called()
+
+
+def test_authorize_falls_back_to_the_callback_scope():
+    result, _ = _run_authorize({}, callback_scope="read,profile:read_all")
+    assert isinstance(result, RuntimeError)
+    result, _ = _run_authorize({}, callback_scope="read,profile:write")
+    assert result["scope"] == ["read", "profile:write"]
+
+
+def test_authorize_without_any_scope_info_keeps_working():
+    result, mock_save = _run_authorize({})
+    assert "scope" not in result
+    mock_save.assert_called_once()
+
+
+@patch("eufy_sync.strava_client._save_tokens")
+@patch("eufy_sync.strava_client._load_tokens")
+def test_refresh_keeps_known_scopes_when_strava_omits_them(mock_load, mock_save):
+    mock_load.return_value = {**_make_tokens(expired=True), "scope": ["profile:write"]}
+    client = StravaClient(_make_config())
+    with patch.object(client._client, "post", return_value=_ok({
+        "access_token": "n", "refresh_token": "r2", "expires_at": time.time() + 21600,
+    })):
+        client.authenticate()
+    assert client._tokens["scope"] == ["profile:write"]
+    client.close()
+
+
+@patch("eufy_sync.strava_client._save_tokens")
+@patch("eufy_sync.strava_client._load_tokens")
+def test_refresh_takes_the_scopes_strava_returns(mock_load, mock_save):
+    mock_load.return_value = {**_make_tokens(expired=True), "scope": ["profile:write"]}
+    client = StravaClient(_make_config())
+    with patch.object(client._client, "post", return_value=_ok({
+        "access_token": "n", "refresh_token": "r2", "expires_at": time.time() + 21600,
+        "scope": "read",
+    })):
+        client.authenticate()
+    assert client._tokens["scope"] == ["read"]
+    client.close()
+
+
+@patch("eufy_sync.strava_client._save_tokens")
+@patch("eufy_sync.strava_client._load_tokens")
+def test_check_connection_flags_a_grant_without_profile_write(mock_load, mock_save):
+    from eufy_sync.sync import PermanentSyncError
+    mock_load.return_value = {**_make_tokens(), "scope": ["read"]}
+    client = _client_on(date(2026, 11, 2))
+    client.authenticate()
+    with patch.object(client._client, "request", return_value=_ok()) as mock_request:
+        with pytest.raises(PermanentSyncError, match="--setup-strava"):
+            client.check_connection()
+    mock_request.assert_not_called()
+    client.close()
+
+
+@patch("eufy_sync.strava_client._save_tokens")
+@patch("eufy_sync.strava_client._load_tokens")
+def test_update_weight_403_without_write_scope_asks_for_a_new_sign_in(mock_load, mock_save):
+    from eufy_sync.sync import PermanentSyncError
+    mock_load.return_value = {**_make_tokens(), "scope": ["read"]}
+    client = StravaClient(_make_config())
+    client.authenticate()
+    with patch.object(client._client, "request", return_value=_status(403)):
+        with pytest.raises(PermanentSyncError) as excinfo:
+            client.update_weight(86.2)
+    message = str(excinfo.value)
+    assert "--setup-strava" in message
+    assert "subscription" not in message
+    client.close()
+
+
+@patch("eufy_sync.strava_client._save_tokens")
+@patch("eufy_sync.strava_client._load_tokens")
+def test_update_weight_403_with_write_scope_points_at_the_subscription(mock_load, mock_save):
+    from eufy_sync.sync import PermanentSyncError
+    mock_load.return_value = {**_make_tokens(), "scope": ["profile:write"]}
+    client = StravaClient(_make_config())
+    client.authenticate()
+    with patch.object(client._client, "request", return_value=_status(403)):
+        with pytest.raises(PermanentSyncError) as excinfo:
+            client.update_weight(86.2)
+    message = str(excinfo.value)
+    assert "subscription" in message
+    assert "--setup-strava" not in message
+    client.close()
